@@ -22,6 +22,8 @@ versioning while the player remains experimental.
 - Submit normalized H.264 data to MVD one NAL unit per service call and accept
   every successful status defined by libctru, fixing rc8.1's false format-change
   failures on ordinary SPS+PPS extradata.
+- Accept MVD's `0x17000` success status from `MVDSTD_SetConfig`; rc9 mistakenly
+  surfaced that successful configuration as a fatal player error.
 - Stage each HLS segment atomically so failed or truncated HTTP transfers never
   expose partial transport-stream data to FFmpeg/MVD.
 - Use one 4 MiB ceiling for prefetch and live atomic segment staging, with

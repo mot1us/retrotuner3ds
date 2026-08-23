@@ -2190,7 +2190,10 @@ uint32_t Util_decoder_mvd_decode(uint8_t session)
 	 * failed SetConfig cannot prove MVD did not retain the physical address. */
 	output_bound_to_mvd = true;
 	result = MVDSTD_SetConfig(&util_decoder_mvd_config);
-	if(result != DEF_SUCCESS)
+	/* Unlike ordinary libctru Result APIs, MVD's configuration command reports
+	 * its successful service status as MVD_STATUS_OK (0x17000). Some libctru
+	 * builds may surface the IPC success value instead, so accept both. */
+	if(result != DEF_SUCCESS && result != MVD_STATUS_OK)
 	{
 		DEF_LOG_RESULT(MVDSTD_SetConfig, false, result);
 		goto nintendo_inflight_failed;
