@@ -93,6 +93,98 @@ static void test_malformed_and_capacity(void) {
            MINIIPTV_H264_OUTPUT_TOO_SMALL);
 }
 
+static void test_annexb_nal_iterator(void) {
+    const uint8_t normalized[] = {
+        0, 0, 1, 9, 0x10,
+        0, 0, 1, 0x67, 0x42, 0xc0, 0x1e,
+        0, 0, 1, 0x68, 0xce, 0x3c, 0x80
+    };
+    const size_t expected_sizes[] = {5, 7, 7};
+    const unsigned int expected_types[] = {9, 7, 8};
+    const uint8_t mixed_prefixes[] = {
+        0, 0, 0, 1, 9, 0x10,
+        0, 0, 1, 0x65, 0x88
+    };
+    const uint8_t leading_garbage[] = {0xff, 0, 0, 1, 9};
+    const uint8_t empty_nal[] = {0, 0, 1, 0, 0, 1, 9};
+    const uint8_t *nal = NULL;
+    size_t nal_size = 0;
+    size_t cursor = 0;
+
+    for (size_t index = 0; index < 3; index++) {
+        assert(miniiptv_h264_annexb_next_nal(
+                   normalized, sizeof(normalized), &cursor, &nal,
+                   &nal_size) == MINIIPTV_H264_NAL_ITER_FOUND);
+        assert(nal != NULL);
+        assert(nal_size == expected_sizes[index]);
+        assert(nal[0] == 0 && nal[1] == 0 && nal[2] == 1);
+        assert((nal[3] & 0x1f) == expected_types[index]);
+    }
+    assert(cursor == sizeof(normalized));
+    assert(miniiptv_h264_annexb_next_nal(
+               normalized, sizeof(normalized), &cursor, &nal,
+               &nal_size) == MINIIPTV_H264_NAL_ITER_END);
+    assert(nal == NULL && nal_size == 0);
+
+    cursor = 0;
+    assert(miniiptv_h264_annexb_next_nal(
+               mixed_prefixes, sizeof(mixed_prefixes), &cursor, &nal,
+               &nal_size) == MINIIPTV_H264_NAL_ITER_FOUND);
+    assert(nal_size == 6 && nal[3] == 1 && (nal[4] & 0x1f) == 9);
+    assert(miniiptv_h264_annexb_next_nal(
+               mixed_prefixes, sizeof(mixed_prefixes), &cursor, &nal,
+               &nal_size) == MINIIPTV_H264_NAL_ITER_FOUND);
+    assert(nal_size == 5 && nal[2] == 1 && (nal[3] & 0x1f) == 5);
+
+    cursor = 0;
+    assert(miniiptv_h264_annexb_next_nal(
+               leading_garbage, sizeof(leading_garbage), &cursor, &nal,
+               &nal_size) == MINIIPTV_H264_INVALID_DATA);
+    cursor = 0;
+    assert(miniiptv_h264_annexb_next_nal(
+               empty_nal, sizeof(empty_nal), &cursor, &nal,
+               &nal_size) == MINIIPTV_H264_INVALID_DATA);
+    cursor = sizeof(normalized) + 1;
+    assert(miniiptv_h264_annexb_next_nal(
+               normalized, sizeof(normalized), &cursor, &nal,
+               &nal_size) == MINIIPTV_H264_INVALID_ARGUMENT);
+}
+
+static void test_annexb_nal_resume_cursor(void) {
+    const uint8_t access_unit[] = {
+        0, 0, 1, 0x09, 0x10,
+        0, 0, 1, 0x06, 0x05, 0xff,
+        0, 0, 1, 0x65, 0x88, 0x84,
+        0, 0, 1, 0x0c, 0x80
+    };
+    const unsigned int expected_tail_types[] = {6, 5, 12};
+    const uint8_t *nal = NULL;
+    size_t nal_size = 0;
+    size_t cursor = 0;
+    size_t resume_cursor;
+
+    /* Model an MVD render boundary after AUD: the saved cursor must resume at
+     * SEI, not replay AUD or skip directly to the slice. */
+    assert(miniiptv_h264_annexb_next_nal(
+               access_unit, sizeof(access_unit), &cursor, &nal,
+               &nal_size) == MINIIPTV_H264_NAL_ITER_FOUND);
+    assert((nal[3] & 0x1f) == 9);
+    resume_cursor = cursor;
+    assert(resume_cursor == 5);
+
+    cursor = resume_cursor;
+    for (size_t index = 0; index < 3; index++) {
+        assert(miniiptv_h264_annexb_next_nal(
+                   access_unit, sizeof(access_unit), &cursor, &nal,
+                   &nal_size) == MINIIPTV_H264_NAL_ITER_FOUND);
+        assert((nal[3] & 0x1f) == expected_tail_types[index]);
+    }
+    assert(cursor == sizeof(access_unit));
+    assert(miniiptv_h264_annexb_next_nal(
+               access_unit, sizeof(access_unit), &cursor, &nal,
+               &nal_size) == MINIIPTV_H264_NAL_ITER_END);
+}
+
 static void test_parameter_guard(void) {
     const uint8_t baseline[] = {
         0, 0, 1, 0x67, 0x4d, 0x40, 0x1e,
@@ -270,6 +362,8 @@ int main(void) {
     test_captured_transport_stream_prefix();
     test_avcc_extradata_and_packet();
     test_malformed_and_capacity();
+    test_annexb_nal_iterator();
+    test_annexb_nal_resume_cursor();
     test_parameter_guard();
     test_malformed_input_safety();
     puts("h264_annexb tests passed");

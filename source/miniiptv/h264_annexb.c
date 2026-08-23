@@ -251,6 +251,44 @@ int miniiptv_h264_packet_to_annexb(const uint8_t *packet, size_t packet_size,
     return MINIIPTV_H264_OK;
 }
 
+int miniiptv_h264_annexb_next_nal(const uint8_t *annexb,
+                                  size_t annexb_size, size_t *cursor,
+                                  const uint8_t **nal, size_t *nal_size) {
+    size_t start;
+    size_t prefix_size;
+    size_t nal_begin;
+    size_t next = 0;
+    size_t next_prefix = 0;
+    size_t nal_end;
+
+    if (!annexb || !cursor || !nal || !nal_size)
+        return MINIIPTV_H264_INVALID_ARGUMENT;
+    *nal = NULL;
+    *nal_size = 0;
+    if (*cursor > annexb_size)
+        return MINIIPTV_H264_INVALID_ARGUMENT;
+    if (*cursor == annexb_size)
+        return MINIIPTV_H264_NAL_ITER_END;
+    if (!find_start_code(annexb, annexb_size, *cursor, &start,
+                         &prefix_size) || start != *cursor)
+        return MINIIPTV_H264_INVALID_DATA;
+
+    nal_begin = start + prefix_size;
+    nal_end = annexb_size;
+    if (find_start_code(annexb, annexb_size, nal_begin, &next,
+                        &next_prefix)) {
+        (void)next_prefix;
+        nal_end = next;
+    }
+    if (nal_begin >= nal_end || (annexb[nal_begin] & 0x80) != 0)
+        return MINIIPTV_H264_INVALID_DATA;
+
+    *nal = annexb + start;
+    *nal_size = nal_end - start;
+    *cursor = nal_end;
+    return MINIIPTV_H264_NAL_ITER_FOUND;
+}
+
 void miniiptv_h264_parameter_guard_reset(
     MiniIptvH264ParameterGuard *guard) {
     if (guard) memset(guard, 0, sizeof(*guard));

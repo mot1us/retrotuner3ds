@@ -72,6 +72,7 @@ int miniiptv_stage_hls(const MiniIptvChannel *channel, const char *output_path,
     if (!channel || !channel->url[0] || !output_path || !fetch || !info)
         return MINIIPTV_STAGE_INVALID_ARGUMENT;
     memset(info, 0, sizeof(*info));
+    info->segment_limit_bytes = MINIIPTV_SEGMENT_LIMIT;
 
     if (snprintf(part_path, sizeof(part_path), "%s.part", output_path) < 0 ||
         strlen(output_path) + 5 >= sizeof(part_path))
@@ -129,11 +130,17 @@ int miniiptv_stage_hls(const MiniIptvChannel *channel, const char *output_path,
 
     for (index = first; index < first + count; index++) {
         const HlsSegment *entry = &media.segments[index];
-        if (fetch(entry->url, channel->user_agent, channel->referrer,
-                  MINIIPTV_SEGMENT_LIMIT, &segment) != 0) {
+        int fetch_result = fetch(entry->url, channel->user_agent,
+                                 channel->referrer, MINIIPTV_SEGMENT_LIMIT,
+                                 &segment);
+        if (fetch_result != 0) {
+            info->last_network_result = fetch_result;
             result = MINIIPTV_STAGE_SEGMENT_FETCH_FAILED;
             goto cleanup;
         }
+        info->attempted_segment_bytes = segment.size;
+        info->reported_segment_bytes = segment.size;
+        info->last_network_result = 0;
         if (!looks_like_mpeg_ts((const unsigned char *)segment.data, segment.size)) {
             result = MINIIPTV_STAGE_NOT_MPEG_TS;
             goto cleanup;

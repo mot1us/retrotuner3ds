@@ -912,10 +912,17 @@ static void Vid_draw_miniiptv_live_overlay(void)
 		Draw_align_c(line, 8, 154, 10.0f,
 			live_error == 0 ? MINIIPTV_COLOR_MINT : DEF_DRAW_RED,
 			DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 304, 16);
-		snprintf(line, sizeof(line), "SEG:%luK/%ums MEDIA:%ums DL:%lu",
-			(unsigned long)(live_info.last_segment_bytes / 1024u),
-			live_info.last_download_milliseconds,
-			live_info.last_segment_milliseconds, downloaded);
+		if(live_error == MINIIPTV_STAGE_TOO_LARGE)
+			snprintf(line, sizeof(line), "SEG RX:%luK LEN:%luK CAP:%luK N:%d",
+				(unsigned long)(live_info.attempted_segment_bytes / 1024u),
+				(unsigned long)(live_info.reported_segment_bytes / 1024u),
+				(unsigned long)(live_info.segment_limit_bytes / 1024u),
+				live_info.last_network_result);
+		else
+			snprintf(line, sizeof(line), "SEG:%luK/%ums MEDIA:%ums DL:%lu",
+				(unsigned long)(live_info.last_segment_bytes / 1024u),
+				live_info.last_download_milliseconds,
+				live_info.last_segment_milliseconds, downloaded);
 		Draw_align_c(line, 8, 166, 9.0f, MINIIPTV_COLOR_CYAN,
 			DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 304, 12);
 	}

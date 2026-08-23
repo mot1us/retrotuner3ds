@@ -19,8 +19,13 @@ versioning while the player remains experimental.
 - Reject changed H.264 SPS/PPS data, invalid MVD buffers/configuration, corrupt
   packets, and unsupported processing results before another packet can enter
   the hardware service.
+- Submit normalized H.264 data to MVD one NAL unit per service call and accept
+  every successful status defined by libctru, fixing rc8.1's false format-change
+  failures on ordinary SPS+PPS extradata.
 - Stage each HLS segment atomically so failed or truncated HTTP transfers never
   expose partial transport-stream data to FFmpeg/MVD.
+- Use one 4 MiB ceiling for prefetch and live atomic segment staging, with
+  URL-free received/content-length diagnostics when that cap is exceeded.
 - Bound stalled MVD render waits, keep registered output surfaces alive until
   service exit, and join every live worker before freeing shared state.
 - Order START shutdown as producer cancellation, player-thread join, decoder

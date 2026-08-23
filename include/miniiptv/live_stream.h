@@ -15,12 +15,16 @@ typedef struct {
     unsigned long measured_bandwidth;
     unsigned long network_bandwidth;
     size_t last_segment_bytes;
+    size_t attempted_segment_bytes;
+    size_t reported_segment_bytes;
+    size_t segment_limit_bytes;
     unsigned int last_download_milliseconds;
     unsigned int last_segment_milliseconds;
     size_t rebuffer_target_bytes;
     unsigned int buffered_milliseconds;
     unsigned int width;
     unsigned int height;
+    int last_network_result;
     int rebuffering;
 } MiniIptvLiveInfo;
 

@@ -17,6 +17,11 @@ enum {
 #define MINIIPTV_H264_MAX_PARAMETER_SETS 1
 #define MINIIPTV_H264_MAX_PARAMETER_BYTES 512
 
+/* Return values for miniiptv_h264_annexb_next_nal(). Errors use the negative
+ * MINIIPTV_H264_* values above. */
+#define MINIIPTV_H264_NAL_ITER_END 0
+#define MINIIPTV_H264_NAL_ITER_FOUND 1
+
 typedef struct {
     uint8_t sps[MINIIPTV_H264_MAX_PARAMETER_SETS]
                [MINIIPTV_H264_MAX_PARAMETER_BYTES];
@@ -53,6 +58,19 @@ int miniiptv_h264_extradata_to_annexb(const uint8_t *extradata,
                                       size_t extradata_size, uint8_t *output,
                                       size_t output_capacity,
                                       size_t *output_size);
+
+/*
+ * Iterate one complete Annex-B NAL at a time. Set *cursor to zero before the
+ * first call. Returned data includes its 3- or 4-byte start code and remains
+ * owned by the caller. The cursor always advances to the next start code.
+ *
+ * MVD accepts one NAL per service call, so decoder code should first normalize
+ * input with the helpers above (which emit exact 00 00 01 prefixes), then use
+ * this iterator rather than submitting an entire multi-NAL access unit.
+ */
+int miniiptv_h264_annexb_next_nal(const uint8_t *annexb,
+                                  size_t annexb_size, size_t *cursor,
+                                  const uint8_t **nal, size_t *nal_size);
 
 /* Record exactly one SPS/PPS baseline, reject any distinct set, and reject VCL
  * data until both parameter types are known. Input must be Annex-B. */

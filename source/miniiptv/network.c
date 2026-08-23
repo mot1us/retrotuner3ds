@@ -31,7 +31,9 @@ typedef struct {
     MiniIptvCancelFunction should_cancel;
     void *cancel_userdata;
     size_t size;
+    size_t observed_size;
     size_t maximum_size;
+    size_t reported_size;
     int too_large;
 } CurlStream;
 
@@ -78,6 +80,8 @@ static size_t stream_write_callback(char *incoming, size_t size, size_t count,
     if (size && count > SIZE_MAX / size) return 0;
     bytes = size * count;
     if (!output || !output->write_data) return 0;
+    output->observed_size = bytes > SIZE_MAX - output->size
+        ? SIZE_MAX : output->size + bytes;
     if (bytes > output->maximum_size - output->size) {
         output->too_large = 1;
         return 0;
@@ -86,6 +90,7 @@ static size_t stream_write_callback(char *incoming, size_t size, size_t count,
                            output->write_userdata) != bytes)
         return 0;
     output->size += bytes;
+    output->observed_size = output->size;
     return bytes;
 }
 
@@ -98,6 +103,10 @@ static int stream_progress_callback(void *userdata, curl_off_t download_total,
     (void)upload_total;
     (void)upload_now;
     if (!output) return 0;
+    if (download_total > 0) {
+        uint64_t total = (uint64_t)download_total;
+        output->reported_size = total > SIZE_MAX ? SIZE_MAX : (size_t)total;
+    }
     if (download_total > 0 &&
         (uint64_t)download_total > (uint64_t)output->maximum_size) {
         output->too_large = 1;
@@ -272,13 +281,13 @@ int network_stream_data(const char *url, const char *user_agent,
                         MiniIptvStreamWriteFunction write_data,
                         void *write_userdata,
                         MiniIptvCancelFunction should_cancel,
-                        void *cancel_userdata, size_t *downloaded_size) {
+                        void *cancel_userdata, NetworkStreamMetrics *metrics) {
     CURL *curl = persistent_curl;
     CURLcode result;
     CurlStream output;
     long status = 0;
 
-    if (downloaded_size) *downloaded_size = 0;
+    if (metrics) memset(metrics, 0, sizeof(*metrics));
     if (!initialized || !curl || !url || !write_data || maximum_size == 0)
         return -1;
     memset(&output, 0, sizeof(output));
@@ -312,7 +321,10 @@ int network_stream_data(const char *url, const char *user_agent,
 
     result = curl_easy_perform(curl);
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
-    if (downloaded_size) *downloaded_size = output.size;
+    if (metrics) {
+        metrics->received_size = output.observed_size;
+        metrics->reported_size = output.reported_size;
+    }
     if (output.too_large || result == CURLE_FILESIZE_EXCEEDED)
         return MINIIPTV_NETWORK_TOO_LARGE;
     if (result == CURLE_ABORTED_BY_CALLBACK && should_cancel &&

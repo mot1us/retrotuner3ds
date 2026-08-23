@@ -17,6 +17,12 @@ typedef int (*MiniIptvCancelFunction)(void *userdata);
 typedef size_t (*MiniIptvStreamWriteFunction)(const unsigned char *data,
                                               size_t size, void *userdata);
 
+typedef struct {
+    size_t received_size;
+    /* Content-Length reported by the server, or zero when it is unknown. */
+    size_t reported_size;
+} NetworkStreamMetrics;
+
 int network_init(void);
 void network_exit(void);
 int network_get_text(const char *url, const char *user_agent, const char *referrer,
@@ -33,7 +39,7 @@ int network_stream_data(const char *url, const char *user_agent,
                         MiniIptvStreamWriteFunction write_data,
                         void *write_userdata,
                         MiniIptvCancelFunction should_cancel,
-                        void *cancel_userdata, size_t *downloaded_size);
+                        void *cancel_userdata, NetworkStreamMetrics *metrics);
 void network_response_free(NetworkTextResponse *response);
 
 #endif

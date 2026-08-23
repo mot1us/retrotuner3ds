@@ -7,6 +7,7 @@
 
 static int bad_segment;
 static const char *media_manifest;
+static size_t observed_segment_limit;
 
 static int set_response(NetworkTextResponse *response, const void *data, size_t size,
                         const char *final_url) {
@@ -39,6 +40,7 @@ static int mock_fetch(const char *url, const char *user_agent, const char *refer
     if (strcmp(url, "https://example.test/low/media.m3u8") == 0)
         return set_response(response, media_manifest, strlen(media_manifest), url);
     if (strstr(url, ".ts")) {
+        observed_segment_limit = maximum_size;
         if (maximum_size < sizeof(packet)) return -2;
         memset(packet, 0, sizeof(packet));
         packet[0] = bad_segment ? 0x00 : 0x47;
@@ -74,6 +76,7 @@ static void test_success(void) {
 
     media_manifest = manifest;
     bad_segment = 0;
+    observed_segment_limit = 0;
     remove(path);
     assert(miniiptv_stage_hls(&test_channel, path, mock_fetch, &info) == MINIIPTV_STAGE_OK);
     assert(info.segments_staged == 3);
@@ -81,6 +84,10 @@ static void test_success(void) {
     assert(info.duration_staged == 18.0);
     assert(info.first_sequence == 101);
     assert(info.last_sequence == 103);
+    assert(info.segment_limit_bytes == MINIIPTV_SEGMENT_LIMIT);
+    assert(info.attempted_segment_bytes == 376u);
+    assert(info.reported_segment_bytes == 376u);
+    assert(observed_segment_limit == MINIIPTV_SEGMENT_LIMIT);
     file = fopen(path, "rb");
     assert(file);
     assert(fseek(file, 0, SEEK_END) == 0);

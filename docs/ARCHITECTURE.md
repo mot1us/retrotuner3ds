@@ -17,7 +17,7 @@ return and tears down the live session before another channel is selected.
 3. `hls.c` parses master and media playlists and resolves relative URLs.
 4. `live_stream.c` selects the lowest advertised rendition and downloads live
    MPEG-TS segments on a producer thread.
-5. Each segment is first capped and staged in a 2 MiB ordinary-RAM buffer. Only
+5. Each segment is first capped and staged in a 4 MiB ordinary-RAM buffer. Only
    a complete, validated MPEG-TS response is committed to playback.
 6. A static 6 MiB BSS ring separates network timing from playback while
    avoiding scarce linear memory.
@@ -26,9 +26,10 @@ return and tears down the live session before another channel is selected.
 ## Playback path
 
 FFmpeg demuxes MPEG-TS and AAC. Compatible H.264 access units are normalized by
-`h264_annexb.c` and submitted to the New 3DS MVD hardware decoder. The inherited
-player uploads decoded frames through the existing Citro3D rendering path and
-uses the existing audio output path.
+`h264_annexb.c`, safety-checked, and submitted to the New 3DS MVD hardware
+decoder one NAL unit per service call. The inherited player uploads decoded
+frames through the existing Citro3D rendering path and uses the existing audio
+output path.
 
 RetroTuner3DS scales decoded images for the 400x240 top display, but it does not
 transcode the source. Decode cost therefore still depends on the original
@@ -37,11 +38,14 @@ resolution, profile, frame rate, and bitrate.
 ## Memory and failure boundaries
 
 - Stream ring: 6 MiB in ordinary application BSS.
-- Manifest and segment requests have fixed maximum sizes.
+- Manifest and segment requests have fixed maximum sizes. The shared 4 MiB
+  segment ceiling applies to both prefetch and live playback, and failures
+  report received size, server length when known, and the cap without logging
+  the channel URL.
 - Live MVD input is restricted to one H.264/YUV420 track at no more than
   640x480 and, when reported, no more than 30 fps. Oversized sources fail
   before `mvdstdInit`.
-- H.264 SPS/PPS changes, invalid physical buffers, incomplete MVD results, and
+- H.264 SPS/PPS changes, invalid physical buffers, non-success MVD results, and
   demux-detected packet corruption trigger serialized teardown instead of
   feeding more packets to the decoder service.
 - The producer pauses at a high-water mark. Playback only enters its bounded

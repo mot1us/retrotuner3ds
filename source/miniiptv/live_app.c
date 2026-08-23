@@ -173,7 +173,7 @@ static bool begin_player_handoff(void) {
 }
 
 static void worker_main(void *unused) {
-    MiniIptvStageInfo info;
+    MiniIptvStageInfo info = {0};
     int result;
     bool auto_start = false;
     bool exiting = false;
@@ -210,8 +210,18 @@ static void worker_main(void *unused) {
         app.state = LIVE_APP_ERROR;
         app.pending_channel_step = 0;
         app.switching_from_player = false;
-        snprintf(app.status, sizeof(app.status), "%s (%d)",
-                 stage_error_text(result), result);
+        if (result == MINIIPTV_STAGE_TOO_LARGE && info.segment_limit_bytes > 0) {
+            size_t observed = info.reported_segment_bytes
+                ? info.reported_segment_bytes : info.attempted_segment_bytes;
+            snprintf(app.status, sizeof(app.status),
+                     "SEGMENT TOO LARGE // %s %lu / %lu KiB",
+                     info.reported_segment_bytes ? "LEN" : "RX",
+                     (unsigned long)(observed / 1024u),
+                     (unsigned long)(info.segment_limit_bytes / 1024u));
+        } else {
+            snprintf(app.status, sizeof(app.status), "%s (%d)",
+                     stage_error_text(result), result);
+        }
     }
     LightLock_Unlock(&app.lock);
     Draw_set_refresh_needed(true);

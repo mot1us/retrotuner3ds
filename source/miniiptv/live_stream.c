@@ -13,14 +13,17 @@
 #include "system/util/util.h"
 
 #define STREAM_RING_SIZE (6u * 1024u * 1024u)
-#define STREAM_SEGMENT_LIMIT (2u * 1024u * 1024u)
 #define STREAM_INITIAL_SEGMENTS 1
 #define STREAM_REBUFFER_TARGET_MS 3000u
 #define STREAM_REBUFFER_MIN_BYTES (128u * 1024u)
 #define STREAM_REBUFFER_MAX_BYTES (768u * 1024u)
-#define STREAM_HIGH_WATER_BYTES (STREAM_RING_SIZE - STREAM_SEGMENT_LIMIT)
+#define STREAM_HIGH_WATER_BYTES (STREAM_RING_SIZE - MINIIPTV_SEGMENT_LIMIT)
 #define STREAM_SLEEP_US 10000ULL
 #define TS_PACKET_SIZE 188u
+
+#if MINIIPTV_SEGMENT_LIMIT >= STREAM_RING_SIZE
+#error "The atomic HLS segment limit must be smaller than the live ring"
+#endif
 
 typedef struct {
     LightLock lock;
@@ -51,6 +54,9 @@ typedef struct {
     unsigned long network_bandwidth;
     unsigned long downloaded_segments;
     unsigned long underruns;
+    size_t attempted_segment_bytes;
+    size_t reported_segment_bytes;
+    int last_network_result;
     int last_error;
 } LiveStream;
 
@@ -62,7 +68,7 @@ typedef struct {
 static unsigned char stream_ring[STREAM_RING_SIZE];
 /* Commit complete segments atomically. A failed/truncated HTTP transfer must
  * never leave a partial access unit in the ring where FFmpeg/MVD can see it. */
-static unsigned char segment_staging[STREAM_SEGMENT_LIMIT];
+static unsigned char segment_staging[MINIIPTV_SEGMENT_LIMIT];
 static LiveStream stream;
 
 static unsigned long measured_bandwidth_locked(void) {
@@ -122,7 +128,7 @@ static bool is_complete_mpeg_ts(const unsigned char *data, size_t size) {
 }
 
 static bool ring_commit_segment(const unsigned char *data, size_t size) {
-    if (!data || size == 0 || size > STREAM_SEGMENT_LIMIT ||
+    if (!data || size == 0 || size > MINIIPTV_SEGMENT_LIMIT ||
         size > STREAM_RING_SIZE)
         return false;
     while (true) {
@@ -163,7 +169,7 @@ static size_t segment_write_callback(const unsigned char *data, size_t size,
                                      void *userdata) {
     SegmentWriter *writer = userdata;
     if (!writer || (!data && size)) return 0;
-    if (size > STREAM_SEGMENT_LIMIT - writer->total_size) return 0;
+    if (size > MINIIPTV_SEGMENT_LIMIT - writer->total_size) return 0;
     memcpy(segment_staging + writer->total_size, data, size);
     writer->total_size += size;
     return size;
@@ -171,7 +177,7 @@ static size_t segment_write_callback(const unsigned char *data, size_t size,
 
 static int stream_segment(const HlsSegment *segment, size_t *downloaded_size) {
     SegmentWriter writer;
-    size_t bytes = 0;
+    NetworkStreamMetrics metrics = {0};
     uint64_t download_started;
     uint64_t download_elapsed;
     bool too_large = false;
@@ -183,18 +189,21 @@ static int stream_segment(const HlsSegment *segment, size_t *downloaded_size) {
     download_started = osGetTime();
     result = network_stream_data(segment->url, stream.channel.user_agent,
                                  stream.channel.referrer,
-                                 STREAM_SEGMENT_LIMIT,
+                                 MINIIPTV_SEGMENT_LIMIT,
                                  segment_write_callback, &writer,
-                                 curl_should_cancel, NULL, &bytes);
+                                 curl_should_cancel, NULL, &metrics);
     download_elapsed = osGetTime() - download_started;
     too_large = result == MINIIPTV_NETWORK_TOO_LARGE;
-    if (result == 0 && bytes == writer.total_size)
+    if (result == 0 && metrics.received_size == writer.total_size)
         valid_ts = is_complete_mpeg_ts(segment_staging, writer.total_size);
     if (result == 0 && valid_ts)
         committed = ring_commit_segment(segment_staging, writer.total_size);
     if (downloaded_size) *downloaded_size = committed ? writer.total_size : 0;
 
     LightLock_Lock(&stream.lock);
+    stream.attempted_segment_bytes = metrics.received_size;
+    stream.reported_segment_bytes = metrics.reported_size;
+    stream.last_network_result = result;
     if (result == 0 && valid_ts && committed) {
         if (download_elapsed == 0) download_elapsed = 1;
         stream.downloaded_segments++;
@@ -395,6 +404,7 @@ int miniiptv_live_stream_start(const MiniIptvChannel *channel,
     stream.initialized = true;
     stream.channel = *channel;
     memset(initial_info, 0, sizeof(*initial_info));
+    initial_info->segment_limit_bytes = MINIIPTV_SEGMENT_LIMIT;
 
     result = resolve_initial_playlist(channel, &media);
     if (result != MINIIPTV_STAGE_OK) goto failure;
@@ -424,6 +434,13 @@ int miniiptv_live_stream_start(const MiniIptvChannel *channel,
             goto failure;
         }
         result = stream_segment(&media.segments[i], &bytes);
+        LightLock_Lock(&stream.lock);
+        initial_info->attempted_segment_bytes =
+            stream.attempted_segment_bytes;
+        initial_info->reported_segment_bytes =
+            stream.reported_segment_bytes;
+        initial_info->last_network_result = stream.last_network_result;
+        LightLock_Unlock(&stream.lock);
         if (result != MINIIPTV_STAGE_OK) goto failure;
         if (initial_info->segments_staged == 0)
             initial_info->first_sequence = media.segments[i].sequence;
@@ -551,12 +568,16 @@ void miniiptv_live_stream_get_info(MiniIptvLiveInfo *info) {
     info->measured_bandwidth = measured_bandwidth_locked();
     info->network_bandwidth = stream.network_bandwidth;
     info->last_segment_bytes = stream.last_segment_bytes;
+    info->attempted_segment_bytes = stream.attempted_segment_bytes;
+    info->reported_segment_bytes = stream.reported_segment_bytes;
+    info->segment_limit_bytes = MINIIPTV_SEGMENT_LIMIT;
     info->last_download_milliseconds = stream.last_download_milliseconds;
     info->last_segment_milliseconds = stream.last_segment_milliseconds;
     info->rebuffer_target_bytes = rebuffer_target_bytes_locked();
     info->buffered_milliseconds = buffered_milliseconds_locked();
     info->width = stream.variant_width;
     info->height = stream.variant_height;
+    info->last_network_result = stream.last_network_result;
     info->rebuffering = stream.rebuffering;
     LightLock_Unlock(&stream.lock);
 }

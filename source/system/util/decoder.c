@@ -45,6 +45,10 @@ static void Util_decoder_audio_exit(uint8_t session);
 static void Util_decoder_video_exit(uint8_t session);
 static void Util_decoder_mvd_exit(uint8_t session);
 static bool Util_decoder_mvd_reserve_packet(size_t required_size);
+static void Util_decoder_mvd_reset_packet_progress(void);
+static uint32_t Util_decoder_mvd_process_annexb(uint8_t* annexb,
+	size_t annexb_size, size_t* cursor, unsigned int* nal_count,
+	bool parameters_only, bool* render_allowed, uint32_t* last_status);
 static void Util_decoder_subtitle_exit(uint8_t session);
 static int Util_decoder_live_stream_read(void *opaque, uint8_t *buffer,
 	int buffer_size);
@@ -87,9 +91,18 @@ static bool util_mvd_video_decoder_should_skip_process_nal_unit = false;
 /* A fatal MVD result poisons the session until a full exit/re-init. This is a
  * decoder-level backstop so no caller can feed another packet after failure. */
 static bool util_mvd_video_decoder_poisoned = false;
+static uint32_t util_mvd_video_decoder_poison_error = DEF_ERR_UNSAFE_VIDEO_STREAM;
 static uint8_t util_mvd_video_decoder_current_cached_pts_index = 0;
 static uint8_t util_mvd_video_decoder_next_cached_pts_index = 0;
 static uint8_t* util_mvd_video_decoder_packet = NULL;
+/* The normalized current AVPacket stays in the linear scratch buffer while
+ * render calls interleave with one-NAL submissions. These fields are reset
+ * only when that AVPacket is replaced, consumed, discarded, or torn down. */
+static bool util_mvd_video_decoder_packet_prepared = false;
+static bool util_mvd_video_decoder_packet_pts_cached = false;
+static size_t util_mvd_video_decoder_packet_cursor = 0;
+static size_t util_mvd_video_decoder_packet_normalized_size = 0;
+static unsigned int util_mvd_video_decoder_packet_nal_count = 0;
 static MiniIptvH264ParameterGuard util_mvd_parameter_guard = { 0, };
 static uint16_t util_mvd_video_decoder_available_raw_image[DEF_DECODER_MAX_SESSIONS] = { 0, };
 static uint16_t util_mvd_video_decoder_raw_image_ready_index[DEF_DECODER_MAX_SESSIONS] = { 0, };
@@ -102,6 +115,7 @@ static AVFrame* util_mvd_video_decoder_raw_image[DEF_DECODER_MAX_SESSIONS][DEF_D
 
 #define MINIIPTV_MVD_MAX_RAW_IMAGES 3
 #define MINIIPTV_MVD_RENDER_BUSY_LIMIT 500
+#define MINIIPTV_MVD_MAX_NALS_PER_ACCESS_UNIT 256
 
 static bool util_subtitle_decoder_init[DEF_DECODER_MAX_SESSIONS][DEF_DECODER_MAX_SUBTITLE_TRACKS] = { 0, };
 static bool util_subtitle_decoder_packet_ready[DEF_DECODER_MAX_SESSIONS][DEF_DECODER_MAX_SUBTITLE_TRACKS] = { 0, };
@@ -897,6 +911,8 @@ uint32_t Util_decoder_mvd_init(uint8_t session)
 	util_mvd_video_decoder_available_raw_image[session] = 0;
 	util_mvd_video_decoder_should_skip_process_nal_unit = false;
 	util_mvd_video_decoder_poisoned = false;
+	util_mvd_video_decoder_poison_error = DEF_ERR_UNSAFE_VIDEO_STREAM;
+	Util_decoder_mvd_reset_packet_progress();
 	miniiptv_h264_parameter_guard_reset(&util_mvd_parameter_guard);
 
 	/* Lazily allocate the per-session Annex-B packet scratch buffer. */
@@ -1604,6 +1620,8 @@ uint32_t Util_decoder_ready_video_packet(int8_t packet_index, int8_t session)
 	util_video_decoder_cache_packet_ready[session][packet_index] = false;
 	util_video_decoder_packet_ready[session][packet_index] = true;
 	av_packet_free(&util_video_decoder_cache_packet[session][packet_index]);
+	if(packet_index == 0)
+		Util_decoder_mvd_reset_packet_progress();
 	return DEF_SUCCESS;
 
 	invalid_arg:
@@ -1976,10 +1994,105 @@ static bool Util_decoder_mvd_reserve_packet(size_t required_size)
 	if(!new_packet)
 		return false;
 
-	free(util_mvd_video_decoder_packet);
+	if(util_mvd_video_decoder_packet)
+		linearFree(util_mvd_video_decoder_packet);
 	util_mvd_video_decoder_packet = new_packet;
 	util_mvd_video_decoder_packet_size = (uint32_t)required_size;
 	return true;
+}
+
+static void Util_decoder_mvd_reset_packet_progress(void)
+{
+	util_mvd_video_decoder_packet_prepared = false;
+	util_mvd_video_decoder_packet_pts_cached = false;
+	util_mvd_video_decoder_packet_cursor = 0;
+	util_mvd_video_decoder_packet_normalized_size = 0;
+	util_mvd_video_decoder_packet_nal_count = 0;
+}
+
+static uint32_t Util_decoder_mvd_process_annexb(uint8_t* annexb,
+	size_t annexb_size, size_t* cursor, unsigned int* nal_count,
+	bool parameters_only, bool* render_allowed, uint32_t* last_status)
+{
+	if(!annexb || annexb_size == 0 || !cursor || !nal_count
+	|| !render_allowed || !last_status || *cursor > annexb_size)
+		return DEF_ERR_INVALID_ARG;
+
+	*render_allowed = false;
+	*last_status = MVD_STATUS_OK;
+	while(*cursor < annexb_size)
+	{
+		const uint8_t* nal = NULL;
+		uint8_t* mvd_nal = annexb + *cursor;
+		size_t nal_size = 0;
+		size_t previous_cursor = *cursor;
+		size_t next_cursor = previous_cursor;
+		uint32_t cache_result = DEF_SUCCESS;
+		uint32_t status = MVD_STATUS_OK;
+		int32_t iterator_result = miniiptv_h264_annexb_next_nal(
+			annexb, annexb_size, &next_cursor, &nal, &nal_size);
+		MVDSTD_ProcessNALUnitOut process_out = { 0, };
+
+		if(iterator_result != MINIIPTV_H264_NAL_ITER_FOUND
+		|| next_cursor <= previous_cursor || !nal
+		|| nal != annexb + previous_cursor || nal_size < 4
+		|| nal[0] != 0 || nal[1] != 0 || nal[2] != 1
+		|| nal_size > UINT32_MAX)
+			return DEF_ERR_UNSAFE_VIDEO_STREAM;
+		if(++(*nal_count) > MINIIPTV_MVD_MAX_NALS_PER_ACCESS_UNIT)
+			return DEF_ERR_UNSAFE_VIDEO_STREAM;
+		if(parameters_only && ((nal[3] & 0x1F) != 7
+		&& (nal[3] & 0x1F) != 8))
+			return DEF_ERR_UNSAFE_VIDEO_STREAM;
+		if(osConvertVirtToPhys(nal) == 0)
+			return DEF_ERR_OUT_OF_LINEAR_MEMORY;
+
+		/* MVD reads the NAL through its physical address. Flush each bounded,
+		 * normalized NAL separately, matching libctru's official example. */
+		cache_result = GSPGPU_FlushDataCache(mvd_nal, (uint32_t)nal_size);
+		if(cache_result != DEF_SUCCESS)
+		{
+			DEF_LOG_RESULT(GSPGPU_FlushDataCache, false, cache_result);
+			return cache_result;
+		}
+		status = mvdstdProcessVideoFrame(mvd_nal, (uint32_t)nal_size,
+			0, &process_out);
+		*last_status = status;
+		if(!MVD_CHECKNALUPROC_SUCCESS(status))
+		{
+			DEF_LOG_FORMAT("MVD NAL type=%u size=%lu returned 0x%08lX remaining=%lu",
+				(unsigned int)(nal[3] & 0x1F),
+				(unsigned long)nal_size, (unsigned long)status,
+				(unsigned long)process_out.remaining_size);
+			return status;
+		}
+		/* A nonzero remainder points inside this NAL, but libctru does not
+		 * document a safe way to resubmit that suffix as a standalone Annex-B
+		 * unit. Do not commit the outer cursor or guess at continuation. */
+		if(process_out.remaining_size != 0)
+		{
+			DEF_LOG_FORMAT("MVD left NAL bytes unconsumed: %lu of %lu",
+				(unsigned long)process_out.remaining_size,
+				(unsigned long)nal_size);
+			return DEF_ERR_UNSAFE_VIDEO_STREAM;
+		}
+		*cursor = next_cursor;
+		if(status == MVD_STATUS_FRAMEREADY)
+		{
+			if(parameters_only)
+				return DEF_ERR_UNSAFE_VIDEO_STREAM;
+		}
+		/* libctru's reference decoder renders at this exact per-NAL boundary.
+		 * Do not submit later NALs before the pending output is rendered. */
+		if(!parameters_only && status != MVD_STATUS_PARAMSET
+		&& status != MVD_STATUS_INCOMPLETEPROCESSING)
+		{
+			*render_allowed = true;
+			return DEF_SUCCESS;
+		}
+	}
+
+	return *nal_count > 0 ? DEF_SUCCESS : DEF_ERR_UNSAFE_VIDEO_STREAM;
 }
 
 static void Util_decoder_mvd_free_unbound_output(uint8_t session,
@@ -1989,7 +2102,8 @@ static void Util_decoder_mvd_free_unbound_output(uint8_t session,
 
 	if(!frame)
 		return;
-	free(frame->data[0]);
+	if(frame->data[0])
+		linearFree(frame->data[0]);
 	frame->data[0] = NULL;
 	av_frame_free(&util_mvd_video_decoder_raw_image[session][buffer_num]);
 }
@@ -1998,13 +2112,17 @@ uint32_t Util_decoder_mvd_decode(uint8_t session)
 {
 	bool got_a_frame = false;
 	bool got_a_frame_after_processing_nal_unit = false;
+	bool mvd_render_allowed = false;
 	bool output_bound_to_mvd = false;
 	int32_t normalization_result = MINIIPTV_H264_INVALID_DATA;
+	size_t extradata_cursor = 0;
 	size_t normalized_size = 0;
+	unsigned int extradata_nal_count = 0;
 	uint16_t buffer_num = 0;
 	uint16_t render_busy_count = 0;
 	uint32_t width = 0;
 	uint32_t height = 0;
+	uint32_t mvd_last_status = MVD_STATUS_OK;
 	uint32_t output_physical = 0;
 	uint32_t result = DEF_ERR_OTHER;
 
@@ -2014,7 +2132,7 @@ uint32_t Util_decoder_mvd_decode(uint8_t session)
 	if(!util_decoder_opened_file[session] || !util_video_decoder_init[session][0] || !util_mvd_video_decoder_init)
 		goto not_inited;
 	if(util_mvd_video_decoder_poisoned)
-		return DEF_ERR_UNSAFE_VIDEO_STREAM;
+		return util_mvd_video_decoder_poison_error;
 
 	if(!util_video_decoder_packet_ready[session][0])
 	{
@@ -2117,98 +2235,124 @@ uint32_t Util_decoder_mvd_decode(uint8_t session)
 			&& (util_mvd_parameter_guard.sps_count != 1
 			|| util_mvd_parameter_guard.pps_count != 1))
 				goto unsafe_stream;
-			if(osConvertVirtToPhys(util_mvd_video_decoder_packet) == 0)
+			result = Util_decoder_mvd_process_annexb(
+				util_mvd_video_decoder_packet, normalized_size,
+				&extradata_cursor, &extradata_nal_count, true,
+				&mvd_render_allowed, &mvd_last_status);
+			if(result == DEF_ERR_OUT_OF_LINEAR_MEMORY)
 				goto out_of_linear_memory;
-			result = mvdstdProcessVideoFrame(util_mvd_video_decoder_packet,
-				(uint32_t)normalized_size, 0, NULL);
-			/* Extradata must only establish codec parameters. A ready frame means
-			 * slice data or stale service state reached this path. */
-			if(result != MVD_STATUS_PARAMSET && result != MVD_STATUS_OK)
+			if(result == DEF_ERR_UNSAFE_VIDEO_STREAM || mvd_render_allowed)
+				goto unsafe_stream;
+			if(result != DEF_SUCCESS)
+			{
+				DEF_LOG_FORMAT("MVD extradata submit failed: 0x%08lX (last 0x%08lX)",
+					(unsigned long)result, (unsigned long)mvd_last_status);
 				goto nintendo_inflight_failed;
+			}
+			if(extradata_cursor != normalized_size)
+				goto unsafe_stream;
 		}
 	}
 
-	if(util_video_decoder_packet[session][0]->size <= 0 ||
-		util_video_decoder_context[session][0]->extradata_size < 0)
-		goto ffmpeg_api_failed;
-	normalization_result = miniiptv_h264_packet_to_annexb(
-		util_video_decoder_packet[session][0]->data,
-		(size_t)util_video_decoder_packet[session][0]->size,
-		util_video_decoder_context[session][0]->extradata,
-		(size_t)util_video_decoder_context[session][0]->extradata_size,
-		NULL, 0, &normalized_size);
-	if(normalization_result != MINIIPTV_H264_OK)
+	if(!util_mvd_video_decoder_packet_prepared)
 	{
-		DEF_LOG_FORMAT("Invalid H.264 packet: %" PRIi32, normalization_result);
-		goto ffmpeg_api_failed;
+		if(util_video_decoder_packet[session][0]->size <= 0 ||
+			util_video_decoder_context[session][0]->extradata_size < 0)
+			goto ffmpeg_api_failed;
+		normalization_result = miniiptv_h264_packet_to_annexb(
+			util_video_decoder_packet[session][0]->data,
+			(size_t)util_video_decoder_packet[session][0]->size,
+			util_video_decoder_context[session][0]->extradata,
+			(size_t)util_video_decoder_context[session][0]->extradata_size,
+			NULL, 0, &normalized_size);
+		if(normalization_result != MINIIPTV_H264_OK)
+		{
+			DEF_LOG_FORMAT("Invalid H.264 packet: %" PRIi32, normalization_result);
+			goto ffmpeg_api_failed;
+		}
+		if(!Util_decoder_mvd_reserve_packet(normalized_size))
+			goto out_of_linear_memory;
+		normalization_result = miniiptv_h264_packet_to_annexb(
+			util_video_decoder_packet[session][0]->data,
+			(size_t)util_video_decoder_packet[session][0]->size,
+			util_video_decoder_context[session][0]->extradata,
+			(size_t)util_video_decoder_context[session][0]->extradata_size,
+			util_mvd_video_decoder_packet, util_mvd_video_decoder_packet_size,
+			&normalized_size);
+		if(normalization_result != MINIIPTV_H264_OK || normalized_size == 0 ||
+			normalized_size > UINT32_MAX)
+			goto ffmpeg_api_failed;
+		normalization_result = miniiptv_h264_parameter_guard_check(
+			&util_mvd_parameter_guard, util_mvd_video_decoder_packet,
+			normalized_size);
+		if(normalization_result != MINIIPTV_H264_OK)
+		{
+			DEF_LOG_FORMAT("Unsafe H.264 parameter change: %" PRIi32,
+				normalization_result);
+			goto unsafe_stream;
+		}
+		/* Multiple initial parameter sets can describe different frame layouts.
+		 * Without parsing and proving them equivalent, a live switch between them
+		 * could make MVD write using dimensions its output was not sized for. */
+		if(miniiptv_live_stream_is_active()
+		&& (util_mvd_parameter_guard.sps_count != 1
+		|| util_mvd_parameter_guard.pps_count != 1))
+			goto unsafe_stream;
+		util_mvd_video_decoder_packet_normalized_size = normalized_size;
+		util_mvd_video_decoder_packet_prepared = true;
 	}
-	if(!Util_decoder_mvd_reserve_packet(normalized_size))
-		goto out_of_linear_memory;
-	normalization_result = miniiptv_h264_packet_to_annexb(
-		util_video_decoder_packet[session][0]->data,
-		(size_t)util_video_decoder_packet[session][0]->size,
-		util_video_decoder_context[session][0]->extradata,
-		(size_t)util_video_decoder_context[session][0]->extradata_size,
-		util_mvd_video_decoder_packet, util_mvd_video_decoder_packet_size,
-		&normalized_size);
-	if(normalization_result != MINIIPTV_H264_OK || normalized_size == 0 ||
-		normalized_size > UINT32_MAX)
-		goto ffmpeg_api_failed;
-	normalization_result = miniiptv_h264_parameter_guard_check(
-		&util_mvd_parameter_guard, util_mvd_video_decoder_packet,
-		normalized_size);
-	if(normalization_result != MINIIPTV_H264_OK)
-	{
-		DEF_LOG_FORMAT("Unsafe H.264 parameter change: %" PRIi32,
-			normalization_result);
+	normalized_size = util_mvd_video_decoder_packet_normalized_size;
+	if(normalized_size == 0
+	|| util_mvd_video_decoder_packet_cursor > normalized_size)
 		goto unsafe_stream;
-	}
-	/* Multiple initial parameter sets can describe different frame layouts.
-	 * Without parsing and proving them equivalent, a live switch between them
-	 * could make MVD write using dimensions its output was not sized for. */
-	if(miniiptv_live_stream_is_active()
-	&& (util_mvd_parameter_guard.sps_count != 1
-	|| util_mvd_parameter_guard.pps_count != 1))
-		goto unsafe_stream;
-	if(osConvertVirtToPhys(util_mvd_video_decoder_packet) == 0)
-		goto out_of_linear_memory;
-
+	/* A skipped submission means the inherited decoder path still has output
+	 * pending from the previous access unit. That output may be rendered even
+	 * though this packet has not entered MVD yet. */
+	mvd_render_allowed = util_mvd_video_decoder_should_skip_process_nal_unit;
 	if(!util_mvd_video_decoder_should_skip_process_nal_unit)
 	{
-		// DEF_LOG_STRING("util_mvd_video_decoder_should_skip_process_nal_unit is not set, so call mvdstdProcessVideoFrame()");
-		result = mvdstdProcessVideoFrame(util_mvd_video_decoder_packet, (uint32_t)normalized_size, 0, NULL);
-		if(result != MVD_STATUS_FRAMEREADY && result != MVD_STATUS_PARAMSET
-		&& result != MVD_STATUS_OK)
+		/* libctru's MVD entry point accepts exactly one Annex-B NAL per call.
+		 * Submit this access unit as a bounded sequence rather than one blob. */
+		result = Util_decoder_mvd_process_annexb(
+			util_mvd_video_decoder_packet, normalized_size,
+			&util_mvd_video_decoder_packet_cursor,
+			&util_mvd_video_decoder_packet_nal_count, false,
+			&mvd_render_allowed, &mvd_last_status);
+		if(result == DEF_ERR_OUT_OF_LINEAR_MEMORY)
+			goto out_of_linear_memory;
+		if(result == DEF_ERR_UNSAFE_VIDEO_STREAM)
+			goto unsafe_stream;
+		if(result != DEF_SUCCESS)
 		{
-			DEF_LOG_RESULT(mvdstdProcessVideoFrame, false, result);
+			DEF_LOG_FORMAT("MVD access-unit submit failed: 0x%08lX (last 0x%08lX)",
+				(unsigned long)result, (unsigned long)mvd_last_status);
 			goto nintendo_inflight_failed;
 		}
 
-		//Save pts
-		util_mvd_video_decoder_cached_pts[util_mvd_video_decoder_next_cached_pts_index] = util_video_decoder_packet[session][0]->dts;
-		if(util_mvd_video_decoder_next_cached_pts_index + 1 < 32)
-			util_mvd_video_decoder_next_cached_pts_index++;
-		else
-			util_mvd_video_decoder_next_cached_pts_index = 0;
-
+		/* The official libctru flow submits each NAL exactly once. Keep the
+		 * advanced cursor across render calls instead of replaying the first
+		 * access unit from byte zero. */
 		if(util_mvd_video_decoder_first)
-		{
-			//Do I need to send same nal data at first frame?
-			result = mvdstdProcessVideoFrame(util_mvd_video_decoder_packet, (uint32_t)normalized_size, 0, NULL);
-			if(result != MVD_STATUS_FRAMEREADY && result != MVD_STATUS_PARAMSET
-			&& result != MVD_STATUS_OK)
-			{
-				DEF_LOG_RESULT(mvdstdProcessVideoFrame, false, result);
-				goto nintendo_inflight_failed;
-			}
 			util_mvd_video_decoder_first = false;
+
+		/* Parameter-set-only and incomplete batches cannot produce an output
+		 * frame, so they must not consume a timestamp slot. */
+		if(mvd_render_allowed && !util_mvd_video_decoder_packet_pts_cached)
+		{
+			util_mvd_video_decoder_cached_pts[util_mvd_video_decoder_next_cached_pts_index] = util_video_decoder_packet[session][0]->dts;
+			if(util_mvd_video_decoder_next_cached_pts_index + 1 < 32)
+				util_mvd_video_decoder_next_cached_pts_index++;
+			else
+				util_mvd_video_decoder_next_cached_pts_index = 0;
+			util_mvd_video_decoder_packet_pts_cached = true;
 		}
 
 		//If any of them got changed, it means MVD service wrote the frame data to the buffer.
-		if(*util_mvd_video_decoder_raw_image[session][buffer_num]->data[0] != 0x11
+		if(mvd_render_allowed
+		&& (*util_mvd_video_decoder_raw_image[session][buffer_num]->data[0] != 0x11
 		|| *(util_mvd_video_decoder_raw_image[session][buffer_num]->data[0] + (width * 2 - 1)) != 0x11
 		|| *(util_mvd_video_decoder_raw_image[session][buffer_num]->data[0] + ((width * height * 2) - (width * 2))) != 0x11
-		|| *(util_mvd_video_decoder_raw_image[session][buffer_num]->data[0] + (width * height * 2 - 1)) != 0x11)
+		|| *(util_mvd_video_decoder_raw_image[session][buffer_num]->data[0] + (width * height * 2 - 1)) != 0x11))
 		{
 			// DEF_LOG_STRING("got a frame after mvdstdProcessVideoFrame()");
 			got_a_frame = true;
@@ -2222,7 +2366,7 @@ uint32_t Util_decoder_mvd_decode(uint8_t session)
 	// else
 	// 	DEF_LOG_STRING("util_mvd_video_decoder_should_skip_process_nal_unit is set, so skip mvdstdProcessVideoFrame()");
 
-	if(!got_a_frame)
+	if(!got_a_frame && mvd_render_allowed)
 	{
 		// DEF_LOG_STRING("got_a_frame is not set, so call mvdstdRenderVideoFrame()");
 		while(true)
@@ -2273,6 +2417,11 @@ uint32_t Util_decoder_mvd_decode(uint8_t session)
 	}
 	else if(!got_a_frame)
 	{
+		/* A render boundary can occur before the final NAL in an FFmpeg packet.
+		 * Keep that packet and its advanced cursor even when this particular
+		 * render call produced no visible surface. */
+		if(util_mvd_video_decoder_packet_cursor < normalized_size)
+			goto try_again_no_output;
 		// DEF_LOG_STRING("Got no frames");
 		goto need_more_packet;
 	}
@@ -2299,9 +2448,12 @@ uint32_t Util_decoder_mvd_decode(uint8_t session)
 		// DEF_LOG_STRING("util_mvd_video_decoder_should_skip_process_nal_unit is set, and got a frame");
 		goto try_again_with_output;
 	}
+	if(util_mvd_video_decoder_packet_cursor < normalized_size)
+		goto try_again_with_output;
 
 	util_video_decoder_packet_ready[session][0] = false;
 	av_packet_free(&util_video_decoder_packet[session][0]);
+	Util_decoder_mvd_reset_packet_progress();
 	return DEF_SUCCESS;
 
 	invalid_arg:
@@ -2324,14 +2476,17 @@ uint32_t Util_decoder_mvd_decode(uint8_t session)
 	util_video_decoder_packet_ready[session][0] = false;
 	Util_decoder_mvd_free_unbound_output(session, buffer_num);
 	av_packet_free(&util_video_decoder_packet[session][0]);
+	Util_decoder_mvd_reset_packet_progress();
 	return DEF_ERR_NEED_MORE_INPUT;
 
 	out_of_linear_memory:
 	if(output_bound_to_mvd)
 	{
 		util_mvd_video_decoder_poisoned = true;
+		util_mvd_video_decoder_poison_error = DEF_ERR_OUT_OF_LINEAR_MEMORY;
 		util_video_decoder_packet_ready[session][0] = false;
 		av_packet_free(&util_video_decoder_packet[session][0]);
+		Util_decoder_mvd_reset_packet_progress();
 		return DEF_ERR_OUT_OF_LINEAR_MEMORY;
 	}
 	Util_decoder_mvd_free_unbound_output(session, buffer_num);
@@ -2342,34 +2497,45 @@ uint32_t Util_decoder_mvd_decode(uint8_t session)
 	if(output_bound_to_mvd)
 	{
 		util_mvd_video_decoder_poisoned = true;
+		util_mvd_video_decoder_poison_error = DEF_ERR_FFMPEG_RETURNED_NOT_SUCCESS;
 		av_packet_free(&util_video_decoder_packet[session][0]);
+		Util_decoder_mvd_reset_packet_progress();
 		return DEF_ERR_FFMPEG_RETURNED_NOT_SUCCESS;
 	}
 	Util_decoder_mvd_free_unbound_output(session, buffer_num);
 	av_packet_free(&util_video_decoder_packet[session][0]);
+	Util_decoder_mvd_reset_packet_progress();
 	return DEF_ERR_FFMPEG_RETURNED_NOT_SUCCESS;
 
 	unsafe_stream:
 	util_mvd_video_decoder_poisoned = true;
+	util_mvd_video_decoder_poison_error = DEF_ERR_UNSAFE_VIDEO_STREAM;
 	util_video_decoder_packet_ready[session][0] = false;
 	av_packet_free(&util_video_decoder_packet[session][0]);
+	Util_decoder_mvd_reset_packet_progress();
 	/* The output remains registered in MVDSTD_Config. Keep it alive until
 	 * Util_decoder_mvd_exit() stops the service and then frees every surface. */
 	return DEF_ERR_UNSAFE_VIDEO_STREAM;
 
 	unsafe_stream_no_frame:
 	util_mvd_video_decoder_poisoned = true;
+	util_mvd_video_decoder_poison_error = DEF_ERR_UNSAFE_VIDEO_STREAM;
 	util_video_decoder_packet_ready[session][0] = false;
 	av_packet_free(&util_video_decoder_packet[session][0]);
+	Util_decoder_mvd_reset_packet_progress();
 	return DEF_ERR_UNSAFE_VIDEO_STREAM;
 
 	nintendo_inflight_failed:
 	util_mvd_video_decoder_poisoned = true;
+	if(result == DEF_SUCCESS)
+		result = DEF_ERR_OTHER;
+	util_mvd_video_decoder_poison_error = result;
 	util_video_decoder_packet_ready[session][0] = false;
 	av_packet_free(&util_video_decoder_packet[session][0]);
+	Util_decoder_mvd_reset_packet_progress();
 	/* Process/render may still own physaddr_outdata0. Never free or reuse this
 	 * surface until mvdstdExit() has completed. */
-	return DEF_ERR_UNSAFE_VIDEO_STREAM;
+	return result;
 
 }
 
@@ -2607,7 +2773,8 @@ void Util_decoder_mvd_clear_raw_image(uint8_t session)
 	{
 		if(util_mvd_video_decoder_raw_image[session][i])
 		{
-			free(util_mvd_video_decoder_raw_image[session][i]->data[0]);
+			if(util_mvd_video_decoder_raw_image[session][i]->data[0])
+				linearFree(util_mvd_video_decoder_raw_image[session][i]->data[0]);
 			for(uint8_t k = 0; k < AV_NUM_DATA_POINTERS; k++)
 				util_mvd_video_decoder_raw_image[session][i]->data[k] = NULL;
 		}
@@ -2799,7 +2966,8 @@ uint32_t Util_decoder_mvd_get_image(uint8_t** raw_data, double* current_pos, uin
 		goto try_again;
 	}
 
-	free(*raw_data);
+	if(*raw_data)
+		linearFree(*raw_data);
 	*raw_data = NULL;
 
 	*current_pos = 0;
@@ -2929,7 +3097,8 @@ void Util_decoder_mvd_skip_image(double* current_pos, uint8_t session)
 
 	if(util_mvd_video_decoder_raw_image[session][buffer_num])
 	{
-		free(util_mvd_video_decoder_raw_image[session][buffer_num]->data[0]);
+		if(util_mvd_video_decoder_raw_image[session][buffer_num]->data[0])
+			linearFree(util_mvd_video_decoder_raw_image[session][buffer_num]->data[0]);
 		for(uint8_t i = 0; i < AV_NUM_DATA_POINTERS; i++)
 			util_mvd_video_decoder_raw_image[session][buffer_num]->data[i] = NULL;
 	}
@@ -3044,16 +3213,22 @@ static void Util_decoder_video_exit(uint8_t session)
 				av_frame_free(&util_video_decoder_raw_image[session][i][k]);
 		}
 	}
+	Util_decoder_mvd_reset_packet_progress();
 }
 
 static void Util_decoder_mvd_exit(uint8_t session)
 {
 	if(!util_mvd_video_decoder_init)
+	{
+		Util_decoder_mvd_reset_packet_progress();
 		return;
+	}
 
 	util_mvd_video_decoder_init = false;
 	mvdstdExit();
 	util_mvd_video_decoder_poisoned = false;
+	util_mvd_video_decoder_poison_error = DEF_ERR_UNSAFE_VIDEO_STREAM;
+	Util_decoder_mvd_reset_packet_progress();
 	miniiptv_h264_parameter_guard_reset(&util_mvd_parameter_guard);
 	util_mvd_video_decoder_available_raw_image[session] = 0;
 	util_mvd_video_decoder_raw_image_ready_index[session] = 0;
@@ -3062,7 +3237,8 @@ static void Util_decoder_mvd_exit(uint8_t session)
 	{
 		if(util_mvd_video_decoder_raw_image[session][i])
 		{
-			free(util_mvd_video_decoder_raw_image[session][i]->data[0]);
+			if(util_mvd_video_decoder_raw_image[session][i]->data[0])
+				linearFree(util_mvd_video_decoder_raw_image[session][i]->data[0]);
 			for(uint8_t k = 0; k < AV_NUM_DATA_POINTERS; k++)
 				util_mvd_video_decoder_raw_image[session][i]->data[k] = NULL;
 		}
@@ -3075,9 +3251,11 @@ void Util_decoder_mvd_release_packet_buffer(void)
 	if(util_mvd_video_decoder_init)
 		return;
 
-	free(util_mvd_video_decoder_packet);
+	if(util_mvd_video_decoder_packet)
+		linearFree(util_mvd_video_decoder_packet);
 	util_mvd_video_decoder_packet = NULL;
 	util_mvd_video_decoder_packet_size = 0;
+	Util_decoder_mvd_reset_packet_progress();
 }
 
 static void Util_decoder_subtitle_exit(uint8_t session)

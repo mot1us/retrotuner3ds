@@ -33,9 +33,13 @@ typedef enum {
 typedef struct {
     size_t segments_staged;
     size_t bytes_staged;
+    size_t attempted_segment_bytes;
+    size_t reported_segment_bytes;
+    size_t segment_limit_bytes;
     double duration_staged;
     unsigned long first_sequence;
     unsigned long last_sequence;
+    int last_network_result;
     char media_url[MINIIPTV_HLS_URL_MAX];
 } MiniIptvStageInfo;
 
