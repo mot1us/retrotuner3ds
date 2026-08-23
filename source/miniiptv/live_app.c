@@ -83,6 +83,24 @@ static void draw_key_hint(Draw_image_data *pixel, const char *key,
     Draw_c(action, x + key_width + 5, y + 1, 9.5f, UI_CREAM);
 }
 
+static void format_tune_status(char *line, size_t line_size,
+                               const MiniIptvTuneTelemetry *tune) {
+    if (!line || line_size == 0 || !tune) return;
+    if (tune->phase == MINIIPTV_TUNE_PHASE_INITIAL_SEGMENT)
+        snprintf(line, line_size, "%s // %lu KiB // T+%u.%us",
+                 miniiptv_live_tune_phase_label(tune->phase),
+                 (unsigned long)(tune->initial_segment_received_bytes / 1024u),
+                 tune->total_elapsed_milliseconds / 1000u,
+                 (tune->total_elapsed_milliseconds % 1000u) / 100u);
+    else
+        snprintf(line, line_size, "%s // %u.%us // T+%u.%us",
+                 miniiptv_live_tune_phase_label(tune->phase),
+                 tune->phase_elapsed_milliseconds / 1000u,
+                 (tune->phase_elapsed_milliseconds % 1000u) / 100u,
+                 tune->total_elapsed_milliseconds / 1000u,
+                 (tune->total_elapsed_milliseconds % 1000u) / 100u);
+}
+
 static const char *stage_error_text(int result) {
     switch (result) {
         case MINIIPTV_STAGE_CANCELLED:
@@ -124,6 +142,7 @@ static int tune_should_cancel(void *unused) {
 }
 
 static void player_error(uint32_t error_code) {
+    miniiptv_live_tune_fail((int32_t)error_code);
     LightLock_Lock(&app.lock);
     /* A player failure can race an already-latched L/R request. Keep that
      * request so teardown returns into the requested channel, not the failed
@@ -195,8 +214,10 @@ static bool begin_player_handoff(void) {
     app.awaiting_player_return = true;
     LightLock_Unlock(&app.lock);
 
+    miniiptv_live_tune_phase_begin(MINIIPTV_TUNE_PHASE_PLAYER_OPEN);
     started = Vid_prepare_and_start_file("", MINIIPTV_LIVE_STREAM_URL);
     if (!started) {
+        miniiptv_live_tune_fail(MINIIPTV_STAGE_FILE_FAILED);
         miniiptv_live_stream_stop();
         LightLock_Lock(&app.lock);
         app.awaiting_player_return = false;
@@ -259,6 +280,10 @@ static void worker_main(void *unused) {
             result = miniiptv_live_stream_start(&pending_channel, &info,
                                                 tune_should_cancel, NULL);
     }
+    /* Session setup can fail before live_stream_start() has a chance to own
+     * the tune timeline. Preserve that failure in the same diagnostics path. */
+    if (result != MINIIPTV_STAGE_OK)
+        miniiptv_live_tune_fail(result);
     LightLock_Lock(&app.lock);
     exiting = app.exit_requested;
     cancel_to_deck = app.cancel_to_deck;
@@ -371,11 +396,13 @@ static void launch_tune_worker(void) {
     /* Publish the handle while holding the lock. START/exit cannot pass this
      * point, observe NULL, and tear down curl/stream state before the newly
      * scheduled worker becomes visible. */
+    miniiptv_live_tune_reset();
     worker = threadCreate(worker_main, NULL, 128 * 1024,
                           DEF_THREAD_PRIORITY_NORMAL, 1, false);
     app.worker = worker;
     app.worker_finished = false;
     if (!worker) {
+        miniiptv_live_tune_fail(MINIIPTV_STAGE_FILE_FAILED);
         app.pending_channel_step = 0;
         app.switching_from_player = false;
         set_status_locked(LIVE_APP_ERROR,
@@ -712,6 +739,7 @@ static bool live_hid(const Hid_info *key) {
 
 static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
     Draw_image_data pixel = Draw_get_empty_image();
+    MiniIptvTuneTelemetry tune = {0};
     char channel_names[MINIIPTV_MAX_CHANNELS][MINIIPTV_NAME_MAX];
     LiveAppState state;
     size_t count;
@@ -745,6 +773,7 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
     switch_to_index = app.switch_to_index;
     snprintf(status, sizeof(status), "%s", app.status);
     LightLock_Unlock(&app.lock);
+    miniiptv_live_tune_get_telemetry(&tune);
     process_player_return_action(return_action);
 
     page_start = count ? (selected / CHANNELS_PER_PAGE) * CHANNELS_PER_PAGE : 0;
@@ -778,10 +807,8 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
         if (state == LIVE_APP_LOADING) {
             uint64_t elapsed = osGetTime() - tuning_started_ms;
             unsigned int phase = (unsigned int)((elapsed / 180u) % 12u);
-            snprintf(line, sizeof(line), "TUNING SIGNAL // %lu.%lus",
-                     (unsigned long)(elapsed / 1000u),
-                     (unsigned long)((elapsed % 1000u) / 100u));
-            Draw_align_c(line, 0, 169, 13.0f, UI_ORANGE,
+            format_tune_status(line, sizeof(line), &tune);
+            Draw_align_c(line, 0, 169, 11.0f, UI_ORANGE,
                          DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 400, 16);
             Draw_texture(&pixel, UI_SHADOW, 74, 190, 252, 10);
             for (i = 0; i < 12; i++)
@@ -795,6 +822,15 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
                          0, 174, 12.0f,
                          DEF_DRAW_RED, DRAW_X_ALIGN_CENTER,
                          DRAW_Y_ALIGN_CENTER, 400, 20);
+            if (tune.phase == MINIIPTV_TUNE_PHASE_FAILED) {
+                snprintf(line, sizeof(line), "FAILED @ %s // T+%u.%us",
+                         miniiptv_live_tune_phase_label(tune.failure_phase),
+                         tune.total_elapsed_milliseconds / 1000u,
+                         (tune.total_elapsed_milliseconds % 1000u) / 100u);
+                Draw_align_c(line, 0, 195, 8.5f, UI_ORANGE,
+                             DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER,
+                             400, 12);
+            }
         } else if (state == LIVE_APP_NO_PLAYLIST) {
             Draw_align_c("NO PLAYLIST // ADD CHANNELS.M3U", 0, 174, 12.0f,
                          DEF_DRAW_RED, DRAW_X_ALIGN_CENTER,
@@ -842,9 +878,7 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
                  channel_names[switch_to_index]);
         Draw_c(line, 18, 140, 12.0f, UI_CREAM);
 
-        snprintf(line, sizeof(line), "CLEAN STOP > RETUNE // %lu.%lus",
-                 (unsigned long)(elapsed / 1000u),
-                 (unsigned long)((elapsed % 1000u) / 100u));
+        format_tune_status(line, sizeof(line), &tune);
         Draw_align_c(line, 8, 176, 10.5f, UI_MINT,
                      DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 304, 20);
         Draw_align_c("B CANCEL // L/R CHANGE AGAIN", 8, 205, 9.5f,
@@ -872,7 +906,9 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
     }
 
     Draw_texture(&pixel, UI_PANEL, 8, 183, 304, 28);
-    Draw_align_c(status, 14, 184, 9.5f,
+    if (state == LIVE_APP_LOADING)
+        format_tune_status(line, sizeof(line), &tune);
+    Draw_align_c(state == LIVE_APP_LOADING ? line : status, 14, 184, 9.5f,
                  state == LIVE_APP_ERROR || state == LIVE_APP_NO_PLAYLIST
                      ? DEF_DRAW_RED : UI_MINT,
                  DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 292, 24);
@@ -893,6 +929,7 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
 void MiniIptv_live_app_init(void) {
     memset(&app, 0, sizeof(app));
     LightLock_Init(&app.lock);
+    miniiptv_live_tune_telemetry_init();
 
 	if (playlist_load_file(USER_PLAYLIST, &app.playlist) != 0) {
 		set_status_locked(LIVE_APP_NO_PLAYLIST,

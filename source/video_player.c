@@ -806,6 +806,7 @@ static void Vid_draw_miniiptv_live_overlay(void)
 {
 	Draw_image_data pixel = Draw_get_empty_image();
 	MiniIptvLiveInfo live_info = { 0, };
+	MiniIptvTuneTelemetry tune = { 0, };
 	bool has_presented_frame = __atomic_load_n(&vid_player.has_presented_frame,
 		__ATOMIC_ACQUIRE);
 	size_t buffered = 0;
@@ -824,6 +825,7 @@ static void Vid_draw_miniiptv_live_overlay(void)
 	miniiptv_live_stream_get_info(&live_info);
 	miniiptv_live_stream_get_stats(&buffered, &downloaded, &read_kib,
 		&underruns, &live_error);
+	miniiptv_live_tune_get_telemetry(&tune);
 	(void)read_kib;
 
 	/* PLAYER_STATE_BUFFERING also covers the decoder's very short raw-frame
@@ -833,14 +835,23 @@ static void Vid_draw_miniiptv_live_overlay(void)
 	 * authoritative compressed-ring underrun signal and must remain visible. */
 	if(live_info.rebuffering)
 		state_text = "BUFFERING";
-	else if(vid_player.state == PLAYER_STATE_PLAYING
-	|| (vid_player.state == PLAYER_STATE_BUFFERING && has_presented_frame))
+	else if((vid_player.state == PLAYER_STATE_PLAYING
+	|| vid_player.state == PLAYER_STATE_BUFFERING) && has_presented_frame)
 	{
 		state_text = "ON AIR";
 		state_color = MINIIPTV_COLOR_MINT;
 	}
 	else if(vid_player.state == PLAYER_STATE_PAUSE)
 		state_text = "PAUSED";
+	else if(!has_presented_frame)
+	{
+		if(tune.phase == MINIIPTV_TUNE_PHASE_PLAYER_OPEN)
+			state_text = "FFMPEG";
+		else if(tune.phase == MINIIPTV_TUNE_PHASE_MVD_INIT)
+			state_text = "MVD INIT";
+		else if(tune.phase == MINIIPTV_TUNE_PHASE_FIRST_FRAME)
+			state_text = "1ST FRAME";
+	}
 
 	if(live_error != 0)
 	{
@@ -920,7 +931,29 @@ static void Vid_draw_miniiptv_live_overlay(void)
 		Draw_align_c(line, 8, 154, 10.0f,
 			live_error == 0 ? MINIIPTV_COLOR_MINT : DEF_DRAW_RED,
 			DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 304, 16);
-		if(live_error == MINIIPTV_STAGE_TOO_LARGE)
+		if(!has_presented_frame && tune.phase != MINIIPTV_TUNE_PHASE_FAILED)
+			snprintf(line, sizeof(line), "%s %u.%us // T+%u.%us",
+				miniiptv_live_tune_phase_label(tune.phase),
+				tune.phase_elapsed_milliseconds / 1000u,
+				(tune.phase_elapsed_milliseconds % 1000u) / 100u,
+				tune.total_elapsed_milliseconds / 1000u,
+				(tune.total_elapsed_milliseconds % 1000u) / 100u);
+		else if(tune.phase == MINIIPTV_TUNE_PHASE_READY && live_error == 0)
+			snprintf(line, sizeof(line),
+				"TUNE R:%u.%u M:%u.%u S:%u.%u P:%u.%u D:%u.%u F:%u.%u",
+				tune.phase_milliseconds[MINIIPTV_TUNE_PHASE_ROOT_MANIFEST] / 1000u,
+				(tune.phase_milliseconds[MINIIPTV_TUNE_PHASE_ROOT_MANIFEST] % 1000u) / 100u,
+				tune.phase_milliseconds[MINIIPTV_TUNE_PHASE_MEDIA_MANIFEST] / 1000u,
+				(tune.phase_milliseconds[MINIIPTV_TUNE_PHASE_MEDIA_MANIFEST] % 1000u) / 100u,
+				tune.phase_milliseconds[MINIIPTV_TUNE_PHASE_INITIAL_SEGMENT] / 1000u,
+				(tune.phase_milliseconds[MINIIPTV_TUNE_PHASE_INITIAL_SEGMENT] % 1000u) / 100u,
+				tune.phase_milliseconds[MINIIPTV_TUNE_PHASE_PLAYER_OPEN] / 1000u,
+				(tune.phase_milliseconds[MINIIPTV_TUNE_PHASE_PLAYER_OPEN] % 1000u) / 100u,
+				tune.phase_milliseconds[MINIIPTV_TUNE_PHASE_MVD_INIT] / 1000u,
+				(tune.phase_milliseconds[MINIIPTV_TUNE_PHASE_MVD_INIT] % 1000u) / 100u,
+				tune.phase_milliseconds[MINIIPTV_TUNE_PHASE_FIRST_FRAME] / 1000u,
+				(tune.phase_milliseconds[MINIIPTV_TUNE_PHASE_FIRST_FRAME] % 1000u) / 100u);
+		else if(live_error == MINIIPTV_STAGE_TOO_LARGE)
 			snprintf(line, sizeof(line), "SEG RX:%luK LEN:%luK CAP:%luK N:%d",
 				(unsigned long)(live_info.attempted_segment_bytes / 1024u),
 				(unsigned long)(live_info.reported_segment_bytes / 1024u),
@@ -931,7 +964,10 @@ static void Vid_draw_miniiptv_live_overlay(void)
 				(unsigned long)(live_info.last_segment_bytes / 1024u),
 				live_info.last_download_milliseconds,
 				live_info.last_segment_milliseconds, downloaded);
-		Draw_align_c(line, 8, 166, 9.0f, MINIIPTV_COLOR_CYAN,
+		Draw_align_c(line, 8, 166,
+			(tune.phase == MINIIPTV_TUNE_PHASE_READY && live_error == 0)
+				? 7.5f : 9.0f,
+			MINIIPTV_COLOR_CYAN,
 			DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 304, 12);
 	}
 
@@ -2231,8 +2267,12 @@ void Vid_main(void)
 
 							/* The draw thread owns this flag. Flip it only after it
 							 * selects a texture that the producer already published. */
-							__atomic_store_n(&vid_player.has_presented_frame, true,
-								__ATOMIC_RELEASE);
+							if(!__atomic_exchange_n(&vid_player.has_presented_frame, true,
+								__ATOMIC_ACQ_REL) && miniiptv_live_stream_is_active())
+							{
+								miniiptv_live_tune_phase_complete(MINIIPTV_TUNE_PHASE_FIRST_FRAME);
+								miniiptv_live_tune_phase_begin(MINIIPTV_TUNE_PHASE_READY);
+							}
 
 							Draw_set_refresh_needed(true);
 							vid_player.vps_cache[i]++;
@@ -5401,7 +5441,18 @@ void Vid_decode_thread(void* arg)
 									//We can use HW decoding for this video.
 									vid_player.sub_state = (Vid_player_sub_state)(vid_player.sub_state | PLAYER_SUB_STATE_HW_DECODING);
 
+									if(miniiptv_live_stream_is_active())
+									{
+										miniiptv_live_tune_phase_complete(MINIIPTV_TUNE_PHASE_PLAYER_OPEN);
+										miniiptv_live_tune_phase_begin(MINIIPTV_TUNE_PHASE_MVD_INIT);
+									}
 									DEF_LOG_RESULT_SMART(result, Util_decoder_mvd_init(DEF_VID_DECORDER_SESSION_ID), (result == DEF_SUCCESS), result);
+									if(miniiptv_live_stream_is_active())
+									{
+										miniiptv_live_tune_phase_complete(MINIIPTV_TUNE_PHASE_MVD_INIT);
+										if(result == DEF_SUCCESS)
+											miniiptv_live_tune_phase_begin(MINIIPTV_TUNE_PHASE_FIRST_FRAME);
+									}
 									if(result != DEF_SUCCESS)
 									{
 										if(vid_embedded_test_mode && miniiptv_live_stream_is_active())
@@ -7092,6 +7143,15 @@ void Vid_convert_thread(void* arg)
 				}
 			}
 		}
+
+		/* Live HLS can begin with audio and video on different timestamp bases.
+		 * If catch-up drops the first raw frame, there is no texture to present and
+		 * the player can remain on LOCKING SIGNAL while audio continues.  The
+		 * convert thread owns total_rendered_frames, so use it as the race-free
+		 * boundary: admit one texture, then immediately restore normal A/V drops. */
+		if(drop && miniiptv_live_stream_is_active()
+		&& vid_player.total_rendered_frames == 0)
+			drop = false;
 
 		//Skip video frame if we can't keep up or we are seeking.
 		if((drop || vid_player.state == PLAYER_STATE_SEEKING) && vid_player.video_frametime[packet_index] != 0)

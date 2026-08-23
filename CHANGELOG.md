@@ -5,6 +5,15 @@ versioning while the player remains experimental.
 
 ## [Unreleased]
 
+- Establish the first decoded live frame as the A/V clock baseline before
+  normal catch-up dropping, preventing streams with large absolute MPEG-TS
+  timestamps from remaining on `SAFE VIDEO CHECK` while audio plays.
+- Seed the producer with the media playlist already parsed during initial
+  tuning instead of immediately requesting the same manifest again; complete
+  segment staging and the bounded ring remain unchanged.
+- Show the active startup phase and elapsed timing while tuning so manifest,
+  initial-segment, player-probe, decoder, and first-frame delays can be
+  distinguished on hardware.
 - Let `B` return to the deck and `L`/`R` change signals directly from a
   no-signal or player-error state, without requiring `A` to retry first.
 - Keep the live status badge stable during ordinary raw-frame refills and hide

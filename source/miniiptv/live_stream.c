@@ -50,6 +50,11 @@ typedef struct {
     unsigned int variant_width;
     unsigned int variant_height;
     char variant_codecs[96];
+    /* The initial tune has already downloaded and parsed the current media
+     * playlist.  Keep one bounded, owned snapshot so the producer can stage
+     * its still-new segments before issuing another manifest request. */
+    HlsMediaPlaylist producer_seed;
+    bool producer_seed_available;
     unsigned long last_sequence;
     size_t ring_read;
     size_t ring_write;
@@ -72,7 +77,18 @@ typedef struct {
 
 typedef struct {
     size_t total_size;
+    bool report_tune_progress;
 } SegmentWriter;
+
+typedef struct {
+    LightLock lock;
+    bool initialized;
+    bool phase_active;
+    uint64_t tune_started_ms;
+    uint64_t phase_started_ms;
+    uint64_t tune_finished_ms;
+    MiniIptvTuneTelemetry value;
+} TuneTimeline;
 
 /* Static BSS storage uses ordinary application RAM, not scarce linear RAM. */
 static unsigned char stream_ring[STREAM_RING_SIZE];
@@ -80,6 +96,157 @@ static unsigned char stream_ring[STREAM_RING_SIZE];
  * never leave a partial access unit in the ring where FFmpeg/MVD can see it. */
 static unsigned char segment_staging[MINIIPTV_SEGMENT_LIMIT];
 static LiveStream stream;
+static TuneTimeline tune_timeline;
+
+static unsigned int tune_elapsed_milliseconds(uint64_t end, uint64_t start) {
+    uint64_t elapsed = end >= start ? end - start : 0;
+    return elapsed > 0xffffffffu ? 0xffffffffu : (unsigned int)elapsed;
+}
+
+const char *miniiptv_live_tune_phase_label(MiniIptvTunePhase phase) {
+    switch (phase) {
+        case MINIIPTV_TUNE_PHASE_OLD_STREAM_CLEANUP: return "CLEANING OLD SIGNAL";
+        case MINIIPTV_TUNE_PHASE_ROOT_MANIFEST: return "ROOT MANIFEST";
+        case MINIIPTV_TUNE_PHASE_MEDIA_MANIFEST: return "MEDIA MANIFEST";
+        case MINIIPTV_TUNE_PHASE_INITIAL_SEGMENT: return "INITIAL SEGMENT";
+        case MINIIPTV_TUNE_PHASE_PLAYER_OPEN: return "PLAYER / FFMPEG";
+        case MINIIPTV_TUNE_PHASE_MVD_INIT: return "MVD INIT";
+        case MINIIPTV_TUNE_PHASE_FIRST_FRAME: return "FIRST FRAME";
+        case MINIIPTV_TUNE_PHASE_READY: return "ON AIR";
+        case MINIIPTV_TUNE_PHASE_FAILED: return "TUNE FAILED";
+        case MINIIPTV_TUNE_PHASE_IDLE:
+        default: return "PREPARING";
+    }
+}
+
+void miniiptv_live_tune_telemetry_init(void) {
+    if (!tune_timeline.initialized) {
+        LightLock_Init(&tune_timeline.lock);
+        tune_timeline.initialized = true;
+    }
+    miniiptv_live_tune_reset();
+}
+
+void miniiptv_live_tune_reset(void) {
+    uint64_t now;
+    if (!tune_timeline.initialized) return;
+    now = osGetTime();
+    LightLock_Lock(&tune_timeline.lock);
+    memset(&tune_timeline.value, 0, sizeof(tune_timeline.value));
+    tune_timeline.value.phase = MINIIPTV_TUNE_PHASE_IDLE;
+    tune_timeline.value.failure_phase = MINIIPTV_TUNE_PHASE_IDLE;
+    tune_timeline.phase_active = false;
+    tune_timeline.tune_started_ms = now;
+    tune_timeline.phase_started_ms = now;
+    tune_timeline.tune_finished_ms = 0;
+    LightLock_Unlock(&tune_timeline.lock);
+}
+
+void miniiptv_live_tune_phase_begin(MiniIptvTunePhase phase) {
+    uint64_t now;
+    if (!tune_timeline.initialized || phase <= MINIIPTV_TUNE_PHASE_IDLE ||
+        phase >= MINIIPTV_TUNE_PHASE_COUNT)
+        return;
+    now = osGetTime();
+    LightLock_Lock(&tune_timeline.lock);
+    /* Failure is terminal for this tune. Decoder/draw phase notifications can
+     * race an error callback; only the next explicit reset may clear it. */
+    if (tune_timeline.value.phase == MINIIPTV_TUNE_PHASE_FAILED) {
+        LightLock_Unlock(&tune_timeline.lock);
+        return;
+    }
+    if (tune_timeline.phase_active &&
+        tune_timeline.value.phase > MINIIPTV_TUNE_PHASE_IDLE &&
+        tune_timeline.value.phase < MINIIPTV_TUNE_PHASE_COUNT) {
+        tune_timeline.value.phase_milliseconds[tune_timeline.value.phase] =
+            tune_elapsed_milliseconds(now, tune_timeline.phase_started_ms);
+    }
+    tune_timeline.value.phase = phase;
+    tune_timeline.value.result = 0;
+    tune_timeline.value.phase_elapsed_milliseconds = 0;
+    tune_timeline.phase_started_ms = now;
+    tune_timeline.phase_active = phase != MINIIPTV_TUNE_PHASE_READY &&
+                                 phase != MINIIPTV_TUNE_PHASE_FAILED;
+    if (phase == MINIIPTV_TUNE_PHASE_READY)
+        tune_timeline.tune_finished_ms = now;
+    LightLock_Unlock(&tune_timeline.lock);
+}
+
+void miniiptv_live_tune_phase_complete(MiniIptvTunePhase phase) {
+    uint64_t now;
+    if (!tune_timeline.initialized) return;
+    now = osGetTime();
+    LightLock_Lock(&tune_timeline.lock);
+    if (tune_timeline.phase_active && tune_timeline.value.phase == phase) {
+        tune_timeline.value.phase_milliseconds[phase] =
+            tune_elapsed_milliseconds(now, tune_timeline.phase_started_ms);
+        tune_timeline.value.phase_elapsed_milliseconds =
+            tune_timeline.value.phase_milliseconds[phase];
+        tune_timeline.phase_active = false;
+    }
+    LightLock_Unlock(&tune_timeline.lock);
+}
+
+void miniiptv_live_tune_fail(int result) {
+    uint64_t now;
+    if (!tune_timeline.initialized) return;
+    now = osGetTime();
+    LightLock_Lock(&tune_timeline.lock);
+    if (tune_timeline.value.phase == MINIIPTV_TUNE_PHASE_FAILED) {
+        tune_timeline.value.result = result;
+        LightLock_Unlock(&tune_timeline.lock);
+        return;
+    }
+    tune_timeline.value.failure_phase = tune_timeline.value.phase;
+    if (tune_timeline.phase_active &&
+        tune_timeline.value.phase > MINIIPTV_TUNE_PHASE_IDLE &&
+        tune_timeline.value.phase < MINIIPTV_TUNE_PHASE_COUNT) {
+        tune_timeline.value.phase_milliseconds[tune_timeline.value.phase] =
+            tune_elapsed_milliseconds(now, tune_timeline.phase_started_ms);
+        tune_timeline.value.phase_elapsed_milliseconds =
+            tune_timeline.value.phase_milliseconds[tune_timeline.value.phase];
+    }
+    tune_timeline.value.phase = MINIIPTV_TUNE_PHASE_FAILED;
+    tune_timeline.value.result = result;
+    tune_timeline.phase_active = false;
+    if (tune_timeline.tune_finished_ms == 0)
+        tune_timeline.tune_finished_ms = now;
+    LightLock_Unlock(&tune_timeline.lock);
+}
+
+void miniiptv_live_tune_segment_progress(size_t received_bytes,
+                                         size_t reported_bytes) {
+    if (!tune_timeline.initialized) return;
+    LightLock_Lock(&tune_timeline.lock);
+    if (tune_timeline.value.phase == MINIIPTV_TUNE_PHASE_INITIAL_SEGMENT) {
+        tune_timeline.value.initial_segment_received_bytes = received_bytes;
+        if (reported_bytes > 0)
+            tune_timeline.value.initial_segment_reported_bytes = reported_bytes;
+    }
+    LightLock_Unlock(&tune_timeline.lock);
+}
+
+void miniiptv_live_tune_get_telemetry(MiniIptvTuneTelemetry *telemetry) {
+    uint64_t now;
+    uint64_t end;
+    if (!telemetry) return;
+    memset(telemetry, 0, sizeof(*telemetry));
+    if (!tune_timeline.initialized) return;
+    now = osGetTime();
+    LightLock_Lock(&tune_timeline.lock);
+    *telemetry = tune_timeline.value;
+    telemetry->phase_active = tune_timeline.phase_active;
+    if (tune_timeline.phase_active) {
+        telemetry->phase_elapsed_milliseconds =
+            tune_elapsed_milliseconds(now, tune_timeline.phase_started_ms);
+        telemetry->phase_milliseconds[telemetry->phase] =
+            telemetry->phase_elapsed_milliseconds;
+    }
+    end = tune_timeline.tune_finished_ms ? tune_timeline.tune_finished_ms : now;
+    telemetry->total_elapsed_milliseconds =
+        tune_elapsed_milliseconds(end, tune_timeline.tune_started_ms);
+    LightLock_Unlock(&tune_timeline.lock);
+}
 
 static unsigned long measured_bandwidth_locked(void) {
     uint64_t bits_per_second;
@@ -227,6 +394,8 @@ static size_t segment_write_callback(const unsigned char *data, size_t size,
     if (size > MINIIPTV_SEGMENT_LIMIT - writer->total_size) return 0;
     memcpy(segment_staging + writer->total_size, data, size);
     writer->total_size += size;
+    if (writer->report_tune_progress)
+        miniiptv_live_tune_segment_progress(writer->total_size, 0);
     return size;
 }
 
@@ -243,6 +412,9 @@ static int stream_segment(const HlsSegment *segment, size_t *downloaded_size) {
     result = cancellation_result();
     if (result != MINIIPTV_STAGE_OK) return result;
     memset(&writer, 0, sizeof(writer));
+    LightLock_Lock(&stream.lock);
+    writer.report_tune_progress = stream.initial_tune_active;
+    LightLock_Unlock(&stream.lock);
     download_started = osGetTime();
     result = network_stream_data(segment->url, stream.channel.user_agent,
                                  stream.channel.referrer,
@@ -309,6 +481,9 @@ static int stream_segment(const HlsSegment *segment, size_t *downloaded_size) {
     result = (result == 0 && valid_ts && committed) ? MINIIPTV_STAGE_OK
                                                     : stream.last_error;
     LightLock_Unlock(&stream.lock);
+    if (writer.report_tune_progress)
+        miniiptv_live_tune_segment_progress(metrics.received_size,
+                                             metrics.reported_size);
     return result;
 }
 
@@ -357,6 +532,7 @@ static int resolve_initial_playlist(const MiniIptvChannel *channel,
 
     result = cancellation_result();
     if (result != MINIIPTV_STAGE_OK) goto cleanup;
+    miniiptv_live_tune_phase_begin(MINIIPTV_TUNE_PHASE_ROOT_MANIFEST);
     result = network_get_data_cancelable(
         channel->url, channel->user_agent, channel->referrer,
         MINIIPTV_MANIFEST_LIMIT, curl_should_cancel, NULL, &root);
@@ -382,6 +558,8 @@ static int resolve_initial_playlist(const MiniIptvChannel *channel,
     stream.variant_height = selection.height;
     snprintf(stream.variant_codecs, sizeof(stream.variant_codecs), "%s",
              selection.codecs);
+    miniiptv_live_tune_phase_complete(MINIIPTV_TUNE_PHASE_ROOT_MANIFEST);
+    miniiptv_live_tune_phase_begin(MINIIPTV_TUNE_PHASE_MEDIA_MANIFEST);
     if (selection.type == HLS_MASTER_PLAYLIST) {
         result = network_get_data_cancelable(
             selection.url, channel->user_agent, channel->referrer,
@@ -415,6 +593,7 @@ static int resolve_initial_playlist(const MiniIptvChannel *channel,
         result = MINIIPTV_STAGE_UNSUPPORTED_HLS;
         goto cleanup;
     }
+    miniiptv_live_tune_phase_complete(MINIIPTV_TUNE_PHASE_MEDIA_MANIFEST);
     result = cancellation_result();
     if (result != MINIIPTV_STAGE_OK) goto cleanup;
     snprintf(stream.media_url, sizeof(stream.media_url), "%s", media_url);
@@ -426,12 +605,27 @@ cleanup:
     return result;
 }
 
+static bool take_producer_seed(HlsMediaPlaylist *media) {
+    bool available;
+    if (!media) return false;
+    LightLock_Lock(&stream.lock);
+    available = stream.producer_seed_available;
+    if (available) {
+        *media = stream.producer_seed;
+        stream.producer_seed_available = false;
+    }
+    LightLock_Unlock(&stream.lock);
+    return available;
+}
+
 static void producer_main(void *unused) {
     (void)unused;
     while (!stop_was_requested()) {
         HlsMediaPlaylist media;
         size_t buffered;
         bool added = false;
+        bool found_new_segment = false;
+        bool used_seed;
         int result;
 
         LightLock_Lock(&stream.lock);
@@ -442,14 +636,18 @@ static void producer_main(void *unused) {
             continue;
         }
 
-        result = fetch_media_playlist(&media);
-        if (result != MINIIPTV_STAGE_OK) {
-            LightLock_Lock(&stream.lock);
-            stream.last_error = result;
-            LightLock_Unlock(&stream.lock);
-            for (int retry = 0; retry < 10 && !stop_was_requested(); retry++)
-                Util_sleep(100000);
-            continue;
+        used_seed = take_producer_seed(&media);
+        if (!used_seed) {
+            result = fetch_media_playlist(&media);
+            if (result != MINIIPTV_STAGE_OK) {
+                LightLock_Lock(&stream.lock);
+                stream.last_error = result;
+                LightLock_Unlock(&stream.lock);
+                for (int retry = 0;
+                     retry < 10 && !stop_was_requested(); retry++)
+                    Util_sleep(100000);
+                continue;
+            }
         }
         if (media.target_duration) stream.target_duration = media.target_duration;
         if (media.count > 0 && stream.last_sequence > 0 &&
@@ -463,6 +661,7 @@ static void producer_main(void *unused) {
         for (size_t i = 0; i < media.count && !stop_was_requested(); i++) {
             size_t ignored_size = 0;
             if (media.segments[i].sequence <= stream.last_sequence) continue;
+            found_new_segment = true;
             if (media.segments[i].discontinuity ||
                 (stream.last_sequence > 0 &&
                  media.segments[i].sequence != stream.last_sequence + 1)) {
@@ -480,7 +679,10 @@ static void producer_main(void *unused) {
             }
             added = true;
         }
-        if (!added) {
+        /* A consumed seed with no newer sequence is stale but not an error;
+         * refresh immediately.  Preserve the normal retry delay when a
+         * segment was present but failed staging. */
+        if (!added && (!used_seed || found_new_segment)) {
             for (int i = 0; i < 10 && !stop_was_requested(); i++)
                 Util_sleep(100000);
         }
@@ -503,13 +705,22 @@ int miniiptv_live_stream_start(const MiniIptvChannel *channel,
     int result;
     if (!channel || !channel->url[0] || !initial_info)
         return MINIIPTV_STAGE_INVALID_ARGUMENT;
-    initial_tune_deadline_ms = osGetTime() + STREAM_INITIAL_TUNE_TIMEOUT_MS;
+    miniiptv_live_tune_phase_begin(
+        MINIIPTV_TUNE_PHASE_OLD_STREAM_CLEANUP);
     miniiptv_live_stream_stop();
+    miniiptv_live_tune_phase_complete(
+        MINIIPTV_TUNE_PHASE_OLD_STREAM_CLEANUP);
     /* A cancel pressed while the previous producer was being joined belongs
      * to this tune, not the resettable old stream. Check the app-owned token
      * before clearing and initializing stream state. */
-    if (should_cancel && should_cancel(cancel_userdata))
+    if (should_cancel && should_cancel(cancel_userdata)) {
+        miniiptv_live_tune_fail(MINIIPTV_STAGE_CANCELLED);
         return MINIIPTV_STAGE_CANCELLED;
+    }
+    /* Joining the previous producer is serialized safety work, not part of
+     * this signal's network allowance. Start the 30 second tune deadline only
+     * after the old stream is fully gone. */
+    initial_tune_deadline_ms = osGetTime() + STREAM_INITIAL_TUNE_TIMEOUT_MS;
     memset(&stream, 0, sizeof(stream));
     LightLock_Init(&stream.lock);
     stream.initialized = true;
@@ -542,6 +753,8 @@ int miniiptv_live_stream_start(const MiniIptvChannel *channel,
         result = MINIIPTV_STAGE_MEDIA_INVALID;
         goto failure;
     }
+    miniiptv_live_tune_phase_begin(MINIIPTV_TUNE_PHASE_INITIAL_SEGMENT);
+    miniiptv_live_tune_segment_progress(0, 0);
     for (size_t i = first; i < first + selected; i++) {
         size_t bytes = 0;
         if (media.segments[i].discontinuity) {
@@ -564,11 +777,17 @@ int miniiptv_live_stream_start(const MiniIptvChannel *channel,
         initial_info->bytes_staged += bytes;
         initial_info->duration_staged += media.segments[i].duration;
     }
+    miniiptv_live_tune_phase_complete(MINIIPTV_TUNE_PHASE_INITIAL_SEGMENT);
     result = cancellation_result();
     if (result != MINIIPTV_STAGE_OK) goto failure;
     snprintf(initial_info->media_url, sizeof(initial_info->media_url), "%s",
              stream.media_url);
     LightLock_Lock(&stream.lock);
+    /* HlsMediaPlaylist owns fixed-size URL storage, so this is a bounded deep
+     * copy rather than a pointer into resolve_initial_playlist()'s responses
+     * or this function's stack.  The producer is the only consumer. */
+    stream.producer_seed = media;
+    stream.producer_seed_available = true;
     stream.initial_tune_active = false;
     stream.initial_tune_should_cancel = NULL;
     stream.initial_tune_cancel_userdata = NULL;
@@ -590,6 +809,7 @@ int miniiptv_live_stream_start(const MiniIptvChannel *channel,
     return MINIIPTV_STAGE_OK;
 
 failure:
+    miniiptv_live_tune_fail(result);
     miniiptv_live_stream_stop();
     return result;
 }

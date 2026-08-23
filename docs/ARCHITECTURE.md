@@ -16,7 +16,9 @@ return and tears down the live session before another channel is selected.
    redirects, timeouts, and response-size caps.
 3. `hls.c` parses master and media playlists and resolves relative URLs.
 4. `live_stream.c` selects the lowest advertised rendition and downloads live
-   MPEG-TS segments on a producer thread.
+   MPEG-TS segments on a producer thread. Initial tuning passes its already
+   parsed media playlist to that producer, avoiding an immediate duplicate
+   manifest request.
 5. Each segment is first capped and staged in a 4 MiB ordinary-RAM buffer. Only
    a complete, validated MPEG-TS response is committed to playback.
 6. A static 6 MiB BSS ring separates network timing from playback while
@@ -29,6 +31,12 @@ FFmpeg demuxes MPEG-TS and AAC. Compatible H.264 packets are normalized by
 `h264_annexb.c` and submitted to the New 3DS MVD hardware decoder as complete
 access units. The inherited player uploads decoded frames through the existing
 Citro3D rendering path and uses the existing audio output path.
+
+For a live source, the first decoded video frame establishes the video clock
+before normal A/V catch-up dropping begins. This is necessary because MPEG-TS
+audio and video can arrive with large absolute presentation timestamps; there
+is no valid relative drift calculation until both playback clocks have a
+baseline.
 
 RetroTuner3DS scales decoded images for the 400x240 top display, but it does not
 transcode the source. Decode cost therefore still depends on the original
@@ -54,6 +62,15 @@ resolution, profile, frame rate, and bitrate.
   changed segment reaches the decoder.
 - Stop and channel-change paths request producer cancellation, join the thread,
   close FFmpeg/MVD resources, and reset the ring.
+
+## Startup diagnostics
+
+The tuning UI reports the current startup phase and elapsed time across root
+manifest fetch, optional media-manifest selection, initial complete-segment
+staging, FFmpeg probing, MVD initialization, and first-frame presentation.
+These timings describe where startup latency occurred; they do not bypass the
+whole-segment handoff, memory caps, codec preflight, or serialized teardown
+boundaries above.
 
 ## Tests
 
