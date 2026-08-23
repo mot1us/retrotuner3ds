@@ -60,6 +60,10 @@ The rc9.6 detail overlay uses compact pipeline counters:
 These counters are diagnostic only and do not relax the MVD, segment-size,
 whole-segment, or teardown safety boundaries.
 
+Player failures return to a dedicated error panel that preserves the final
+video and audio snapshot on separate readable rows. This snapshot is cleared
+when a new tune begins, so it cannot be mistaken for the next station.
+
 ## Working with Codex
 
 A productive request usually names the outcome and supplies the latest hardware

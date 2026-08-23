@@ -5,6 +5,8 @@ versioning while the player remains experimental.
 
 ## [Unreleased]
 
+- Render player-failure diagnostics on dedicated video and audio rows instead
+  of clipping the counters after a long single-line error message.
 - Preserve the first live texture through the draw-stage A/V wait gate as well
   as the conversion-stage drop gate, then restore normal synchronization.
 - Bound player setup, MVD initialization, and post-MVD first-frame waits and

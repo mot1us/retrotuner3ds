@@ -67,6 +67,9 @@ typedef struct {
     bool switching_from_player;
     size_t switch_from_index;
     size_t switch_to_index;
+    uint32_t player_error_code;
+    Vid_live_diagnostics player_error_diagnostics;
+    bool has_player_error_diagnostics;
     bool exit_requested;
 } LiveApp;
 
@@ -135,7 +138,25 @@ static const char *stage_error_text(int result) {
 
 static void set_status_locked(LiveAppState state, const char *message) {
     app.state = state;
+    app.player_error_code = 0;
+    memset(&app.player_error_diagnostics, 0,
+           sizeof(app.player_error_diagnostics));
+    app.has_player_error_diagnostics = false;
     snprintf(app.status, sizeof(app.status), "%s", message ? message : "");
+}
+
+static const char *audio_diagnostic_state(Vid_live_audio_state state) {
+    switch (state) {
+        case VID_LIVE_AUDIO_NONE: return "NONE";
+        case VID_LIVE_AUDIO_DEMUXED: return "DEMUX";
+        case VID_LIVE_AUDIO_READY: return "OK";
+        case VID_LIVE_AUDIO_INIT_FAILED: return "INIT!";
+        case VID_LIVE_AUDIO_DECODE_FAILED: return "DEC!";
+        case VID_LIVE_AUDIO_CONVERT_FAILED: return "CVT!";
+        case VID_LIVE_AUDIO_OUTPUT_FAILED: return "OUT!";
+        case VID_LIVE_AUDIO_SCANNING:
+        default: return "SCAN";
+    }
 }
 
 static int tune_should_cancel(void *unused) {
@@ -158,6 +179,9 @@ static void player_error(uint32_t error_code) {
     if (app.pending_channel_step == 0)
         app.switching_from_player = false;
     app.state = LIVE_APP_ERROR;
+    app.player_error_code = error_code;
+    app.player_error_diagnostics = diagnostics;
+    app.has_player_error_diagnostics = true;
     if ((int32_t)error_code == MINIIPTV_STAGE_PLAYER_OPEN_TIMEOUT)
         snprintf(app.status, sizeof(app.status),
                  "PLAYER SETUP TIMEOUT // TRY ANOTHER SIGNAL");
@@ -166,15 +190,7 @@ static void player_error(uint32_t error_code) {
                  "MVD INIT TIMEOUT // TRY ANOTHER SIGNAL");
     else if ((int32_t)error_code == MINIIPTV_STAGE_FIRST_FRAME_TIMEOUT)
         snprintf(app.status, sizeof(app.status),
-                 "1ST FRAME TIMEOUT // V:%lu>%lu>%lu>%u A%u:%lu>%lu>%lu",
-                 (unsigned long)diagnostics.video_packets,
-                 (unsigned long)diagnostics.decoded_frames,
-                 (unsigned long)diagnostics.textures,
-                 diagnostics.presented ? 1u : 0u,
-                 diagnostics.audio_tracks,
-                 (unsigned long)diagnostics.audio_demux_packets,
-                 (unsigned long)diagnostics.audio_frames,
-                 (unsigned long)diagnostics.audio_buffers);
+                 "1ST FRAME TIMEOUT // TRY ANOTHER SIGNAL");
     else if ((int32_t)error_code == MINIIPTV_STAGE_TOO_LARGE)
         snprintf(app.status, sizeof(app.status),
                  "SIGNAL REJECTED // MAX 640x480 AT 30FPS");
@@ -773,6 +789,9 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
     bool switching_from_player;
     size_t switch_from_index;
     size_t switch_to_index;
+    uint32_t player_error_code;
+    Vid_live_diagnostics player_error_diagnostics;
+    bool has_player_error_diagnostics;
     char status[160];
     char line[112];
     size_t i;
@@ -796,6 +815,9 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
     switching_from_player = app.switching_from_player;
     switch_from_index = app.switch_from_index;
     switch_to_index = app.switch_to_index;
+    player_error_code = app.player_error_code;
+    player_error_diagnostics = app.player_error_diagnostics;
+    has_player_error_diagnostics = app.has_player_error_diagnostics;
     snprintf(status, sizeof(status), "%s", app.status);
     LightLock_Unlock(&app.lock);
     miniiptv_live_tune_get_telemetry(&tune);
@@ -930,13 +952,39 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
                i == selected ? UI_INK : UI_CREAM);
     }
 
-    Draw_texture(&pixel, UI_PANEL, 8, 183, 304, 28);
-    if (state == LIVE_APP_LOADING)
-        format_tune_status(line, sizeof(line), &tune);
-    Draw_align_c(state == LIVE_APP_LOADING ? line : status, 14, 184, 9.5f,
-                 state == LIVE_APP_ERROR || state == LIVE_APP_NO_PLAYLIST
-                     ? DEF_DRAW_RED : UI_MINT,
-                 DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 292, 24);
+    if (state == LIVE_APP_ERROR && has_player_error_diagnostics) {
+        Draw_texture(&pixel, UI_PANEL, 8, 177, 304, 34);
+        snprintf(line, sizeof(line),
+                 "DIAG %s // ERR %08lX",
+                 RETROTUNER_VERSION, (unsigned long)player_error_code);
+        Draw_align_c(line, 12, 178, 8.0f, DEF_DRAW_RED,
+                     DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 296, 10);
+        snprintf(line, sizeof(line), "VIDEO P:%lu D:%lu T:%lu X:%u",
+                 (unsigned long)player_error_diagnostics.video_packets,
+                 (unsigned long)player_error_diagnostics.decoded_frames,
+                 (unsigned long)player_error_diagnostics.textures,
+                 player_error_diagnostics.presented ? 1u : 0u);
+        Draw_align_c(line, 12, 188, 8.0f, UI_CYAN,
+                     DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 296, 10);
+        snprintf(line, sizeof(line), "AUDIO %u %s P:%lu D:%lu Q:%lu E:%08lX",
+                 player_error_diagnostics.audio_tracks,
+                 audio_diagnostic_state(player_error_diagnostics.audio_state),
+                 (unsigned long)player_error_diagnostics.audio_demux_packets,
+                 (unsigned long)player_error_diagnostics.audio_frames,
+                 (unsigned long)player_error_diagnostics.audio_buffers,
+                 (unsigned long)player_error_diagnostics.audio_last_error);
+        Draw_align_c(line, 12, 198, 7.0f, UI_MINT,
+                     DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 296, 10);
+    } else {
+        Draw_texture(&pixel, UI_PANEL, 8, 183, 304, 28);
+        if (state == LIVE_APP_LOADING)
+            format_tune_status(line, sizeof(line), &tune);
+        Draw_align_c(state == LIVE_APP_LOADING ? line : status,
+                     14, 184, 9.5f,
+                     state == LIVE_APP_ERROR || state == LIVE_APP_NO_PLAYLIST
+                         ? DEF_DRAW_RED : UI_MINT,
+                     DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 292, 24);
+    }
     if (state == LIVE_APP_LOADING) {
         draw_key_hint(&pixel, "B", "CANCEL", 9, 211, 17, UI_PINK);
         draw_key_hint(&pixel, "L/R", "CHANGE", 77, 211, 32, UI_CYAN);
