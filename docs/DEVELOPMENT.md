@@ -46,6 +46,20 @@ Open a pull request into `main`. For playback work, record desktop test results
 and the real-hardware result separately. A pull request can remain open while a
 `.3dsx` candidate is being tested.
 
+## Live startup diagnostics
+
+The rc9.6 detail overlay uses compact pipeline counters:
+
+- `V packet>decode>texture>draw` identifies the first video stage that stopped.
+- `A<tracks>:state demux>frame>queue` separates FFmpeg audio discovery,
+  decoding, and DSP output.
+- `P` is the producer state (`LIST`, `FETCH`, `EDGE`, `FULL`, or `ERROR`).
+- `C:H` means the 60-second rendition cache skipped the root master request;
+  the media playlist and complete initial segment were still downloaded.
+
+These counters are diagnostic only and do not relax the MVD, segment-size,
+whole-segment, or teardown safety boundaries.
+
 ## Working with Codex
 
 A productive request usually names the outcome and supplies the latest hardware
@@ -86,7 +100,7 @@ temporary directory, tests and builds that clean snapshot, and refuses to
 include playlists:
 
 ```sh
-./scripts/package-release.sh 0.5.1-rc9.5
+./scripts/package-release.sh 0.5.1-rc9.6
 ```
 
 The argument must exactly match `RETROTUNER_VERSION` in

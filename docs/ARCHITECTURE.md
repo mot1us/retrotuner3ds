@@ -18,7 +18,9 @@ return and tears down the live session before another channel is selected.
 4. `live_stream.c` selects the lowest advertised rendition and downloads live
    MPEG-TS segments on a producer thread. Initial tuning passes its already
    parsed media playlist to that producer, avoiding an immediate duplicate
-   manifest request.
+   manifest request. Four successful master selections are cached for 60
+   seconds; a hit skips only the root request and still refreshes the media
+   playlist before staging playback data.
 5. Each segment is first capped and staged in a 4 MiB ordinary-RAM buffer. Only
    a complete, validated MPEG-TS response is committed to playback.
 6. A static 6 MiB BSS ring separates network timing from playback while
@@ -71,6 +73,13 @@ staging, FFmpeg probing, MVD initialization, and first-frame presentation.
 These timings describe where startup latency occurred; they do not bypass the
 whole-segment handoff, memory caps, codec preflight, or serialized teardown
 boundaries above.
+
+During player startup, the live overlay also reports video packets accepted by
+the decoder, MVD output frames, uploaded textures, actual draw completion,
+audio demux/frame/output flow, and producer state. Player open, MVD init, and
+first-frame phases have separate bounded waits. Their timeout path uses the
+ordinary worker-owned abort sequence; it never frees MVD surfaces from the draw
+thread.
 
 ## Tests
 

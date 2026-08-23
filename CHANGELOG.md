@@ -5,6 +5,17 @@ versioning while the player remains experimental.
 
 ## [Unreleased]
 
+- Preserve the first live texture through the draw-stage A/V wait gate as well
+  as the conversion-stage drop gate, then restore normal synchronization.
+- Bound player setup, MVD initialization, and post-MVD first-frame waits and
+  return through serialized decoder teardown instead of leaving a station
+  permanently on a startup phase. A ready first texture receives a short draw
+  grace at the first-frame boundary.
+- Report live video progress, audio discovery/decode/output flow, producer
+  state, and rendition-cache hits without exposing station URLs.
+- Cache four recent master-rendition selections for 60 seconds so a repeat
+  tune can skip one root-manifest request while still fetching a fresh media
+  playlist and one complete MPEG-TS segment.
 - Establish the first decoded live frame as the A/V clock baseline before
   normal catch-up dropping, preventing streams with large absolute MPEG-TS
   timestamps from remaining on `SAFE VIDEO CHECK` while audio plays.

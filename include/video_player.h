@@ -20,6 +20,30 @@ typedef void (*Vid_idle_draw_hook)(bool top_screen, uint32_t color, uint32_t bac
 typedef void (*Vid_live_error_hook)(uint32_t error_code);
 typedef void (*Vid_live_channel_hook)(int direction);
 
+typedef enum {
+	VID_LIVE_AUDIO_SCANNING = 0,
+	VID_LIVE_AUDIO_NONE,
+	VID_LIVE_AUDIO_DEMUXED,
+	VID_LIVE_AUDIO_READY,
+	VID_LIVE_AUDIO_INIT_FAILED,
+	VID_LIVE_AUDIO_DECODE_FAILED,
+	VID_LIVE_AUDIO_CONVERT_FAILED,
+	VID_LIVE_AUDIO_OUTPUT_FAILED
+} Vid_live_audio_state;
+
+typedef struct {
+	uint32_t video_packets;
+	uint32_t decoded_frames;
+	uint32_t textures;
+	uint32_t audio_demux_packets;
+	uint32_t audio_frames;
+	uint32_t audio_buffers;
+	uint32_t audio_last_error;
+	uint8_t audio_tracks;
+	Vid_live_audio_state audio_state;
+	bool presented;
+} Vid_live_diagnostics;
+
 bool Vid_query_init_flag(void);
 
 bool Vid_query_running_flag(void);
@@ -56,6 +80,9 @@ bool Vid_query_idle_flag(void);
 
 //Incremented whenever an active playback session returns to the idle screen.
 uint32_t Vid_query_playback_return_generation(void);
+
+//Snapshot the current live startup/audio pipeline without exposing stream URLs.
+void Vid_query_live_diagnostics(Vid_live_diagnostics* diagnostics);
 
 //True after START is pressed while the embedded test is active.
 bool Vid_query_embedded_exit_requested(void);

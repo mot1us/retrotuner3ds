@@ -107,6 +107,12 @@ static const char *stage_error_text(int result) {
             return "TUNING CANCELED // PRESS A TO RETRY";
         case MINIIPTV_STAGE_TUNE_TIMEOUT:
             return "TUNING TIMEOUT // TRY AGAIN OR PICK ANOTHER SIGNAL";
+        case MINIIPTV_STAGE_PLAYER_OPEN_TIMEOUT:
+            return "PLAYER SETUP TIMEOUT // TRY ANOTHER SIGNAL";
+        case MINIIPTV_STAGE_MVD_INIT_TIMEOUT:
+            return "MVD INIT TIMEOUT // TRY ANOTHER SIGNAL";
+        case MINIIPTV_STAGE_FIRST_FRAME_TIMEOUT:
+            return "FIRST FRAME TIMEOUT // TRY ANOTHER SIGNAL";
         case MINIIPTV_STAGE_MANIFEST_FETCH_FAILED:
         case MINIIPTV_STAGE_MEDIA_FETCH_FAILED:
         case MINIIPTV_STAGE_SEGMENT_FETCH_FAILED:
@@ -142,6 +148,8 @@ static int tune_should_cancel(void *unused) {
 }
 
 static void player_error(uint32_t error_code) {
+    Vid_live_diagnostics diagnostics = {0};
+    Vid_query_live_diagnostics(&diagnostics);
     miniiptv_live_tune_fail((int32_t)error_code);
     LightLock_Lock(&app.lock);
     /* A player failure can race an already-latched L/R request. Keep that
@@ -150,7 +158,24 @@ static void player_error(uint32_t error_code) {
     if (app.pending_channel_step == 0)
         app.switching_from_player = false;
     app.state = LIVE_APP_ERROR;
-    if ((int32_t)error_code == MINIIPTV_STAGE_TOO_LARGE)
+    if ((int32_t)error_code == MINIIPTV_STAGE_PLAYER_OPEN_TIMEOUT)
+        snprintf(app.status, sizeof(app.status),
+                 "PLAYER SETUP TIMEOUT // TRY ANOTHER SIGNAL");
+    else if ((int32_t)error_code == MINIIPTV_STAGE_MVD_INIT_TIMEOUT)
+        snprintf(app.status, sizeof(app.status),
+                 "MVD INIT TIMEOUT // TRY ANOTHER SIGNAL");
+    else if ((int32_t)error_code == MINIIPTV_STAGE_FIRST_FRAME_TIMEOUT)
+        snprintf(app.status, sizeof(app.status),
+                 "1ST FRAME TIMEOUT // V:%lu>%lu>%lu>%u A%u:%lu>%lu>%lu",
+                 (unsigned long)diagnostics.video_packets,
+                 (unsigned long)diagnostics.decoded_frames,
+                 (unsigned long)diagnostics.textures,
+                 diagnostics.presented ? 1u : 0u,
+                 diagnostics.audio_tracks,
+                 (unsigned long)diagnostics.audio_demux_packets,
+                 (unsigned long)diagnostics.audio_frames,
+                 (unsigned long)diagnostics.audio_buffers);
+    else if ((int32_t)error_code == MINIIPTV_STAGE_TOO_LARGE)
         snprintf(app.status, sizeof(app.status),
                  "SIGNAL REJECTED // MAX 640x480 AT 30FPS");
     else if ((int32_t)error_code == MINIIPTV_STAGE_UNSUPPORTED_HLS)

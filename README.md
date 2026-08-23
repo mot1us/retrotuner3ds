@@ -137,6 +137,7 @@ The portable HLS and H.264 helpers also have sanitizer-backed host tests:
 - Releases are tagged with semantic versions such as `v0.5.0`.
 
 See the [Development guide](docs/DEVELOPMENT.md),
+[Adaptive buffering plan](docs/ADAPTIVE_BUFFERING.md),
 [Contributing](CONTRIBUTING.md), [Changelog](CHANGELOG.md), and the
 [Roadmap](ROADMAP.md).
 

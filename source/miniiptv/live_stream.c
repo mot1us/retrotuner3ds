@@ -20,6 +20,8 @@
 #define STREAM_HIGH_WATER_BYTES (5u * 1024u * 1024u)
 #define STREAM_SLEEP_US 10000ULL
 #define STREAM_INITIAL_TUNE_TIMEOUT_MS 30000ULL
+#define STREAM_RENDITION_CACHE_ENTRIES 4u
+#define STREAM_RENDITION_CACHE_TTL_MS 60000ULL
 #define TS_PACKET_SIZE 188u
 
 #if MINIIPTV_SEGMENT_LIMIT >= STREAM_RING_SIZE
@@ -40,6 +42,7 @@ typedef struct {
     bool producer_running;
     bool rebuffering;
     bool reader_started;
+    bool rendition_cache_hit;
     bool initial_tune_active;
     bool initial_tune_timed_out;
     uint64_t initial_tune_deadline_ms;
@@ -73,7 +76,21 @@ typedef struct {
     size_t reported_segment_bytes;
     int last_network_result;
     int last_error;
+    MiniIptvProducerState producer_state;
 } LiveStream;
+
+typedef struct {
+    bool valid;
+    uint64_t stored_ms;
+    char channel_url[MINIIPTV_URL_MAX];
+    char user_agent[MINIIPTV_HEADER_MAX];
+    char referrer[MINIIPTV_HEADER_MAX];
+    char media_url[MINIIPTV_HLS_URL_MAX];
+    unsigned long bandwidth;
+    unsigned int width;
+    unsigned int height;
+    char codecs[96];
+} RenditionCacheEntry;
 
 typedef struct {
     size_t total_size;
@@ -97,6 +114,13 @@ static unsigned char stream_ring[STREAM_RING_SIZE];
 static unsigned char segment_staging[MINIIPTV_SEGMENT_LIMIT];
 static LiveStream stream;
 static TuneTimeline tune_timeline;
+/* Repeat tunes can bypass one unchanged master-manifest request. This cache is
+ * deliberately tiny, short lived, and stored in ordinary BSS RAM. The media
+ * manifest itself is never cached: every tune still fetches current segment
+ * sequences before staging a complete transport-stream segment. Only the
+ * serialized tune worker accesses this table. */
+static RenditionCacheEntry
+    rendition_cache[STREAM_RENDITION_CACHE_ENTRIES];
 
 static unsigned int tune_elapsed_milliseconds(uint64_t end, uint64_t start) {
     uint64_t elapsed = end >= start ? end - start : 0;
@@ -116,6 +140,19 @@ const char *miniiptv_live_tune_phase_label(MiniIptvTunePhase phase) {
         case MINIIPTV_TUNE_PHASE_FAILED: return "TUNE FAILED";
         case MINIIPTV_TUNE_PHASE_IDLE:
         default: return "PREPARING";
+    }
+}
+
+const char *miniiptv_live_producer_state_label(MiniIptvProducerState state) {
+    switch (state) {
+        case MINIIPTV_PRODUCER_STARTING: return "START";
+        case MINIIPTV_PRODUCER_PLAYLIST: return "LIST";
+        case MINIIPTV_PRODUCER_SEGMENT: return "FETCH";
+        case MINIIPTV_PRODUCER_LIVE_EDGE: return "EDGE";
+        case MINIIPTV_PRODUCER_RING_HIGH: return "FULL";
+        case MINIIPTV_PRODUCER_ERROR: return "ERROR";
+        case MINIIPTV_PRODUCER_STOPPED:
+        default: return "STOP";
     }
 }
 
@@ -487,6 +524,95 @@ static int stream_segment(const HlsSegment *segment, size_t *downloaded_size) {
     return result;
 }
 
+static bool rendition_cache_lookup(const MiniIptvChannel *channel,
+                                    RenditionCacheEntry *entry) {
+    uint64_t now;
+    if (!channel || !channel->url[0] || !entry) return false;
+    now = osGetTime();
+    for (size_t i = 0; i < STREAM_RENDITION_CACHE_ENTRIES; i++) {
+        RenditionCacheEntry *candidate = &rendition_cache[i];
+        if (!candidate->valid) continue;
+        if (now < candidate->stored_ms ||
+            now - candidate->stored_ms > STREAM_RENDITION_CACHE_TTL_MS) {
+            memset(candidate, 0, sizeof(*candidate));
+            continue;
+        }
+        if (strcmp(candidate->channel_url, channel->url) == 0 &&
+            strcmp(candidate->user_agent, channel->user_agent) == 0 &&
+            strcmp(candidate->referrer, channel->referrer) == 0) {
+            *entry = *candidate;
+            return true;
+        }
+    }
+    return false;
+}
+
+static void rendition_cache_invalidate(const MiniIptvChannel *channel) {
+    if (!channel || !channel->url[0]) return;
+    for (size_t i = 0; i < STREAM_RENDITION_CACHE_ENTRIES; i++) {
+        if (rendition_cache[i].valid &&
+            strcmp(rendition_cache[i].channel_url, channel->url) == 0 &&
+            strcmp(rendition_cache[i].user_agent, channel->user_agent) == 0 &&
+            strcmp(rendition_cache[i].referrer, channel->referrer) == 0) {
+            memset(&rendition_cache[i], 0, sizeof(rendition_cache[i]));
+            return;
+        }
+    }
+}
+
+static void rendition_cache_store(const MiniIptvChannel *channel,
+                                  const char *media_url,
+                                  const HlsSelection *selection) {
+    size_t slot = STREAM_RENDITION_CACHE_ENTRIES;
+    size_t oldest_slot = STREAM_RENDITION_CACHE_ENTRIES;
+    uint64_t oldest = UINT64_MAX;
+    uint64_t now;
+    if (!channel || !channel->url[0] || !media_url || !media_url[0] ||
+        !selection || selection->type != HLS_MASTER_PLAYLIST)
+        return;
+    now = osGetTime();
+    for (size_t i = 0; i < STREAM_RENDITION_CACHE_ENTRIES; i++) {
+        if (rendition_cache[i].valid &&
+            strcmp(rendition_cache[i].channel_url, channel->url) == 0 &&
+            strcmp(rendition_cache[i].user_agent, channel->user_agent) == 0 &&
+            strcmp(rendition_cache[i].referrer, channel->referrer) == 0) {
+            slot = i;
+            break;
+        }
+        if (!rendition_cache[i].valid ||
+            now < rendition_cache[i].stored_ms ||
+            now - rendition_cache[i].stored_ms >
+                STREAM_RENDITION_CACHE_TTL_MS) {
+            if (slot == STREAM_RENDITION_CACHE_ENTRIES) slot = i;
+            continue;
+        }
+        if (rendition_cache[i].stored_ms < oldest) {
+            oldest = rendition_cache[i].stored_ms;
+            oldest_slot = i;
+        }
+    }
+    if (slot == STREAM_RENDITION_CACHE_ENTRIES)
+        slot = oldest_slot < STREAM_RENDITION_CACHE_ENTRIES ? oldest_slot : 0;
+    memset(&rendition_cache[slot], 0, sizeof(rendition_cache[slot]));
+    rendition_cache[slot].valid = true;
+    rendition_cache[slot].stored_ms = now;
+    snprintf(rendition_cache[slot].channel_url,
+             sizeof(rendition_cache[slot].channel_url), "%s", channel->url);
+    snprintf(rendition_cache[slot].user_agent,
+             sizeof(rendition_cache[slot].user_agent), "%s",
+             channel->user_agent);
+    snprintf(rendition_cache[slot].referrer,
+             sizeof(rendition_cache[slot].referrer), "%s",
+             channel->referrer);
+    snprintf(rendition_cache[slot].media_url,
+             sizeof(rendition_cache[slot].media_url), "%s", media_url);
+    rendition_cache[slot].bandwidth = selection->bandwidth;
+    rendition_cache[slot].width = selection->width;
+    rendition_cache[slot].height = selection->height;
+    snprintf(rendition_cache[slot].codecs,
+             sizeof(rendition_cache[slot].codecs), "%s", selection->codecs);
+}
+
 static int fetch_media_playlist(HlsMediaPlaylist *media) {
     NetworkTextResponse response = {0};
     const char *effective_url;
@@ -520,8 +646,8 @@ static int fetch_media_playlist(HlsMediaPlaylist *media) {
     return MINIIPTV_STAGE_OK;
 }
 
-static int resolve_initial_playlist(const MiniIptvChannel *channel,
-                                    HlsMediaPlaylist *media) {
+static int resolve_initial_playlist_uncached(const MiniIptvChannel *channel,
+                                             HlsMediaPlaylist *media) {
     NetworkTextResponse root = {0};
     NetworkTextResponse media_response = {0};
     HlsSelection selection;
@@ -597,12 +723,51 @@ static int resolve_initial_playlist(const MiniIptvChannel *channel,
     result = cancellation_result();
     if (result != MINIIPTV_STAGE_OK) goto cleanup;
     snprintf(stream.media_url, sizeof(stream.media_url), "%s", media_url);
+    rendition_cache_store(channel, stream.media_url, &selection);
     result = MINIIPTV_STAGE_OK;
 
 cleanup:
     network_response_free(&media_response);
     network_response_free(&root);
     return result;
+}
+
+static int resolve_initial_playlist(const MiniIptvChannel *channel,
+                                    HlsMediaPlaylist *media) {
+    RenditionCacheEntry cached;
+    int result;
+    if (rendition_cache_lookup(channel, &cached)) {
+        LightLock_Lock(&stream.lock);
+        stream.rendition_cache_hit = true;
+        LightLock_Unlock(&stream.lock);
+        stream.variant_bandwidth = cached.bandwidth;
+        stream.variant_width = cached.width;
+        stream.variant_height = cached.height;
+        snprintf(stream.variant_codecs, sizeof(stream.variant_codecs), "%s",
+                 cached.codecs);
+        snprintf(stream.media_url, sizeof(stream.media_url), "%s",
+                 cached.media_url);
+        miniiptv_live_tune_phase_begin(MINIIPTV_TUNE_PHASE_MEDIA_MANIFEST);
+        result = fetch_media_playlist(media);
+        if (result == MINIIPTV_STAGE_OK) {
+            miniiptv_live_tune_phase_complete(
+                MINIIPTV_TUNE_PHASE_MEDIA_MANIFEST);
+            return cancellation_result();
+        }
+        /* A selected rendition can disappear or its signed URL can expire.
+         * Discard the hint and resolve the root master in this same tune;
+         * cancellation and the original 30-second deadline remain in force. */
+        rendition_cache_invalidate(channel);
+        LightLock_Lock(&stream.lock);
+        stream.rendition_cache_hit = false;
+        LightLock_Unlock(&stream.lock);
+        if (result == MINIIPTV_STAGE_CANCELLED ||
+            result == MINIIPTV_STAGE_TUNE_TIMEOUT)
+            return result;
+        result = cancellation_result();
+        if (result != MINIIPTV_STAGE_OK) return result;
+    }
+    return resolve_initial_playlist_uncached(channel, media);
 }
 
 static bool take_producer_seed(HlsMediaPlaylist *media) {
@@ -630,6 +795,8 @@ static void producer_main(void *unused) {
 
         LightLock_Lock(&stream.lock);
         buffered = stream.ring_count;
+        if (buffered >= STREAM_HIGH_WATER_BYTES)
+            stream.producer_state = MINIIPTV_PRODUCER_RING_HIGH;
         LightLock_Unlock(&stream.lock);
         if (buffered >= STREAM_HIGH_WATER_BYTES) {
             Util_sleep(50000);
@@ -638,10 +805,14 @@ static void producer_main(void *unused) {
 
         used_seed = take_producer_seed(&media);
         if (!used_seed) {
+            LightLock_Lock(&stream.lock);
+            stream.producer_state = MINIIPTV_PRODUCER_PLAYLIST;
+            LightLock_Unlock(&stream.lock);
             result = fetch_media_playlist(&media);
             if (result != MINIIPTV_STAGE_OK) {
                 LightLock_Lock(&stream.lock);
                 stream.last_error = result;
+                stream.producer_state = MINIIPTV_PRODUCER_ERROR;
                 LightLock_Unlock(&stream.lock);
                 for (int retry = 0;
                      retry < 10 && !stop_was_requested(); retry++)
@@ -668,11 +839,18 @@ static void producer_main(void *unused) {
                 LightLock_Lock(&stream.lock);
                 stream.last_error = MINIIPTV_STAGE_DISCONTINUITY;
                 stream.stop_requested = true;
+                stream.producer_state = MINIIPTV_PRODUCER_ERROR;
                 LightLock_Unlock(&stream.lock);
                 break;
             }
+            LightLock_Lock(&stream.lock);
+            stream.producer_state = MINIIPTV_PRODUCER_SEGMENT;
+            LightLock_Unlock(&stream.lock);
             result = stream_segment(&media.segments[i], &ignored_size);
             if (result != MINIIPTV_STAGE_OK) {
+                LightLock_Lock(&stream.lock);
+                stream.producer_state = MINIIPTV_PRODUCER_ERROR;
+                LightLock_Unlock(&stream.lock);
                 for (int retry = 0; retry < 5 && !stop_was_requested(); retry++)
                     Util_sleep(100000);
                 break;
@@ -683,12 +861,19 @@ static void producer_main(void *unused) {
          * refresh immediately.  Preserve the normal retry delay when a
          * segment was present but failed staging. */
         if (!added && (!used_seed || found_new_segment)) {
+            if (!found_new_segment) {
+                LightLock_Lock(&stream.lock);
+                stream.producer_state = MINIIPTV_PRODUCER_LIVE_EDGE;
+                LightLock_Unlock(&stream.lock);
+            }
             for (int i = 0; i < 10 && !stop_was_requested(); i++)
                 Util_sleep(100000);
         }
     }
     LightLock_Lock(&stream.lock);
     stream.producer_running = false;
+    stream.producer_state = stream.stop_requested && stream.last_error != 0
+        ? MINIIPTV_PRODUCER_ERROR : MINIIPTV_PRODUCER_STOPPED;
     LightLock_Unlock(&stream.lock);
     threadExit(0);
 }
@@ -725,6 +910,7 @@ int miniiptv_live_stream_start(const MiniIptvChannel *channel,
     LightLock_Init(&stream.lock);
     stream.initialized = true;
     stream.channel = *channel;
+    stream.producer_state = MINIIPTV_PRODUCER_STARTING;
     stream.initial_tune_active = true;
     stream.initial_tune_deadline_ms = initial_tune_deadline_ms;
     stream.initial_tune_should_cancel = should_cancel;
@@ -921,5 +1107,7 @@ void miniiptv_live_stream_get_info(MiniIptvLiveInfo *info) {
     info->height = stream.variant_height;
     info->last_network_result = stream.last_network_result;
     info->rebuffering = stream.rebuffering;
+    info->rendition_cache_hit = stream.rendition_cache_hit;
+    info->producer_state = stream.producer_state;
     LightLock_Unlock(&stream.lock);
 }

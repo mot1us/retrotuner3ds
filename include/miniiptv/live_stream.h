@@ -23,6 +23,16 @@ typedef enum {
     MINIIPTV_TUNE_PHASE_COUNT
 } MiniIptvTunePhase;
 
+typedef enum {
+    MINIIPTV_PRODUCER_STOPPED = 0,
+    MINIIPTV_PRODUCER_STARTING,
+    MINIIPTV_PRODUCER_PLAYLIST,
+    MINIIPTV_PRODUCER_SEGMENT,
+    MINIIPTV_PRODUCER_LIVE_EDGE,
+    MINIIPTV_PRODUCER_RING_HIGH,
+    MINIIPTV_PRODUCER_ERROR
+} MiniIptvProducerState;
+
 typedef struct {
     MiniIptvTunePhase phase;
     MiniIptvTunePhase failure_phase;
@@ -53,6 +63,8 @@ typedef struct {
     unsigned int height;
     int last_network_result;
     int rebuffering;
+    int rendition_cache_hit;
+    MiniIptvProducerState producer_state;
 } MiniIptvLiveInfo;
 
 int miniiptv_live_stream_start(const MiniIptvChannel *channel,
@@ -82,5 +94,6 @@ void miniiptv_live_tune_segment_progress(size_t received_bytes,
                                          size_t reported_bytes);
 void miniiptv_live_tune_get_telemetry(MiniIptvTuneTelemetry *telemetry);
 const char *miniiptv_live_tune_phase_label(MiniIptvTunePhase phase);
+const char *miniiptv_live_producer_state_label(MiniIptvProducerState state);
 
 #endif

@@ -60,6 +60,10 @@
 #define MINIIPTV_LIVE_MAX_WIDTH					(uint32_t)(640)
 #define MINIIPTV_LIVE_MAX_HEIGHT					(uint32_t)(480)
 #define MINIIPTV_LIVE_MAX_FPS						(double)(30.5)
+#define MINIIPTV_PLAYER_OPEN_TIMEOUT_MS			(uint32_t)(20000)
+#define MINIIPTV_MVD_INIT_TIMEOUT_MS				(uint32_t)(8000)
+#define MINIIPTV_FIRST_FRAME_TIMEOUT_MS			(uint32_t)(12000)
+#define MINIIPTV_FIRST_DRAW_GRACE_MS				(uint32_t)(2000)
 
 #define NUM_OF_THREADS_MIN							(uint8_t)(2)							//Minimum number of threads for multi-threaded decoding.
 #define NUM_OF_THREADS_MAX							(uint8_t)(8)							//Maximum number of threads for multi-threaded decoding.
@@ -584,6 +588,15 @@ typedef struct
 													//(including decoded frames in seeking, so this is not the same as total_rendered_frames).
 	uint32_t total_rendered_frames;					//Total number of rendered frames.
 	uint32_t total_dropped_frames;					//Total number of dropped frames that should have rendered.
+	volatile uint32_t live_video_packets;			//Live packets accepted by the video decoder.
+	volatile uint32_t live_decoded_frames;			//Live raw frames emitted by MVD.
+	volatile uint32_t live_textures;					//Live frames published as textures.
+	volatile uint32_t live_audio_demux_packets;		//Live audio packets identified by FFmpeg.
+	volatile uint32_t live_audio_frames;			//Live audio frames decoded successfully.
+	volatile uint32_t live_audio_buffers;			//Live audio buffers queued to DSP.
+	volatile uint32_t live_audio_last_error;		//Last live audio pipeline error.
+	volatile uint8_t live_audio_tracks;				//Audio tracks reported by FFmpeg demux.
+	volatile Vid_live_audio_state live_audio_state;	//Live audio initialization state.
 	uint64_t previous_ts;							//Time stamp for last every-100ms-graph update.
 	double decoding_min_time;						//Minimum video decoding time in ms.
 	double decoding_max_time;						//Maximum video decoding time in ms.
@@ -783,6 +796,10 @@ static bool vid_miniptv_start_pending = false;
 static bool vid_miniptv_show_details = true;
 static bool vid_miniptv_return_requested = false;
 static bool vid_miniptv_switch_requested = false;
+static bool vid_live_startup_timeout_latched = false;
+
+static void Vid_reset_live_diagnostics(void);
+static void Vid_check_live_startup_timeout(void);
 
 static void Vid_draw_miniiptv_top_bar(void)
 {
@@ -802,11 +819,28 @@ static void Vid_draw_miniiptv_top_bar(void)
 		DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 74, 13);
 }
 
+static const char* Vid_live_audio_state_label(Vid_live_audio_state state)
+{
+	switch(state)
+	{
+		case VID_LIVE_AUDIO_NONE:			return "NONE";
+		case VID_LIVE_AUDIO_DEMUXED:		return "DEMUX";
+		case VID_LIVE_AUDIO_READY:			return "OK";
+		case VID_LIVE_AUDIO_INIT_FAILED:	return "INIT!";
+		case VID_LIVE_AUDIO_DECODE_FAILED:	return "DEC!";
+		case VID_LIVE_AUDIO_CONVERT_FAILED:	return "CVT!";
+		case VID_LIVE_AUDIO_OUTPUT_FAILED:	return "OUT!";
+		case VID_LIVE_AUDIO_SCANNING:
+		default:							return "SCAN";
+	}
+}
+
 static void Vid_draw_miniiptv_live_overlay(void)
 {
 	Draw_image_data pixel = Draw_get_empty_image();
 	MiniIptvLiveInfo live_info = { 0, };
 	MiniIptvTuneTelemetry tune = { 0, };
+	Vid_live_diagnostics diagnostics = { 0, };
 	bool has_presented_frame = __atomic_load_n(&vid_player.has_presented_frame,
 		__ATOMIC_ACQUIRE);
 	size_t buffered = 0;
@@ -826,6 +860,7 @@ static void Vid_draw_miniiptv_live_overlay(void)
 	miniiptv_live_stream_get_stats(&buffered, &downloaded, &read_kib,
 		&underruns, &live_error);
 	miniiptv_live_tune_get_telemetry(&tune);
+	Vid_query_live_diagnostics(&diagnostics);
 	(void)read_kib;
 
 	/* PLAYER_STATE_BUFFERING also covers the decoder's very short raw-frame
@@ -919,25 +954,46 @@ static void Vid_draw_miniiptv_live_overlay(void)
 
 	if(vid_miniptv_show_details)
 	{
-		if(live_info.width && live_info.height)
-			snprintf(line, sizeof(line), "%ux%u SRC:%luk NET:%luk U:%lu",
-				live_info.width, live_info.height,
-				effective_bandwidth / 1000ul,
-				live_info.network_bandwidth / 1000ul, underruns);
-		else
-			snprintf(line, sizeof(line), "AUTO  NET:%luk SEG:%ums U:%lu",
-				live_info.network_bandwidth / 1000ul,
-				live_info.last_download_milliseconds, underruns);
-		Draw_align_c(line, 8, 154, 10.0f,
-			live_error == 0 ? MINIIPTV_COLOR_MINT : DEF_DRAW_RED,
-			DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 304, 16);
-		if(!has_presented_frame && tune.phase != MINIIPTV_TUNE_PHASE_FAILED)
-			snprintf(line, sizeof(line), "%s %u.%us // T+%u.%us",
+		if(!has_presented_frame)
+			snprintf(line, sizeof(line), "%s %u.%us T+%u.%us P:%s C:%c",
 				miniiptv_live_tune_phase_label(tune.phase),
 				tune.phase_elapsed_milliseconds / 1000u,
 				(tune.phase_elapsed_milliseconds % 1000u) / 100u,
 				tune.total_elapsed_milliseconds / 1000u,
-				(tune.total_elapsed_milliseconds % 1000u) / 100u);
+				(tune.total_elapsed_milliseconds % 1000u) / 100u,
+				miniiptv_live_producer_state_label(live_info.producer_state),
+				live_info.rendition_cache_hit ? 'H' : '-');
+		else if(live_info.width && live_info.height)
+			snprintf(line, sizeof(line), "%ux%u B:%luk N:%luk P:%s A:%s(%u)",
+				live_info.width, live_info.height,
+				effective_bandwidth / 1000ul,
+				live_info.network_bandwidth / 1000ul,
+				miniiptv_live_producer_state_label(live_info.producer_state),
+				Vid_live_audio_state_label(diagnostics.audio_state),
+				diagnostics.audio_tracks);
+		else
+			snprintf(line, sizeof(line), "AUTO N:%luk SEG:%ums P:%s A:%s(%u)",
+				live_info.network_bandwidth / 1000ul,
+				live_info.last_download_milliseconds,
+				miniiptv_live_producer_state_label(live_info.producer_state),
+				Vid_live_audio_state_label(diagnostics.audio_state),
+				diagnostics.audio_tracks);
+		Draw_align_c(line, 8, 154, 10.0f,
+			live_error == 0 ? MINIIPTV_COLOR_MINT : DEF_DRAW_RED,
+			DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 304, 16);
+		if(!has_presented_frame)
+			snprintf(line, sizeof(line),
+				"V:%lu>%lu>%lu>%u A%u:%s %lu>%lu>%lu E:%08lX",
+				(unsigned long)diagnostics.video_packets,
+				(unsigned long)diagnostics.decoded_frames,
+				(unsigned long)diagnostics.textures,
+				diagnostics.presented ? 1u : 0u,
+				diagnostics.audio_tracks,
+				Vid_live_audio_state_label(diagnostics.audio_state),
+				(unsigned long)diagnostics.audio_demux_packets,
+				(unsigned long)diagnostics.audio_frames,
+				(unsigned long)diagnostics.audio_buffers,
+				(unsigned long)diagnostics.audio_last_error);
 		else if(tune.phase == MINIIPTV_TUNE_PHASE_READY && live_error == 0)
 			snprintf(line, sizeof(line),
 				"TUNE R:%u.%u M:%u.%u S:%u.%u P:%u.%u D:%u.%u F:%u.%u",
@@ -965,7 +1021,8 @@ static void Vid_draw_miniiptv_live_overlay(void)
 				live_info.last_download_milliseconds,
 				live_info.last_segment_milliseconds, downloaded);
 		Draw_align_c(line, 8, 166,
-			(tune.phase == MINIIPTV_TUNE_PHASE_READY && live_error == 0)
+			(!has_presented_frame
+			|| (tune.phase == MINIIPTV_TUNE_PHASE_READY && live_error == 0))
 				? 7.5f : 9.0f,
 			MINIIPTV_COLOR_CYAN,
 			DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 304, 12);
@@ -2069,6 +2126,7 @@ bool Vid_prepare_and_start_file(const char* directory, const char* name)
 
 	vid_miniptv_force_initial_autoplay =
 		(strcmp(name, MINIIPTV_LIVE_STREAM_URL) == 0);
+	Vid_reset_live_diagnostics();
 	vid_miniptv_start_pending = true;
 	__atomic_store_n(&vid_miniptv_return_requested, false, __ATOMIC_RELEASE);
 	__atomic_store_n(&vid_miniptv_switch_requested, false, __ATOMIC_RELEASE);
@@ -2097,9 +2155,113 @@ uint32_t Vid_query_playback_return_generation(void)
 	return __atomic_load_n(&vid_playback_return_generation, __ATOMIC_ACQUIRE);
 }
 
+static void Vid_reset_live_diagnostics(void)
+{
+	__atomic_store_n(&vid_player.live_video_packets, 0, __ATOMIC_RELEASE);
+	__atomic_store_n(&vid_player.live_decoded_frames, 0, __ATOMIC_RELEASE);
+	__atomic_store_n(&vid_player.live_textures, 0, __ATOMIC_RELEASE);
+	__atomic_store_n(&vid_player.live_audio_demux_packets, 0, __ATOMIC_RELEASE);
+	__atomic_store_n(&vid_player.live_audio_frames, 0, __ATOMIC_RELEASE);
+	__atomic_store_n(&vid_player.live_audio_buffers, 0, __ATOMIC_RELEASE);
+	__atomic_store_n(&vid_player.live_audio_last_error, 0, __ATOMIC_RELEASE);
+	__atomic_store_n(&vid_player.live_audio_tracks, 0, __ATOMIC_RELEASE);
+	__atomic_store_n(&vid_player.live_audio_state, VID_LIVE_AUDIO_SCANNING,
+		__ATOMIC_RELEASE);
+	__atomic_store_n(&vid_live_startup_timeout_latched, false,
+		__ATOMIC_RELEASE);
+}
+
+void Vid_query_live_diagnostics(Vid_live_diagnostics* diagnostics)
+{
+	if(!diagnostics)
+		return;
+
+	memset(diagnostics, 0, sizeof(*diagnostics));
+	diagnostics->video_packets = __atomic_load_n(
+		&vid_player.live_video_packets, __ATOMIC_ACQUIRE);
+	diagnostics->decoded_frames = __atomic_load_n(
+		&vid_player.live_decoded_frames, __ATOMIC_ACQUIRE);
+	diagnostics->textures = __atomic_load_n(
+		&vid_player.live_textures, __ATOMIC_ACQUIRE);
+	diagnostics->audio_demux_packets = __atomic_load_n(
+		&vid_player.live_audio_demux_packets, __ATOMIC_ACQUIRE);
+	diagnostics->audio_frames = __atomic_load_n(
+		&vid_player.live_audio_frames, __ATOMIC_ACQUIRE);
+	diagnostics->audio_buffers = __atomic_load_n(
+		&vid_player.live_audio_buffers, __ATOMIC_ACQUIRE);
+	diagnostics->audio_last_error = __atomic_load_n(
+		&vid_player.live_audio_last_error, __ATOMIC_ACQUIRE);
+	diagnostics->audio_tracks = __atomic_load_n(
+		&vid_player.live_audio_tracks, __ATOMIC_ACQUIRE);
+	diagnostics->audio_state = __atomic_load_n(
+		&vid_player.live_audio_state, __ATOMIC_ACQUIRE);
+	diagnostics->presented = __atomic_load_n(
+		&vid_player.has_presented_frame, __ATOMIC_ACQUIRE);
+}
+
 bool Vid_query_embedded_exit_requested(void)
 {
 	return __atomic_load_n(&vid_embedded_exit_requested, __ATOMIC_ACQUIRE);
+}
+
+static void Vid_check_live_startup_timeout(void)
+{
+	MiniIptvTuneTelemetry tune = { 0, };
+	int32_t timeout_result = 0;
+	uint32_t timeout_ms = 0;
+	uint32_t result;
+
+	if(!vid_embedded_test_mode || !miniiptv_live_stream_is_active()
+	|| __atomic_load_n(&vid_player.has_presented_frame, __ATOMIC_ACQUIRE)
+	|| __atomic_load_n(&vid_miniptv_return_requested, __ATOMIC_ACQUIRE))
+		return;
+
+	miniiptv_live_tune_get_telemetry(&tune);
+	if(!tune.phase_active)
+		return;
+	switch(tune.phase)
+	{
+		case MINIIPTV_TUNE_PHASE_PLAYER_OPEN:
+			timeout_ms = MINIIPTV_PLAYER_OPEN_TIMEOUT_MS;
+			timeout_result = MINIIPTV_STAGE_PLAYER_OPEN_TIMEOUT;
+			break;
+		case MINIIPTV_TUNE_PHASE_MVD_INIT:
+			timeout_ms = MINIIPTV_MVD_INIT_TIMEOUT_MS;
+			timeout_result = MINIIPTV_STAGE_MVD_INIT_TIMEOUT;
+			break;
+		case MINIIPTV_TUNE_PHASE_FIRST_FRAME:
+			timeout_ms = MINIIPTV_FIRST_FRAME_TIMEOUT_MS;
+			/* A texture produced at the deadline can be drawn by this same main
+			 * iteration. Give the draw stage a small bounded grace instead of
+			 * aborting a frame that is already safe and ready. */
+			if(__atomic_load_n(&vid_player.live_textures, __ATOMIC_ACQUIRE) > 0)
+				timeout_ms += MINIIPTV_FIRST_DRAW_GRACE_MS;
+			timeout_result = MINIIPTV_STAGE_FIRST_FRAME_TIMEOUT;
+			break;
+		default:
+			return;
+	}
+	if(tune.phase_elapsed_milliseconds < timeout_ms)
+		return;
+	if(__atomic_exchange_n(&vid_live_startup_timeout_latched, true,
+		__ATOMIC_ACQ_REL))
+		return;
+
+	/* Do not touch MVD or its surfaces here.  This is the draw/main thread;
+	 * request the same serialized worker teardown used by B and fatal decoder
+	 * errors so the service exits only after its reader/convert workers stop. */
+	miniiptv_live_stream_request_stop();
+	__atomic_store_n(&vid_miniptv_return_requested, true, __ATOMIC_RELEASE);
+	miniiptv_live_tune_fail(timeout_result);
+	if(vid_live_error_hook)
+		vid_live_error_hook((uint32_t)timeout_result);
+	result = Util_queue_add(&vid_player.decode_thread_command_queue,
+		DECODE_THREAD_ABORT_REQUEST, NULL, QUEUE_OP_TIMEOUT_US,
+		(Queue_option)(QUEUE_OPTION_DO_NOT_ADD_IF_EXIST
+			| QUEUE_OPTION_SEND_TO_FRONT));
+	if(result != DEF_SUCCESS)
+		DEF_LOG_RESULT(Util_queue_add, false, result);
+	Draw_set_refresh_needed(true);
 }
 
 void Vid_exit(bool draw)
@@ -2168,6 +2330,8 @@ void Vid_main(void)
 	Sem_state state = { 0, };
 	Vid_eye screen_pos_to_eye[SCREEN_POS_MAX] = { EYE_LEFT, EYE_RIGHT, EYE_LEFT, };
 	Vid_eye screen_pos_to_crop[SCREEN_POS_MAX] = { EYE_LEFT, EYE_RIGHT, EYE_LEFT, };
+
+	Vid_check_live_startup_timeout();
 
 	Sem_get_config(&config);
 	Sem_get_state(&state);
@@ -2250,6 +2414,18 @@ void Vid_main(void)
 
 						if(video_delay < force_wait_threshold)
 							wait = true;
+
+						/* A live MPEG-TS can begin with audio and video on unrelated
+						 * absolute clocks.  The convert thread already preserves one
+						 * texture; do not let this second A/V gate hold that texture
+						 * forever.  Normal synchronization resumes after the first draw. */
+						if(wait && miniiptv_live_stream_is_active()
+						&& !__atomic_load_n(&vid_player.has_presented_frame,
+							__ATOMIC_ACQUIRE))
+						{
+							wait = false;
+							vid_player.wait_threshold_exceeded_ts[i] = 0;
+						}
 
 						if(wait && Util_speaker_get_available_buffer_num(DEF_VID_SPEAKER_SESSION_ID) > 0)
 						{
@@ -4419,6 +4595,7 @@ static void Vid_init_debug_view_data(void)
 	vid_player.total_frames = 0;
 	vid_player.total_rendered_frames = 0;
 	vid_player.total_dropped_frames = 0;
+	Vid_reset_live_diagnostics();
 	vid_player.previous_ts = 0;
 	vid_player.decoding_min_time = 0xFFFFFFFF;
 	vid_player.decoding_max_time = 0;
@@ -5300,6 +5477,15 @@ void Vid_decode_thread(void* arg)
 							goto error;
 						}
 
+						if(miniiptv_live_stream_is_active())
+						{
+							__atomic_store_n(&vid_player.live_audio_tracks,
+								num_of_audio_tracks, __ATOMIC_RELEASE);
+							__atomic_store_n(&vid_player.live_audio_state,
+								num_of_audio_tracks > 0 ? VID_LIVE_AUDIO_DEMUXED
+									: VID_LIVE_AUDIO_NONE, __ATOMIC_RELEASE);
+						}
+
 						//Overwirte number of tracks if disable flag is set.
 						if(vid_player.disable_audio)
 						{
@@ -5322,7 +5508,11 @@ void Vid_decode_thread(void* arg)
 
 						if(num_of_audio_tracks > 0)
 						{
+							uint32_t speaker_init_result;
+							uint32_t speaker_info_result = DEF_ERR_OTHER;
+
 							DEF_LOG_RESULT_SMART(result, Util_speaker_init(), (result == DEF_SUCCESS), result);
+							speaker_init_result = result;
 							if(result != DEF_SUCCESS)
 							{
 								DEF_LOG_RESULT(Util_speaker_init, false, result);
@@ -5350,11 +5540,38 @@ void Vid_decode_thread(void* arg)
 								//3DS only supports up to 2ch.
 								playing_ch = (vid_player.audio_info[vid_player.selected_audio_track].ch > 2 ? 2 : vid_player.audio_info[vid_player.selected_audio_track].ch);
 								DEF_LOG_RESULT_SMART(result, Util_speaker_set_audio_info(DEF_VID_SPEAKER_SESSION_ID, playing_ch, vid_player.audio_info[vid_player.selected_audio_track].sample_rate), (result == DEF_SUCCESS), result);
+								speaker_info_result = result;
 
 								vid_player.num_of_audio_tracks = num_of_audio_tracks;
+								if(miniiptv_live_stream_is_active())
+								{
+									bool audio_output_ready =
+										speaker_init_result == DEF_SUCCESS
+										&& speaker_info_result == DEF_SUCCESS;
+									__atomic_store_n(&vid_player.live_audio_state,
+										audio_output_ready ? VID_LIVE_AUDIO_READY
+											: VID_LIVE_AUDIO_OUTPUT_FAILED,
+										__ATOMIC_RELEASE);
+									if(!audio_output_ready)
+										__atomic_store_n(
+											&vid_player.live_audio_last_error,
+											speaker_init_result != DEF_SUCCESS
+												? speaker_init_result
+												: speaker_info_result,
+											__ATOMIC_RELEASE);
+								}
 							}
 							else
 							{
+								if(miniiptv_live_stream_is_active())
+								{
+									__atomic_store_n(&vid_player.live_audio_state,
+										VID_LIVE_AUDIO_INIT_FAILED,
+										__ATOMIC_RELEASE);
+									__atomic_store_n(
+										&vid_player.live_audio_last_error, result,
+										__ATOMIC_RELEASE);
+								}
 								//If audio format is not supported, disable audio so that video can be played without audio.
 								Util_speaker_exit();
 								vid_player.num_of_audio_tracks = 0;
@@ -6425,6 +6642,9 @@ void Vid_decode_thread(void* arg)
 			}
 			else if(type == MEDIA_PACKET_TYPE_AUDIO)
 			{
+				if(miniiptv_live_stream_is_active())
+					__atomic_add_fetch(&vid_player.live_audio_demux_packets, 1,
+						__ATOMIC_RELAXED);
 				if(vid_player.num_of_audio_tracks > packet_index && packet_index == vid_player.selected_audio_track)
 				{
 					result = Util_decoder_ready_audio_packet(packet_index, DEF_VID_DECORDER_SESSION_ID);
@@ -6448,6 +6668,9 @@ void Vid_decode_thread(void* arg)
 
 						if(result == DEF_SUCCESS)
 						{
+							if(miniiptv_live_stream_is_active())
+								__atomic_add_fetch(&vid_player.live_audio_frames, 1,
+									__ATOMIC_RELAXED);
 							//We don't decode audio if we are seeking to speed up seeking.
 							if(vid_player.state != PLAYER_STATE_SEEKING)
 							{
@@ -6496,16 +6719,65 @@ void Vid_decode_thread(void* arg)
 
 										Util_sleep(2000);
 									}
+									if(miniiptv_live_stream_is_active())
+									{
+										if(result == DEF_SUCCESS)
+										{
+											__atomic_add_fetch(
+												&vid_player.live_audio_buffers, 1,
+												__ATOMIC_RELAXED);
+											__atomic_store_n(
+												&vid_player.live_audio_last_error, 0,
+												__ATOMIC_RELEASE);
+											__atomic_store_n(
+												&vid_player.live_audio_state,
+												VID_LIVE_AUDIO_READY,
+												__ATOMIC_RELEASE);
+										}
+										else if(result != DEF_ERR_TRY_AGAIN)
+										{
+											__atomic_store_n(
+												&vid_player.live_audio_last_error,
+												result, __ATOMIC_RELEASE);
+											__atomic_store_n(
+												&vid_player.live_audio_state,
+												VID_LIVE_AUDIO_OUTPUT_FAILED,
+												__ATOMIC_RELEASE);
+										}
+									}
 								}
 								else
+								{
 									DEF_LOG_RESULT(Util_converter_convert_audio, false, result);
+									if(miniiptv_live_stream_is_active())
+									{
+										__atomic_store_n(
+											&vid_player.live_audio_last_error, result,
+											__ATOMIC_RELEASE);
+										__atomic_store_n(
+											&vid_player.live_audio_state,
+											VID_LIVE_AUDIO_CONVERT_FAILED,
+											__ATOMIC_RELEASE);
+									}
+								}
 							}
 
 							//We must update audio position no matter we've skipped decoding (otherwise seeking process may stall).
 							vid_player.last_decoded_audio_pos = pos;
 						}
 						else if(result != DEF_SUCCESS)
+						{
 							DEF_LOG_RESULT(Util_decoder_audio_decode, false, result);
+							if(result != DEF_ERR_TRY_AGAIN
+							&& miniiptv_live_stream_is_active())
+							{
+								__atomic_store_n(&vid_player.live_audio_last_error,
+									result, __ATOMIC_RELEASE);
+								__atomic_store_n(&vid_player.live_audio_state,
+									VID_LIVE_AUDIO_DECODE_FAILED,
+									__ATOMIC_RELEASE);
+							}
+						}
 
 						free(parameters.converted);
 						free(audio);
@@ -6513,7 +6785,17 @@ void Vid_decode_thread(void* arg)
 						audio = NULL;
 					}
 					else
+					{
 						DEF_LOG_RESULT(Util_decoder_ready_audio_packet, false, result);
+						if(result != DEF_ERR_TRY_AGAIN
+						&& miniiptv_live_stream_is_active())
+						{
+							__atomic_store_n(&vid_player.live_audio_last_error,
+								result, __ATOMIC_RELEASE);
+							__atomic_store_n(&vid_player.live_audio_state,
+								VID_LIVE_AUDIO_DECODE_FAILED, __ATOMIC_RELEASE);
+						}
+					}
 				}
 				else//This packet is not what we are looking for now, just skip it.
 					Util_decoder_skip_audio_packet(packet_index, DEF_VID_DECORDER_SESSION_ID);
@@ -6719,6 +7001,10 @@ void Vid_decode_video_thread(void* arg)
 						{
 							uint8_t retry_count = 0;
 
+							if(miniiptv_live_stream_is_active())
+								__atomic_add_fetch(&vid_player.live_video_packets, 1,
+									__ATOMIC_RELAXED);
+
 							while(true)
 							{
 								uint64_t sleep_us = 0;
@@ -6736,6 +7022,11 @@ void Vid_decode_video_thread(void* arg)
 								{
 									if(result == DEF_ERR_DECODER_TRY_AGAIN)//Got a frame.
 									{
+										if((vid_player.sub_state & PLAYER_SUB_STATE_HW_DECODING)
+										&& miniiptv_live_stream_is_active())
+											__atomic_add_fetch(
+												&vid_player.live_decoded_frames, 1,
+												__ATOMIC_RELAXED);
 										if(vid_player.video_info[packet_index].thread_type != MEDIA_THREAD_TYPE_FRAME
 										|| (vid_player.sub_state & PLAYER_SUB_STATE_HW_DECODING))
 										{
@@ -6799,6 +7090,10 @@ void Vid_decode_video_thread(void* arg)
 
 							if(result == DEF_SUCCESS)
 							{
+								if((vid_player.sub_state & PLAYER_SUB_STATE_HW_DECODING)
+								&& miniiptv_live_stream_is_active())
+									__atomic_add_fetch(&vid_player.live_decoded_frames, 1,
+										__ATOMIC_RELAXED);
 								if(vid_player.video_info[packet_index].thread_type != MEDIA_THREAD_TYPE_FRAME
 								|| (vid_player.sub_state & PLAYER_SUB_STATE_HW_DECODING))
 								{
@@ -7339,6 +7634,9 @@ void Vid_convert_thread(void* arg)
 					vid_player.next_store_index[packet_index] = next_store_index;
 
 					vid_player.total_rendered_frames++;
+					if(miniiptv_live_stream_is_active())
+						__atomic_add_fetch(&vid_player.live_textures, 1,
+							__ATOMIC_RELAXED);
 				}
 				else
 				{

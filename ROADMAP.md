@@ -6,7 +6,8 @@ is intentionally focused on reliability and clarity.
 ## Next
 
 - Finish hardware testing and polish for the Pixel Deck UI.
-- Improve rebuffer timing after long playback sessions.
+- Measure network headroom and jitter with a shadow adaptive-buffer controller,
+  then enable per-session live-edge depth and segment-based refill policies.
 - Add a small compatibility database based on reproducible hardware reports.
 - Make channel errors understandable without exposing the inherited debug UI.
 - Add release packaging and checksum automation.
