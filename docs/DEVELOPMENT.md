@@ -86,7 +86,7 @@ temporary directory, tests and builds that clean snapshot, and refuses to
 include playlists:
 
 ```sh
-./scripts/package-release.sh 0.5.1-rc9.1
+./scripts/package-release.sh 0.5.1-rc9.2
 ```
 
 The argument must exactly match `RETROTUNER_VERSION` in

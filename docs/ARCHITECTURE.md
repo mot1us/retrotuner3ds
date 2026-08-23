@@ -25,11 +25,10 @@ return and tears down the live session before another channel is selected.
 
 ## Playback path
 
-FFmpeg demuxes MPEG-TS and AAC. Compatible H.264 access units are normalized by
-`h264_annexb.c`, safety-checked, and submitted to the New 3DS MVD hardware
-decoder one NAL unit per service call. The inherited player uploads decoded
-frames through the existing Citro3D rendering path and uses the existing audio
-output path.
+FFmpeg demuxes MPEG-TS and AAC. Compatible H.264 packets are normalized by
+`h264_annexb.c` and submitted to the New 3DS MVD hardware decoder as complete
+access units. The inherited player uploads decoded frames through the existing
+Citro3D rendering path and uses the existing audio output path.
 
 RetroTuner3DS scales decoded images for the 400x240 top display, but it does not
 transcode the source. Decode cost therefore still depends on the original
@@ -42,12 +41,12 @@ resolution, profile, frame rate, and bitrate.
   segment ceiling applies to both prefetch and live playback, and failures
   report received size, server length when known, and the cap without logging
   the channel URL.
-- Live MVD input is restricted to one H.264/YUV420 track at no more than
-  640x480 and, when reported, no more than 30 fps. Oversized sources fail
+- Live MVD input is restricted to one H.264/YUV420P track at no more than
+  640x480 and, when reported, no more than 30.5 fps. Unsupported sources fail
   before `mvdstdInit`.
-- H.264 SPS/PPS changes, invalid physical buffers, non-success MVD results, and
-  demux-detected packet corruption trigger serialized teardown instead of
-  feeding more packets to the decoder service.
+- Invalid physical buffers and fatal MVD results trigger serialized teardown.
+  Render waits are bounded, and MVD-registered output surfaces remain allocated
+  until the decoder service exits.
 - The producer pauses at a high-water mark. Playback only enters its bounded
   three-second refill after the network ring actually runs empty.
 - Encrypted, byte-range, and fMP4 playlists are rejected before handoff;

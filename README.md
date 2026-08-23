@@ -70,9 +70,9 @@ RetroTuner3DS currently targets:
 - low-resolution, low-bitrate variants.
 
 For console safety, the current live path also rejects video above 640x480,
-known frame rates above 30 fps, changed H.264 SPS/PPS parameters, partial
-segments, and mid-stream HLS discontinuities. A rejected channel returns to the
-deck instead of falling back to software decoding.
+known frame rates above 30.5 fps, partial segments, and mid-stream HLS
+discontinuities. A rejected channel returns to the deck instead of falling back
+to software decoding.
 
 At tuning time, the player selects the lowest rendition advertised by the
 channel and rejects unsupported HLS layouts. This compatibility filtering does

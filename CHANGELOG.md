@@ -13,15 +13,11 @@ versioning while the player remains experimental.
 - Build public release archives from a clean committed snapshot and refuse to
   package playlists, local media, or generated application binaries.
 - Remove the obsolete embedded reference-clip entry point.
-- Add an rc8 fail-closed live decoder path after two matching MVD service crash
-  dumps: reject streams above 640x480/30 fps and never software-fallback live
-  video.
-- Reject changed H.264 SPS/PPS data, invalid MVD buffers/configuration, corrupt
-  packets, and unsupported processing results before another packet can enter
-  the hardware service.
-- Submit normalized H.264 data to MVD one NAL unit per service call and accept
-  every successful status defined by libctru, fixing rc8.1's false format-change
-  failures on ordinary SPS+PPS extradata.
+- Keep live hardware decode behind an H.264/YUV420P, 640x480, 30.5 fps
+  preflight after two matching MVD service crash dumps; unsupported streams do
+  not fall back to software video decoding.
+- Restore the proven whole normalized H.264 access-unit submission path after
+  rc9's experimental per-NAL parameter guard rejected ordinary broadcasts.
 - Accept MVD's `0x17000` success status from `MVDSTD_SetConfig`; rc9 mistakenly
   surfaced that successful configuration as a fatal player error.
 - Stage each HLS segment atomically so failed or truncated HTTP transfers never
@@ -29,7 +25,8 @@ versioning while the player remains experimental.
 - Use one 4 MiB ceiling for prefetch and live atomic segment staging, with
   URL-free received/content-length diagnostics when that cap is exceeded.
 - Bound stalled MVD render waits, keep registered output surfaces alive until
-  service exit, and join every live worker before freeing shared state.
+  service exit, use the matching allocator for linear memory, and join every
+  live worker before freeing shared state.
 - Order START shutdown as producer cancellation, player-thread join, decoder
   close, then stream and network teardown.
 - Stop cleanly at HLS discontinuities or media-sequence gaps.
