@@ -9,6 +9,7 @@
 #include "miniiptv/live_session.h"
 #include "miniiptv/live_stream.h"
 #include "miniiptv/playlist.h"
+#include "miniiptv/version.h"
 #include "system/draw/draw.h"
 #include "system/util/err_types.h"
 #include "system/util/hid_types.h"
@@ -456,7 +457,7 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
             draw_key_hint(&pixel, "START", "EXIT", 280, 181, 47,
                           UI_ORANGE);
         }
-		Draw_align_c("PIXEL DECK 0.5.1-rc8 // H264", 0, 211, 9.5f,
+		Draw_align_c("PIXEL DECK " RETROTUNER_VERSION " // H264", 0, 211, 9.5f,
                      UI_CREAM, DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER,
                      400, 14);
         return;

@@ -1958,13 +1958,6 @@ void Vid_init(bool draw)
 	DEF_LOG_STRING("Initialized.");
 }
 
-void Vid_prepare_embedded_test(void)
-{
-	vid_embedded_test_mode = true;
-	__atomic_store_n(&vid_embedded_exit_requested, false, __ATOMIC_RELEASE);
-	Vid_prepare_file("romfs:/", "tvsturbo-reference.mkv");
-}
-
 void Vid_enable_standalone_mode(void)
 {
 	vid_embedded_test_mode = true;

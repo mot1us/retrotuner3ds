@@ -2,7 +2,6 @@ name: Host tests
 
 on:
   push:
-    branches: [main]
   pull_request:
 
 permissions:
@@ -13,5 +12,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Run HLS and H.264 tests
+      - name: Check public-tree hygiene
+        run: ./scripts/check-public-tree.sh
+      - name: Run playlist, HLS, and H.264 tests
         run: ./tests/run_live_host_tests.sh

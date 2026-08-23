@@ -1,4 +1,5 @@
 #include "miniiptv/network.h"
+#include "miniiptv/version.h"
 
 #include <curl/curl.h>
 
@@ -157,7 +158,7 @@ int network_get_data(const char *url, const char *user_agent, const char *referr
     curl_easy_setopt(curl, CURLOPT_TIMEOUT,
                      maximum_size > MINIIPTV_MANIFEST_LIMIT ? 60L : 20L);
     curl_easy_setopt(curl, CURLOPT_USERAGENT,
-        user_agent && *user_agent ? user_agent : "RetroTuner3DS/0.5.1-rc8");
+        user_agent && *user_agent ? user_agent : "RetroTuner3DS/" RETROTUNER_VERSION);
     if (referrer && *referrer) curl_easy_setopt(curl, CURLOPT_REFERER, referrer);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buffer);
@@ -224,7 +225,7 @@ int network_download_file(const char *url, const char *user_agent,
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 15L);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 60L);
     curl_easy_setopt(curl, CURLOPT_USERAGENT,
-        user_agent && *user_agent ? user_agent : "RetroTuner3DS/0.5.1-rc8");
+        user_agent && *user_agent ? user_agent : "RetroTuner3DS/" RETROTUNER_VERSION);
     if (referrer && *referrer) curl_easy_setopt(curl, CURLOPT_REFERER, referrer);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, file_write_callback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &output);
@@ -295,7 +296,7 @@ int network_stream_data(const char *url, const char *user_agent,
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 60L);
     curl_easy_setopt(curl, CURLOPT_FAILONERROR, 1L);
     curl_easy_setopt(curl, CURLOPT_USERAGENT,
-        user_agent && *user_agent ? user_agent : "RetroTuner3DS/0.5.1-rc8");
+        user_agent && *user_agent ? user_agent : "RetroTuner3DS/" RETROTUNER_VERSION);
     if (referrer && *referrer) curl_easy_setopt(curl, CURLOPT_REFERER, referrer);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, stream_write_callback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &output);

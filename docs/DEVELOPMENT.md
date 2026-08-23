@@ -77,3 +77,24 @@ To inspect upstream changes without merging them:
 git fetch upstream
 git log --oneline --left-right main...upstream/main
 ```
+
+## Public release package
+
+Only package a commit after its release candidate has passed real New 3DS
+hardware testing. The packaging script exports the committed Git tree into a
+temporary directory, tests and builds that clean snapshot, and refuses to
+include playlists:
+
+```sh
+./scripts/package-release.sh 0.5.1-rc8.1
+```
+
+The argument must exactly match `RETROTUNER_VERSION` in
+`include/miniiptv/version.h`; update that one definition before preparing a
+different candidate or final release.
+
+The ZIP, its SHA-256 file, and the unpacked drop-in folder are written under
+the ignored `dist/` directory. Public packages never include `channels.m3u`;
+each user supplies that file on their own SD card. Private hardware-test
+packages belong outside the repository and must not be attached to a public
+release.

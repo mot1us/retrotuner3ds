@@ -2,6 +2,7 @@
 #define DEF_VIDEO_PLAYER_HPP
 #include <stdbool.h>
 #include <stdint.h>
+#include "miniiptv/version.h"
 #include "system/util/hid_types.h"
 
 #define DEF_VID_ENABLE
@@ -10,7 +11,7 @@
 //#define DEF_VID_ENABLE_NAME
 #define DEF_VID_ICON_PATH				/*(const char*)(*/"romfs:/gfx/draw/icon/vid_icon.t3x"/*)*/
 #define DEF_VID_NAME					/*(const char*)(*/"Video\nplayer"/*)*/
-#define DEF_VID_VER						/*(const char*)(*/"RetroTuner3DS Pixel Deck 0.5.1-rc8"/*)*/
+#define DEF_VID_VER						/*(const char*)(*/"RetroTuner3DS Pixel Deck " RETROTUNER_VERSION/*)*/
 #define DEF_VID_SPEAKER_SESSION_ID		(uint8_t)(0)
 #define DEF_VID_DECORDER_SESSION_ID		(uint8_t)(0)
 
@@ -34,9 +35,6 @@ uint32_t Vid_load_msg(const char* lang);
 void Vid_init(bool draw);
 
 void Vid_exit(bool draw);
-
-//Configure the standalone RetroTuner3DS player.
-void Vid_prepare_embedded_test(void);
 
 void Vid_enable_standalone_mode(void);
 

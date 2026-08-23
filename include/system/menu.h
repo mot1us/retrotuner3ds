@@ -2,9 +2,10 @@
 #define DEF_MENU_H
 #include <stdbool.h>
 #include <stdint.h>
+#include "miniiptv/version.h"
 
 #define DEF_MENU_MAIN_DIR				/*(const char*)(*/"/3ds/retrotuner3ds/"/*)*/
-#define DEF_MENU_CURRENT_APP_VER		/*(const char*)(*/"0.5.0 Pixel Deck"/*)*/
+#define DEF_MENU_CURRENT_APP_VER		/*(const char*)(*/RETROTUNER_VERSION " Pixel Deck"/*)*/
 #define DEF_MENU_CURRENT_APP_VER_INT	(uint32_t)(1)
 
 bool Menu_query_must_exit_flag(void);

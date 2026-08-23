@@ -5,6 +5,14 @@ versioning while the player remains experimental.
 
 ## [Unreleased]
 
+- Add sanitizer-backed M3U and HLS parser coverage, including 32-channel
+  limits, quoted metadata, rendition selection, encryption tags, and URL
+  resolution.
+- Select HLS renditions by exact peak `BANDWIDTH` instead of accidentally
+  treating `AVERAGE-BANDWIDTH` as the peak value.
+- Build public release archives from a clean committed snapshot and refuse to
+  package playlists, local media, or generated application binaries.
+- Remove the obsolete embedded reference-clip entry point.
 - Add an rc8 fail-closed live decoder path after two matching MVD service crash
   dumps: reject streams above 640x480/30 fps and never software-fallback live
   video.

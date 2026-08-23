@@ -1,16 +1,40 @@
-# devkitARM outputs
+# devkitARM and release outputs
 /build/
-/*.3dsx
-/*.cia
-/*.elf
-/*.map
-/*.smdh
+*.3dsx
+*.cia
+*.elf
+*.map
+*.smdh
+*.zip
+/dist/
+/release/
 
 # Host-test outputs
 /tests/bin/
 
-# Local media fixtures are not distributable source
-/romfs/tvsturbo-reference.mkv
+# User playlists and local media fixtures are not distributable source
+*.m3u
+*.m3u8
+/romfs/*.mkv
+/romfs/**/*.mkv
+/romfs/*.mp4
+/romfs/**/*.mp4
+/romfs/*.ts
+/romfs/**/*.ts
+/romfs/*.m4v
+/romfs/**/*.m4v
+/romfs/*.mov
+/romfs/**/*.mov
+/romfs/*.avi
+/romfs/**/*.avi
+/romfs/*.webm
+/romfs/**/*.webm
+/romfs/*.m2ts
+/romfs/**/*.m2ts
+/romfs/*.mpeg
+/romfs/**/*.mpeg
+/romfs/*.mpg
+/romfs/**/*.mpg
 
 # Editors and operating systems
 .DS_Store
