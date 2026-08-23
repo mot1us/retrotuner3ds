@@ -39,8 +39,8 @@ playlist and are responsible for having permission to access its streams.
 | --- | --- |
 | D-pad Up/Down | Choose a channel |
 | A | Tune the selected channel |
-| B | Stop playback and return to the channel deck |
-| L / R | Switch to the previous or next channel during playback |
+| B | Cancel tuning, or stop playback and return to the channel deck |
+| L / R | Queue the previous or next channel while tuning or playing |
 | Select | Toggle playback details |
 | Start | Exit |
 
@@ -75,8 +75,10 @@ discontinuities. A rejected channel returns to the deck instead of falling back
 to software decoding.
 
 At tuning time, the player selects the lowest rendition advertised by the
-channel and rejects unsupported HLS layouts. This compatibility filtering does
-not guarantee that every URL in a playlist will play.
+channel and rejects unsupported HLS layouts. Initial tuning has a 30-second
+total deadline and remains cancelable, so a stalled URL cannot trap the channel
+deck. This compatibility filtering does not guarantee that every URL in a
+playlist will play.
 
 It does **not** transcode video. The 3DS can scale a decoded frame for its
 screen, but scaling does not reduce the work required to decode a 720p or

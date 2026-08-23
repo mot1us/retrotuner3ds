@@ -5,6 +5,15 @@ versioning while the player remains experimental.
 
 ## [Unreleased]
 
+- Bound the entire initial tune to 30 seconds and make manifest downloads
+  cancelable, preventing a dead signal from leaving the deck stuck on
+  `RETUNING`.
+- Let `B` cancel an in-progress tune and let D-pad or `L`/`R` queue exactly one
+  replacement signal without overlapping stream teardown.
+- Keep blocking stream joins outside the app lock and reap completed tuning
+  workers before channel handoff, fixing a permanent retune race.
+- Restore a 5 MiB producer high-water mark in the 6 MiB ring to give working
+  low-bitrate channels more network headroom.
 - Add sanitizer-backed M3U and HLS parser coverage, including 32-channel
   limits, quoted metadata, rendition selection, encryption tags, and URL
   resolution.

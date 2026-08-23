@@ -29,6 +29,11 @@ int network_get_text(const char *url, const char *user_agent, const char *referr
                      NetworkTextResponse *response);
 int network_get_data(const char *url, const char *user_agent, const char *referrer,
                      size_t maximum_size, NetworkTextResponse *response);
+int network_get_data_cancelable(const char *url, const char *user_agent,
+                                const char *referrer, size_t maximum_size,
+                                MiniIptvCancelFunction should_cancel,
+                                void *cancel_userdata,
+                                NetworkTextResponse *response);
 int network_download_file(const char *url, const char *user_agent,
                           const char *referrer, size_t maximum_size,
                           const char *output_path,

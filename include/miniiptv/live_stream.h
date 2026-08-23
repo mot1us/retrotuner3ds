@@ -29,7 +29,9 @@ typedef struct {
 } MiniIptvLiveInfo;
 
 int miniiptv_live_stream_start(const MiniIptvChannel *channel,
-                               MiniIptvStageInfo *initial_info);
+                               MiniIptvStageInfo *initial_info,
+                               MiniIptvCancelFunction should_cancel,
+                               void *cancel_userdata);
 void miniiptv_live_stream_request_stop(void);
 void miniiptv_live_stream_stop(void);
 int miniiptv_live_stream_is_active(void);

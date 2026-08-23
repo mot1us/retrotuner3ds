@@ -38,3 +38,13 @@ cc -std=c11 -Wall -Wextra -Werror -pedantic \
   -o tests/bin/test_h264_annexb_san
 
 ASAN_OPTIONS=detect_leaks=0 tests/bin/test_h264_annexb_san
+
+cc -std=c11 -Wall -Wextra -Werror -pedantic \
+  -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer \
+  -Iinclude \
+  source/miniiptv/network.c \
+  tests/test_network.c \
+  -lcurl \
+  -o tests/bin/test_network_san
+
+ASAN_OPTIONS=detect_leaks=0 tests/bin/test_network_san

@@ -15,6 +15,9 @@ typedef struct {
     char *data;
     size_t size;
     size_t capacity;
+    MiniIptvCancelFunction should_cancel;
+    void *cancel_userdata;
+    int cancelled;
 } CurlBuffer;
 
 typedef struct {
@@ -46,6 +49,23 @@ static size_t write_callback(char *incoming, size_t size, size_t count, void *us
     memcpy(buffer->data + buffer->size, incoming, bytes);
     buffer->size += bytes;
     return bytes;
+}
+
+static int buffer_progress_callback(void *userdata, curl_off_t download_total,
+                                    curl_off_t download_now,
+                                    curl_off_t upload_total,
+                                    curl_off_t upload_now) {
+    CurlBuffer *buffer = userdata;
+    (void)download_total;
+    (void)download_now;
+    (void)upload_total;
+    (void)upload_now;
+    if (buffer && buffer->should_cancel &&
+        buffer->should_cancel(buffer->cancel_userdata)) {
+        buffer->cancelled = 1;
+        return 1;
+    }
+    return 0;
 }
 
 static size_t file_write_callback(char *incoming, size_t size, size_t count,
@@ -141,6 +161,15 @@ void network_response_free(NetworkTextResponse *response) {
 
 int network_get_data(const char *url, const char *user_agent, const char *referrer,
                      size_t maximum_size, NetworkTextResponse *response) {
+    return network_get_data_cancelable(url, user_agent, referrer, maximum_size,
+                                       NULL, NULL, response);
+}
+
+int network_get_data_cancelable(const char *url, const char *user_agent,
+                                const char *referrer, size_t maximum_size,
+                                MiniIptvCancelFunction should_cancel,
+                                void *cancel_userdata,
+                                NetworkTextResponse *response) {
     CURL *curl;
     CURLcode result;
     CurlBuffer buffer;
@@ -154,6 +183,9 @@ int network_get_data(const char *url, const char *user_agent, const char *referr
     buffer.data = response->data;
     buffer.size = 0;
     buffer.capacity = maximum_size;
+    buffer.should_cancel = should_cancel;
+    buffer.cancel_userdata = cancel_userdata;
+    buffer.cancelled = 0;
 
     curl = persistent_curl;
     if (!curl) { network_response_free(response); return -3; }
@@ -171,6 +203,9 @@ int network_get_data(const char *url, const char *user_agent, const char *referr
     if (referrer && *referrer) curl_easy_setopt(curl, CURLOPT_REFERER, referrer);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buffer);
+    curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, buffer_progress_callback);
+    curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &buffer);
+    curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
     curl_easy_setopt(curl, CURLOPT_BUFFERSIZE, 128L * 1024L);
     curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);
     curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
@@ -183,6 +218,10 @@ int network_get_data(const char *url, const char *user_agent, const char *referr
     curl_easy_getinfo(curl, CURLINFO_EFFECTIVE_URL, &effective_url);
     response->http_status = (unsigned int)status;
     if (effective_url) snprintf(response->final_url, sizeof(response->final_url), "%s", effective_url);
+    if (result == CURLE_ABORTED_BY_CALLBACK && buffer.cancelled) {
+        network_response_free(response);
+        return -5;
+    }
     if (result != CURLE_OK) {
         network_response_free(response);
         return -(1000 + (int)result);

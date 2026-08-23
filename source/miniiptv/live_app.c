@@ -38,6 +38,12 @@ typedef enum {
     LIVE_APP_ERROR
 } LiveAppState;
 
+typedef enum {
+    PLAYER_RETURN_NONE = 0,
+    PLAYER_RETURN_STOP,
+    PLAYER_RETURN_RETUNE
+} PlayerReturnAction;
+
 typedef struct {
     LightLock lock;
     MiniIptvPlaylist playlist;
@@ -45,6 +51,12 @@ typedef struct {
     MiniIptvStageInfo stage_info;
     size_t selected;
     Thread worker;
+    bool worker_finished;
+    bool worker_reaping;
+    bool launch_after_reap;
+    bool cancel_to_deck;
+    bool queued_tune;
+    bool stream_cleanup_pending;
     LiveAppState state;
     char status[160];
     bool network_ready;
@@ -60,6 +72,8 @@ typedef struct {
 
 static LiveApp app;
 
+static void launch_tune_worker(void);
+
 static void draw_key_hint(Draw_image_data *pixel, const char *key,
                           const char *action, float x, float y,
                           float key_width, uint32_t key_color) {
@@ -71,6 +85,10 @@ static void draw_key_hint(Draw_image_data *pixel, const char *key,
 
 static const char *stage_error_text(int result) {
     switch (result) {
+        case MINIIPTV_STAGE_CANCELLED:
+            return "TUNING CANCELED // PRESS A TO RETRY";
+        case MINIIPTV_STAGE_TUNE_TIMEOUT:
+            return "TUNING TIMEOUT // TRY AGAIN OR PICK ANOTHER SIGNAL";
         case MINIIPTV_STAGE_MANIFEST_FETCH_FAILED:
         case MINIIPTV_STAGE_MEDIA_FETCH_FAILED:
         case MINIIPTV_STAGE_SEGMENT_FETCH_FAILED:
@@ -94,6 +112,15 @@ static const char *stage_error_text(int result) {
 static void set_status_locked(LiveAppState state, const char *message) {
     app.state = state;
     snprintf(app.status, sizeof(app.status), "%s", message ? message : "");
+}
+
+static int tune_should_cancel(void *unused) {
+    bool cancel;
+    (void)unused;
+    LightLock_Lock(&app.lock);
+    cancel = app.exit_requested || app.cancel_to_deck || app.queued_tune;
+    LightLock_Unlock(&app.lock);
+    return cancel;
 }
 
 static void player_error(uint32_t error_code) {
@@ -174,16 +201,26 @@ static bool begin_player_handoff(void) {
 
 static void worker_main(void *unused) {
     MiniIptvStageInfo info = {0};
+    MiniIptvChannel pending_channel;
     int result;
     bool auto_start = false;
     bool exiting = false;
+    bool cancel_to_deck = false;
+    bool queued_tune = false;
+    bool stop_stream = false;
     bool network_ready;
     (void)unused;
 
     LightLock_Lock(&app.lock);
     network_ready = app.network_ready;
+    pending_channel = app.pending_channel;
+    exiting = app.exit_requested;
+    cancel_to_deck = app.cancel_to_deck;
+    queued_tune = app.queued_tune;
     LightLock_Unlock(&app.lock);
-    if (!network_ready) {
+    if (exiting || cancel_to_deck || queued_tune) {
+        result = MINIIPTV_STAGE_CANCELLED;
+    } else if (!network_ready) {
         result = miniiptv_live_session_init();
         if (result == 0) {
             LightLock_Lock(&app.lock);
@@ -193,13 +230,38 @@ static void worker_main(void *unused) {
     } else {
         result = 0;
     }
-    if (result == 0)
-        result = miniiptv_live_stream_start(&app.pending_channel, &info);
+    if (result == 0) {
+        /* Network/session setup can race a cancel press. Check the app-owned
+         * intent again before resetting the stream for this tune. */
+        LightLock_Lock(&app.lock);
+        exiting = app.exit_requested;
+        cancel_to_deck = app.cancel_to_deck;
+        queued_tune = app.queued_tune;
+        LightLock_Unlock(&app.lock);
+        if (exiting || cancel_to_deck || queued_tune)
+            result = MINIIPTV_STAGE_CANCELLED;
+        else
+            result = miniiptv_live_stream_start(&pending_channel, &info,
+                                                tune_should_cancel, NULL);
+    }
     LightLock_Lock(&app.lock);
     exiting = app.exit_requested;
+    cancel_to_deck = app.cancel_to_deck;
+    queued_tune = app.queued_tune;
     if (exiting) {
         app.pending_channel_step = 0;
         app.switching_from_player = false;
+        stop_stream = result == MINIIPTV_STAGE_OK;
+    } else if (cancel_to_deck) {
+        app.pending_channel_step = 0;
+        app.switching_from_player = false;
+        set_status_locked(LIVE_APP_LOADING,
+                          "TUNING CANCELED // FINISHING CLEAN STOP...");
+        stop_stream = result == MINIIPTV_STAGE_OK;
+    } else if (queued_tune) {
+        set_status_locked(LIVE_APP_LOADING,
+                          "NEXT SIGNAL QUEUED // FINISHING CLEAN STOP...");
+        stop_stream = result == MINIIPTV_STAGE_OK;
     } else if (result == MINIIPTV_STAGE_OK) {
         app.stage_info = info;
         app.state = LIVE_APP_READY;
@@ -210,7 +272,14 @@ static void worker_main(void *unused) {
         app.state = LIVE_APP_ERROR;
         app.pending_channel_step = 0;
         app.switching_from_player = false;
-        if (result == MINIIPTV_STAGE_TOO_LARGE && info.segment_limit_bytes > 0) {
+        if (result == MINIIPTV_STAGE_CANCELLED) {
+            snprintf(app.status, sizeof(app.status), "%s",
+                     "TUNING CANCELED // PRESS A TO RETRY");
+        } else if (result == MINIIPTV_STAGE_TUNE_TIMEOUT) {
+            snprintf(app.status, sizeof(app.status), "%s",
+                     "TUNING TIMEOUT // PICK ANOTHER SIGNAL");
+        } else if (result == MINIIPTV_STAGE_TOO_LARGE &&
+                   info.segment_limit_bytes > 0) {
             size_t observed = info.reported_segment_bytes
                 ? info.reported_segment_bytes : info.attempted_segment_bytes;
             snprintf(app.status, sizeof(app.status),
@@ -224,17 +293,39 @@ static void worker_main(void *unused) {
         }
     }
     LightLock_Unlock(&app.lock);
+    if (stop_stream) miniiptv_live_stream_stop();
     Draw_set_refresh_needed(true);
     if (auto_start) begin_player_handoff();
     else if (exiting) miniiptv_live_stream_request_stop();
+    LightLock_Lock(&app.lock);
+    /* A second key press can arrive while a successful-but-canceled stream is
+     * being joined above. Resolve the latest intent, not the earlier snapshot,
+     * before publishing the worker as finished. */
+    if (!app.exit_requested && app.cancel_to_deck) {
+        app.cancel_to_deck = false;
+        app.queued_tune = false;
+        app.pending_channel_step = 0;
+        app.switching_from_player = false;
+        set_status_locked(LIVE_APP_IDLE,
+                          "TUNING CANCELED // READY FOR ANOTHER SIGNAL");
+    } else if (!app.exit_requested && app.queued_tune) {
+        set_status_locked(LIVE_APP_LOADING,
+                          "NEXT SIGNAL QUEUED // FINISHING CLEAN STOP...");
+    }
+    app.worker_finished = true;
+    LightLock_Unlock(&app.lock);
+    Draw_set_refresh_needed(true);
     threadExit(0);
 }
 
 static bool prepare_selected_tune_locked(void) {
     if ((app.state != LIVE_APP_IDLE && app.state != LIVE_APP_ERROR) ||
-        app.playlist.count == 0 || app.worker || app.exit_requested)
+        app.playlist.count == 0 || app.worker || app.stream_cleanup_pending ||
+        app.exit_requested)
         return false;
     app.pending_channel = app.playlist.channels[app.selected];
+    app.cancel_to_deck = false;
+    app.queued_tune = false;
     app.tuning_started_ms = osGetTime();
     set_status_locked(LIVE_APP_LOADING,
                       "TUNING > LOCK > 1 SEGMENT > PLAY...");
@@ -245,7 +336,20 @@ static void launch_tune_worker(void) {
     Thread worker;
 
     LightLock_Lock(&app.lock);
-    if (app.exit_requested || app.worker) {
+    if (app.exit_requested) {
+        LightLock_Unlock(&app.lock);
+        return;
+    }
+    if (app.worker_reaping) {
+        /* The old handle has already been detached and is known finished.
+         * Preserve this launch request for its single owning reaper instead of
+         * racing a new worker against threadFree and old queued intent. */
+        app.launch_after_reap = true;
+        LightLock_Unlock(&app.lock);
+        Draw_set_refresh_needed(true);
+        return;
+    }
+    if (app.worker) {
         LightLock_Unlock(&app.lock);
         return;
     }
@@ -255,6 +359,7 @@ static void launch_tune_worker(void) {
     worker = threadCreate(worker_main, NULL, 128 * 1024,
                           DEF_THREAD_PRIORITY_NORMAL, 1, false);
     app.worker = worker;
+    app.worker_finished = false;
     if (!worker) {
         app.pending_channel_step = 0;
         app.switching_from_player = false;
@@ -267,27 +372,53 @@ static void launch_tune_worker(void) {
 
 static void reap_worker_if_finished(void) {
     Thread finished_worker = NULL;
+    bool launch_queued = false;
 
     LightLock_Lock(&app.lock);
-    if (app.worker && app.state != LIVE_APP_LOADING) {
+    if (app.worker && app.worker_finished && !app.worker_reaping) {
         finished_worker = app.worker;
         app.worker = NULL;
+        app.worker_finished = false;
+        app.worker_reaping = true;
     }
     LightLock_Unlock(&app.lock);
     if (finished_worker) {
         threadJoin(finished_worker, UINT64_MAX);
         threadFree(finished_worker);
+
+        LightLock_Lock(&app.lock);
+        if (!app.exit_requested && app.queued_tune && !app.cancel_to_deck &&
+            app.playlist.count > 0) {
+            app.queued_tune = false;
+            app.pending_channel = app.playlist.channels[app.selected];
+            app.tuning_started_ms = osGetTime();
+            set_status_locked(LIVE_APP_LOADING,
+                              "SWITCHING > LOCK > 1 SEGMENT > PLAY...");
+            launch_queued = true;
+        } else if (!app.exit_requested && app.cancel_to_deck) {
+            app.cancel_to_deck = false;
+            app.queued_tune = false;
+            app.pending_channel_step = 0;
+            app.switching_from_player = false;
+            set_status_locked(LIVE_APP_IDLE,
+                              "TUNING CANCELED // READY FOR ANOTHER SIGNAL");
+        } else if (!app.exit_requested && app.launch_after_reap) {
+            launch_queued = true;
+        }
+        app.launch_after_reap = false;
+        app.worker_reaping = false;
+        LightLock_Unlock(&app.lock);
     }
+    if (launch_queued) launch_tune_worker();
 }
 
-static bool update_player_return_locked(void) {
+static PlayerReturnAction update_player_return_locked(void) {
     uint32_t generation;
 
-    if (!app.awaiting_player_return) return false;
+    if (!app.awaiting_player_return) return PLAYER_RETURN_NONE;
     generation = Vid_query_playback_return_generation();
-    if (generation == app.player_return_generation) return false;
+    if (generation == app.player_return_generation) return PLAYER_RETURN_NONE;
 
-    miniiptv_live_stream_stop();
     app.awaiting_player_return = false;
     if (app.pending_channel_step != 0 && app.playlist.count > 0 &&
         app.state != LIVE_APP_ERROR) {
@@ -298,29 +429,62 @@ static bool update_player_return_locked(void) {
             app.selected = (app.selected + 1) % app.playlist.count;
         app.pending_channel_step = 0;
         app.pending_channel = app.playlist.channels[app.selected];
+        app.cancel_to_deck = false;
+        app.queued_tune = false;
         app.tuning_started_ms = osGetTime();
         set_status_locked(LIVE_APP_LOADING,
                           "SWITCHING > LOCK > 1 SEGMENT > PLAY...");
-        return true;
+        /* If the playback-return event wins the race with reaping the worker
+         * that opened this player, remember the tune now. The reaper will own
+         * exactly one launch after freeing that old handle. */
+        if (app.worker || app.worker_reaping)
+            app.launch_after_reap = true;
+        return PLAYER_RETURN_RETUNE;
     }
     app.pending_channel_step = 0;
     app.switching_from_player = false;
+    app.stream_cleanup_pending = true;
     if (app.state != LIVE_APP_ERROR) {
         app.state = LIVE_APP_IDLE;
         snprintf(app.status, sizeof(app.status),
                  "OFF AIR // %.1f MiB linear free // A to retune",
                  Util_check_free_linear_space() / 1048576.0);
     }
-    return false;
+    return PLAYER_RETURN_STOP;
+}
+
+static void process_player_return_action(PlayerReturnAction action) {
+    if (action == PLAYER_RETURN_NONE) return;
+    miniiptv_live_stream_request_stop();
+    if (action == PLAYER_RETURN_RETUNE) {
+        /* The tuning worker owns the full producer join. Keeping that wait off
+         * the HID/draw path makes a slow manifest unable to freeze controls. */
+        launch_tune_worker();
+    } else {
+        /* No new worker will consume the old stream when returning to the
+         * deck, so finish its cleanup here, after releasing app.lock. */
+        miniiptv_live_stream_stop();
+        LightLock_Lock(&app.lock);
+        app.stream_cleanup_pending = false;
+        LightLock_Unlock(&app.lock);
+        Draw_set_refresh_needed(true);
+    }
 }
 
 static bool live_hid(const Hid_info *key) {
     LiveAppState state;
     size_t count;
-    bool launch_switch;
+    PlayerReturnAction return_action;
+    int loading_step = 0;
+    bool cancel_loading = false;
 
     if (!key) return false;
 
+    /* A successful tune can leave its already-finished worker handle parked
+     * while the player owns both screens. Reap it before a bumper return tries
+     * to launch the next tune, or app.worker would falsely make that launch a
+     * no-op. worker_finished guarantees this join cannot wait on network I/O. */
+    reap_worker_if_finished();
     LightLock_Lock(&app.lock);
     /* The HID thread may already have loaded this hook when START unhooks it.
      * Once exit owns the app, never let that in-flight callback touch the
@@ -329,29 +493,70 @@ static bool live_hid(const Hid_info *key) {
         LightLock_Unlock(&app.lock);
         return false;
     }
-    launch_switch = update_player_return_locked();
+    return_action = update_player_return_locked();
     state = app.state;
     count = app.playlist.count;
 
-    if (launch_switch) {
+    if (return_action != PLAYER_RETURN_NONE) {
         LightLock_Unlock(&app.lock);
-        launch_tune_worker();
+        process_player_return_action(return_action);
         return true;
     }
 
-    if (state != LIVE_APP_LOADING && count && DEF_HID_PHY_PR(key->d_up)) {
-        miniiptv_live_stream_stop();
+    if (state == LIVE_APP_LOADING) {
+        if (DEF_HID_PHY_PR(key->b)) {
+            app.cancel_to_deck = true;
+            app.queued_tune = false;
+            app.pending_channel_step = 0;
+            app.switching_from_player = false;
+            snprintf(app.status, sizeof(app.status), "%s",
+                     "CANCELING TUNE // RETURNING TO CHANNEL DECK...");
+            cancel_loading = true;
+        } else if (count && (DEF_HID_PHY_PR(key->d_up) ||
+                            DEF_HID_PHY_PR(key->l))) {
+            loading_step = -1;
+        } else if (count && (DEF_HID_PHY_PR(key->d_down) ||
+                            DEF_HID_PHY_PR(key->r))) {
+            loading_step = 1;
+        }
+        if (loading_step != 0) {
+            size_t previous = app.selected;
+            app.selected = loading_step < 0
+                ? (app.selected == 0 ? count - 1 : app.selected - 1)
+                : (app.selected + 1) % count;
+            if (!app.switching_from_player) app.switch_from_index = previous;
+            app.switching_from_player = true;
+            app.switch_to_index = app.selected;
+            app.cancel_to_deck = false;
+            app.queued_tune = true;
+            snprintf(app.status, sizeof(app.status),
+                     "CANCELING CURRENT TUNE // QUEUED CH %02lu",
+                     (unsigned long)(app.selected + 1));
+            cancel_loading = true;
+        }
+        if (cancel_loading) {
+            LightLock_Unlock(&app.lock);
+            miniiptv_live_stream_request_stop();
+            Draw_set_refresh_needed(true);
+            return true;
+        }
+    }
+
+    if (!app.stream_cleanup_pending && state != LIVE_APP_LOADING && count &&
+        DEF_HID_PHY_PR(key->d_up)) {
         app.selected = app.selected == 0 ? count - 1 : app.selected - 1;
         set_status_locked(LIVE_APP_IDLE, "READY // press A to tune this signal");
         LightLock_Unlock(&app.lock);
+        miniiptv_live_stream_stop();
         Draw_set_refresh_needed(true);
         return true;
     }
-    if (state != LIVE_APP_LOADING && count && DEF_HID_PHY_PR(key->d_down)) {
-        miniiptv_live_stream_stop();
+    if (!app.stream_cleanup_pending && state != LIVE_APP_LOADING && count &&
+        DEF_HID_PHY_PR(key->d_down)) {
         app.selected = (app.selected + 1) % count;
         set_status_locked(LIVE_APP_IDLE, "READY // press A to tune this signal");
         LightLock_Unlock(&app.lock);
+        miniiptv_live_stream_stop();
         Draw_set_refresh_needed(true);
         return true;
     }
@@ -393,14 +598,14 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
     size_t i;
     size_t page_start;
     size_t page_end;
-    bool launch_switch;
+    PlayerReturnAction return_action;
 
     (void)color;
     (void)back_color;
 
     reap_worker_if_finished();
     LightLock_Lock(&app.lock);
-    launch_switch = update_player_return_locked();
+    return_action = update_player_return_locked();
     count = app.playlist.count;
     for (i = 0; i < count; i++)
         snprintf(channel_names[i], sizeof(channel_names[i]), "%s",
@@ -413,7 +618,7 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
     switch_to_index = app.switch_to_index;
     snprintf(status, sizeof(status), "%s", app.status);
     LightLock_Unlock(&app.lock);
-    if (launch_switch) launch_tune_worker();
+    process_player_return_action(return_action);
 
     page_start = count ? (selected / CHANNELS_PER_PAGE) * CHANNELS_PER_PAGE : 0;
     page_end = page_start + CHANNELS_PER_PAGE;
@@ -455,6 +660,8 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
             for (i = 0; i < 12; i++)
                 Draw_texture(&pixel, i == phase ? UI_CREAM : UI_ORANGE,
                              78 + (float)i * 20, 192, 14, 6);
+            Draw_align_c("B CANCEL // L/R CHANGE", 0, 201, 9.0f, UI_MINT,
+                         DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 400, 10);
             Draw_set_refresh_needed(true);
         } else if (state == LIVE_APP_ERROR || state == LIVE_APP_NO_PLAYLIST) {
             Draw_align_c("NO SIGNAL // PRESS A TO RETRY", 0, 174, 12.0f,
@@ -508,7 +715,7 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
                  (unsigned long)((elapsed % 1000u) / 100u));
         Draw_align_c(line, 8, 176, 10.5f, UI_MINT,
                      DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 304, 20);
-        Draw_align_c("PLEASE WAIT // ONE DECODER AT A TIME", 8, 205, 9.5f,
+        Draw_align_c("B CANCEL // L/R CHANGE AGAIN", 8, 205, 9.5f,
                      UI_ORANGE, DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER,
                      304, 14);
         Draw_set_refresh_needed(true);
@@ -537,8 +744,13 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
                  state == LIVE_APP_ERROR || state == LIVE_APP_NO_PLAYLIST
                      ? DEF_DRAW_RED : UI_MINT,
                  DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 292, 24);
-    draw_key_hint(&pixel, "A", "TUNE", 9, 211, 17, UI_PINK);
-    draw_key_hint(&pixel, "UP/DN", "PICK", 77, 211, 42, UI_CYAN);
+    if (state == LIVE_APP_LOADING) {
+        draw_key_hint(&pixel, "B", "CANCEL", 9, 211, 17, UI_PINK);
+        draw_key_hint(&pixel, "L/R", "CHANGE", 77, 211, 32, UI_CYAN);
+    } else {
+        draw_key_hint(&pixel, "A", "TUNE", 9, 211, 17, UI_PINK);
+        draw_key_hint(&pixel, "UP/DN", "PICK", 77, 211, 42, UI_CYAN);
+    }
     draw_key_hint(&pixel, "START", "QUIT", 209, 211, 45, UI_ORANGE);
 }
 

@@ -17,12 +17,17 @@
 #define STREAM_REBUFFER_TARGET_MS 3000u
 #define STREAM_REBUFFER_MIN_BYTES (128u * 1024u)
 #define STREAM_REBUFFER_MAX_BYTES (768u * 1024u)
-#define STREAM_HIGH_WATER_BYTES (STREAM_RING_SIZE - MINIIPTV_SEGMENT_LIMIT)
+#define STREAM_HIGH_WATER_BYTES (5u * 1024u * 1024u)
 #define STREAM_SLEEP_US 10000ULL
+#define STREAM_INITIAL_TUNE_TIMEOUT_MS 30000ULL
 #define TS_PACKET_SIZE 188u
 
 #if MINIIPTV_SEGMENT_LIMIT >= STREAM_RING_SIZE
 #error "The atomic HLS segment limit must be smaller than the live ring"
+#endif
+
+#if STREAM_HIGH_WATER_BYTES >= STREAM_RING_SIZE
+#error "The live high-water mark must be smaller than the live ring"
 #endif
 
 typedef struct {
@@ -35,6 +40,11 @@ typedef struct {
     bool producer_running;
     bool rebuffering;
     bool reader_started;
+    bool initial_tune_active;
+    bool initial_tune_timed_out;
+    uint64_t initial_tune_deadline_ms;
+    MiniIptvCancelFunction initial_tune_should_cancel;
+    void *initial_tune_cancel_userdata;
     unsigned int target_duration;
     unsigned long variant_bandwidth;
     unsigned int variant_width;
@@ -114,8 +124,53 @@ static bool stop_was_requested(void) {
 }
 
 static int curl_should_cancel(void *unused) {
+    bool cancel;
+    bool initial_tune_active;
+    MiniIptvCancelFunction should_cancel;
+    void *cancel_userdata;
     (void)unused;
-    return stop_was_requested();
+    if (!stream.initialized) return 1;
+    LightLock_Lock(&stream.lock);
+    cancel = stream.stop_requested;
+    initial_tune_active = stream.initial_tune_active;
+    should_cancel = stream.initial_tune_should_cancel;
+    cancel_userdata = stream.initial_tune_cancel_userdata;
+    if (!cancel && initial_tune_active &&
+        osGetTime() >= stream.initial_tune_deadline_ms) {
+        stream.initial_tune_timed_out = true;
+        cancel = true;
+    }
+    LightLock_Unlock(&stream.lock);
+    if (!cancel && initial_tune_active && should_cancel)
+        cancel = should_cancel(cancel_userdata) != 0;
+    return cancel;
+}
+
+static int cancellation_result(void) {
+    int result = MINIIPTV_STAGE_OK;
+    bool initial_tune_active;
+    bool initial_tune_timed_out;
+    MiniIptvCancelFunction should_cancel;
+    void *cancel_userdata;
+    if (!stream.initialized) return MINIIPTV_STAGE_CANCELLED;
+    LightLock_Lock(&stream.lock);
+    initial_tune_active = stream.initial_tune_active;
+    initial_tune_timed_out = stream.initial_tune_timed_out;
+    should_cancel = stream.initial_tune_should_cancel;
+    cancel_userdata = stream.initial_tune_cancel_userdata;
+    if (stream.stop_requested) {
+        result = MINIIPTV_STAGE_CANCELLED;
+    } else if (initial_tune_timed_out ||
+               (initial_tune_active &&
+                osGetTime() >= stream.initial_tune_deadline_ms)) {
+        stream.initial_tune_timed_out = true;
+        result = MINIIPTV_STAGE_TUNE_TIMEOUT;
+    }
+    LightLock_Unlock(&stream.lock);
+    if (result == MINIIPTV_STAGE_OK && initial_tune_active && should_cancel &&
+        should_cancel(cancel_userdata))
+        result = MINIIPTV_STAGE_CANCELLED;
+    return result;
 }
 
 static bool is_complete_mpeg_ts(const unsigned char *data, size_t size) {
@@ -185,6 +240,8 @@ static int stream_segment(const HlsSegment *segment, size_t *downloaded_size) {
     bool committed = false;
     int result;
     if (!segment) return MINIIPTV_STAGE_INVALID_ARGUMENT;
+    result = cancellation_result();
+    if (result != MINIIPTV_STAGE_OK) return result;
     memset(&writer, 0, sizeof(writer));
     download_started = osGetTime();
     result = network_stream_data(segment->url, stream.channel.user_agent,
@@ -193,6 +250,10 @@ static int stream_segment(const HlsSegment *segment, size_t *downloaded_size) {
                                  segment_write_callback, &writer,
                                  curl_should_cancel, NULL, &metrics);
     download_elapsed = osGetTime() - download_started;
+    if (result == -5) {
+        int cancelled = cancellation_result();
+        if (cancelled != MINIIPTV_STAGE_OK) result = cancelled;
+    }
     too_large = result == MINIIPTV_NETWORK_TOO_LARGE;
     if (result == 0 && metrics.received_size == writer.total_size)
         valid_ts = is_complete_mpeg_ts(segment_staging, writer.total_size);
@@ -236,6 +297,9 @@ static int stream_segment(const HlsSegment *segment, size_t *downloaded_size) {
             /* A successful HTTP body that is not a complete TS segment is a
              * permanent compatibility/safety failure, not a network retry. */
             stream.stop_requested = true;
+        } else if (result == MINIIPTV_STAGE_CANCELLED ||
+                   result == MINIIPTV_STAGE_TUNE_TIMEOUT) {
+            stream.last_error = result;
         } else if (result != 0 || !committed) {
             stream.last_error = MINIIPTV_STAGE_SEGMENT_FETCH_FAILED;
         } else {
@@ -252,10 +316,22 @@ static int fetch_media_playlist(HlsMediaPlaylist *media) {
     NetworkTextResponse response = {0};
     const char *effective_url;
     int result;
-    result = network_get_data(stream.media_url, stream.channel.user_agent,
-                              stream.channel.referrer,
-                              MINIIPTV_MANIFEST_LIMIT, &response);
+    result = cancellation_result();
+    if (result != MINIIPTV_STAGE_OK) return result;
+    result = network_get_data_cancelable(
+        stream.media_url, stream.channel.user_agent, stream.channel.referrer,
+        MINIIPTV_MANIFEST_LIMIT, curl_should_cancel, NULL, &response);
+    if (result == -5) {
+        result = cancellation_result();
+        return result == MINIIPTV_STAGE_OK ? MINIIPTV_STAGE_MEDIA_FETCH_FAILED
+                                           : result;
+    }
     if (result != 0) return MINIIPTV_STAGE_MEDIA_FETCH_FAILED;
+    result = cancellation_result();
+    if (result != MINIIPTV_STAGE_OK) {
+        network_response_free(&response);
+        return result;
+    }
     effective_url = response.final_url[0] ? response.final_url : stream.media_url;
     result = hls_parse_media_playlist(response.data, effective_url, media);
     if (result == 0 && response.final_url[0])
@@ -279,9 +355,23 @@ static int resolve_initial_playlist(const MiniIptvChannel *channel,
     const char *media_url;
     int result = MINIIPTV_STAGE_MANIFEST_FETCH_FAILED;
 
-    if (network_get_data(channel->url, channel->user_agent, channel->referrer,
-                         MINIIPTV_MANIFEST_LIMIT, &root) != 0)
+    result = cancellation_result();
+    if (result != MINIIPTV_STAGE_OK) goto cleanup;
+    result = network_get_data_cancelable(
+        channel->url, channel->user_agent, channel->referrer,
+        MINIIPTV_MANIFEST_LIMIT, curl_should_cancel, NULL, &root);
+    if (result == -5) {
+        result = cancellation_result();
+        if (result == MINIIPTV_STAGE_OK)
+            result = MINIIPTV_STAGE_MANIFEST_FETCH_FAILED;
         goto cleanup;
+    }
+    if (result != 0) {
+        result = MINIIPTV_STAGE_MANIFEST_FETCH_FAILED;
+        goto cleanup;
+    }
+    result = cancellation_result();
+    if (result != MINIIPTV_STAGE_OK) goto cleanup;
     root_url = root.final_url[0] ? root.final_url : channel->url;
     if (hls_select_stream(root.data, root_url, &selection) != 0) {
         result = MINIIPTV_STAGE_MASTER_INVALID;
@@ -293,12 +383,22 @@ static int resolve_initial_playlist(const MiniIptvChannel *channel,
     snprintf(stream.variant_codecs, sizeof(stream.variant_codecs), "%s",
              selection.codecs);
     if (selection.type == HLS_MASTER_PLAYLIST) {
-        if (network_get_data(selection.url, channel->user_agent,
-                             channel->referrer, MINIIPTV_MANIFEST_LIMIT,
-                             &media_response) != 0) {
+        result = network_get_data_cancelable(
+            selection.url, channel->user_agent, channel->referrer,
+            MINIIPTV_MANIFEST_LIMIT, curl_should_cancel, NULL,
+            &media_response);
+        if (result == -5) {
+            result = cancellation_result();
+            if (result == MINIIPTV_STAGE_OK)
+                result = MINIIPTV_STAGE_MEDIA_FETCH_FAILED;
+            goto cleanup;
+        }
+        if (result != 0) {
             result = MINIIPTV_STAGE_MEDIA_FETCH_FAILED;
             goto cleanup;
         }
+        result = cancellation_result();
+        if (result != MINIIPTV_STAGE_OK) goto cleanup;
         media_text = media_response.data;
         media_url = media_response.final_url[0] ? media_response.final_url
                                                 : selection.url;
@@ -315,6 +415,8 @@ static int resolve_initial_playlist(const MiniIptvChannel *channel,
         result = MINIIPTV_STAGE_UNSUPPORTED_HLS;
         goto cleanup;
     }
+    result = cancellation_result();
+    if (result != MINIIPTV_STAGE_OK) goto cleanup;
     snprintf(stream.media_url, sizeof(stream.media_url), "%s", media_url);
     result = MINIIPTV_STAGE_OK;
 
@@ -390,19 +492,32 @@ static void producer_main(void *unused) {
 }
 
 int miniiptv_live_stream_start(const MiniIptvChannel *channel,
-                               MiniIptvStageInfo *initial_info) {
+                               MiniIptvStageInfo *initial_info,
+                               MiniIptvCancelFunction should_cancel,
+                               void *cancel_userdata) {
     HlsMediaPlaylist media;
     size_t selected;
     size_t first;
     size_t initial_segment_target;
+    uint64_t initial_tune_deadline_ms;
     int result;
     if (!channel || !channel->url[0] || !initial_info)
         return MINIIPTV_STAGE_INVALID_ARGUMENT;
+    initial_tune_deadline_ms = osGetTime() + STREAM_INITIAL_TUNE_TIMEOUT_MS;
     miniiptv_live_stream_stop();
+    /* A cancel pressed while the previous producer was being joined belongs
+     * to this tune, not the resettable old stream. Check the app-owned token
+     * before clearing and initializing stream state. */
+    if (should_cancel && should_cancel(cancel_userdata))
+        return MINIIPTV_STAGE_CANCELLED;
     memset(&stream, 0, sizeof(stream));
     LightLock_Init(&stream.lock);
     stream.initialized = true;
     stream.channel = *channel;
+    stream.initial_tune_active = true;
+    stream.initial_tune_deadline_ms = initial_tune_deadline_ms;
+    stream.initial_tune_should_cancel = should_cancel;
+    stream.initial_tune_cancel_userdata = cancel_userdata;
     memset(initial_info, 0, sizeof(*initial_info));
     initial_info->segment_limit_bytes = MINIIPTV_SEGMENT_LIMIT;
 
@@ -449,9 +564,16 @@ int miniiptv_live_stream_start(const MiniIptvChannel *channel,
         initial_info->bytes_staged += bytes;
         initial_info->duration_staged += media.segments[i].duration;
     }
+    result = cancellation_result();
+    if (result != MINIIPTV_STAGE_OK) goto failure;
     snprintf(initial_info->media_url, sizeof(initial_info->media_url), "%s",
              stream.media_url);
+    LightLock_Lock(&stream.lock);
+    stream.initial_tune_active = false;
+    stream.initial_tune_should_cancel = NULL;
+    stream.initial_tune_cancel_userdata = NULL;
     stream.producer_running = true;
+    LightLock_Unlock(&stream.lock);
     /* The player's real-time packet reader occupies core 1.  Keeping TLS/HLS
      * downloads at normal priority on that same core slowly drained the live
      * ring even when Wi-Fi had enough throughput.  New 3DS has core 2
