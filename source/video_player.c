@@ -90,6 +90,8 @@
 #define MINIIPTV_COLOR_CREAM					(uint32_t)(0xFFB8EEFF)
 #define MINIIPTV_COLOR_ORANGE					(uint32_t)(0xFF00A8FF)
 #define MINIIPTV_COLOR_MINT					(uint32_t)(0xFF8FEA69)
+#define MINIIPTV_COLOR_PINK					(uint32_t)(0xFF9A4FFF)
+#define MINIIPTV_COLOR_CYAN					(uint32_t)(0xFFFFEB5D)
 #define MINIIPTV_COLOR_SHADOW					(uint32_t)(0xFF120C08)
 #define MINIIPTV_STREAM_RING_BYTES			(uint32_t)(6 * 1024 * 1024)
 
@@ -774,6 +776,24 @@ static bool vid_miniptv_start_pending = false;
 static bool vid_miniptv_show_details = true;
 static bool vid_miniptv_return_requested = false;
 
+static void Vid_draw_miniiptv_top_bar(void)
+{
+	Draw_image_data pixel = Draw_get_empty_image();
+	bool on_air = miniiptv_live_stream_is_active();
+
+	Draw_texture(&pixel, MINIIPTV_COLOR_INK, 0, 0, 400, 15);
+	Draw_texture(&pixel, MINIIPTV_COLOR_PINK, 0, 13, 400, 2);
+	Draw_texture(&pixel, MINIIPTV_COLOR_CYAN, 0, 13,
+		on_air ? 292 : 126, 2);
+	Draw_c("RT//3DS", 6, 1, 10.5f, MINIIPTV_COLOR_PINK);
+	Draw_align_c(on_air ? "LIVE SIGNAL" : "SIGNAL DECK", 94, 0, 10.0f,
+		MINIIPTV_COLOR_CREAM, DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER,
+		212, 13);
+	Draw_align_c(on_air ? "ON AIR" : "STANDBY", 320, 0, 10.0f,
+		on_air ? MINIIPTV_COLOR_MINT : MINIIPTV_COLOR_CYAN,
+		DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 74, 13);
+}
+
 static void Vid_draw_miniiptv_live_overlay(void)
 {
 	Draw_image_data pixel = Draw_get_empty_image();
@@ -868,10 +888,15 @@ static void Vid_draw_miniiptv_live_overlay(void)
 	}
 
 	Draw_texture(&pixel, MINIIPTV_COLOR_PANEL, 8, 180, 304, 34);
-	Draw_align_c("A  PAUSE / PLAY     B  CHANNELS", 8, 184, 11.0f,
-		MINIIPTV_COLOR_CREAM, DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER,
-		304, 14);
-	Draw_align_c("SELECT  SIGNAL DETAILS", 8, 199, 9.5f,
+	Draw_texture(&pixel, MINIIPTV_COLOR_PINK, 18, 184, 19, 13);
+	Draw_align_c("A", 18, 184, 10.0f, MINIIPTV_COLOR_INK,
+		DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 19, 13);
+	Draw_c("PAUSE / PLAY", 42, 185, 10.0f, MINIIPTV_COLOR_CREAM);
+	Draw_texture(&pixel, MINIIPTV_COLOR_CYAN, 171, 184, 19, 13);
+	Draw_align_c("B", 171, 184, 10.0f, MINIIPTV_COLOR_INK,
+		DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 19, 13);
+	Draw_c("CHANNELS", 195, 185, 10.0f, MINIIPTV_COLOR_CREAM);
+	Draw_align_c("SELECT // SIGNAL DETAILS", 8, 199, 9.5f,
 		MINIIPTV_COLOR_ORANGE, DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER,
 		304, 12);
 }
@@ -2389,7 +2414,12 @@ void Vid_main(void)
 			Draw_screen_ready(DRAW_SCREEN_TOP_LEFT, vid_player.is_full_screen ? DEF_DRAW_BLACK : back_color);
 
 			if(!vid_player.is_full_screen)
-				Draw_top_ui(config.is_eco, state.is_charging, state.wifi_signal, state.battery_level, state.msg);
+			{
+				if(vid_embedded_test_mode)
+					Vid_draw_miniiptv_top_bar();
+				else
+					Draw_top_ui(config.is_eco, state.is_charging, state.wifi_signal, state.battery_level, state.msg);
+			}
 
 			if(vid_player.state != PLAYER_STATE_IDLE)
 			{
@@ -2534,7 +2564,12 @@ void Vid_main(void)
 				Draw_screen_ready(DRAW_SCREEN_TOP_RIGHT, vid_player.is_full_screen ? DEF_DRAW_BLACK : back_color);
 
 				if(!vid_player.is_full_screen)
-					Draw_top_ui(config.is_eco, state.is_charging, state.wifi_signal, state.battery_level, state.msg);
+				{
+					if(vid_embedded_test_mode)
+						Vid_draw_miniiptv_top_bar();
+					else
+						Draw_top_ui(config.is_eco, state.is_charging, state.wifi_signal, state.battery_level, state.msg);
+				}
 
 				if(vid_player.state != PLAYER_STATE_IDLE)
 				{
@@ -3596,7 +3631,10 @@ static void Vid_draw_init_exit_message(void)
 		if(Util_log_query_show_flag())
 			Util_log_draw();
 
-		Draw_top_ui(config.is_eco, state.is_charging, state.wifi_signal, state.battery_level, state.msg);
+		if(vid_embedded_test_mode)
+			Vid_draw_miniiptv_top_bar();
+		else
+			Draw_top_ui(config.is_eco, state.is_charging, state.wifi_signal, state.battery_level, state.msg);
 
 		if(config.is_debug)
 			Draw_debug_info(config.is_night, state.free_ram, state.free_linear_ram);
@@ -3627,7 +3665,10 @@ static void Vid_draw_init_exit_message(void)
 			if(Util_log_query_show_flag())
 				Util_log_draw();
 
-			Draw_top_ui(config.is_eco, state.is_charging, state.wifi_signal, state.battery_level, state.msg);
+			if(vid_embedded_test_mode)
+				Vid_draw_miniiptv_top_bar();
+			else
+				Draw_top_ui(config.is_eco, state.is_charging, state.wifi_signal, state.battery_level, state.msg);
 
 			if(config.is_debug)
 				Draw_debug_info(config.is_night, state.free_ram, state.free_linear_ram);

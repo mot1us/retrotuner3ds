@@ -10,7 +10,7 @@
 //#define DEF_VID_ENABLE_NAME
 #define DEF_VID_ICON_PATH				/*(const char*)(*/"romfs:/gfx/draw/icon/vid_icon.t3x"/*)*/
 #define DEF_VID_NAME					/*(const char*)(*/"Video\nplayer"/*)*/
-#define DEF_VID_VER						/*(const char*)(*/"RetroTuner3DS Pixel Deck 0.5.1-rc2"/*)*/
+#define DEF_VID_VER						/*(const char*)(*/"RetroTuner3DS Pixel Deck 0.5.1-rc3"/*)*/
 #define DEF_VID_SPEAKER_SESSION_ID		(uint8_t)(0)
 #define DEF_VID_DECORDER_SESSION_ID		(uint8_t)(0)
 

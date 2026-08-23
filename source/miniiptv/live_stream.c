@@ -13,9 +13,7 @@
 #include "system/util/util.h"
 
 #define STREAM_RING_SIZE (6u * 1024u * 1024u)
-#define STREAM_INITIAL_SEGMENTS 2
-#define STREAM_HIGH_BITRATE_INITIAL_SEGMENTS 1
-#define STREAM_HIGH_BITRATE_THRESHOLD 2000000ul
+#define STREAM_INITIAL_SEGMENTS 1
 #define STREAM_REBUFFER_BYTES (768u * 1024u)
 #define STREAM_HIGH_WATER_BYTES (5u * 1024u * 1024u)
 #define STREAM_SLEEP_US 10000ULL
@@ -317,10 +315,11 @@ int miniiptv_live_stream_start(const MiniIptvChannel *channel,
     result = resolve_initial_playlist(channel, &media);
     if (result != MINIIPTV_STAGE_OK) goto failure;
     stream.target_duration = media.target_duration ? media.target_duration : 6;
-    initial_segment_target =
-        stream.variant_bandwidth >= STREAM_HIGH_BITRATE_THRESHOLD
-            ? STREAM_HIGH_BITRATE_INITIAL_SEGMENTS
-            : STREAM_INITIAL_SEGMENTS;
+    /* One validated transport-stream segment is enough for FFmpeg to open the
+     * live input. Start the producer immediately after that first segment so
+     * tuning and ring-buffer growth happen in parallel instead of making the
+     * viewer wait for two complete segment downloads. */
+    initial_segment_target = STREAM_INITIAL_SEGMENTS;
     selected = media.count < initial_segment_target ? media.count
                                                      : initial_segment_target;
     if (selected == 0) {

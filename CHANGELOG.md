@@ -14,6 +14,11 @@ versioning while the player remains experimental.
   inherited modal error screen.
 - Close the idle handoff race so a tuned channel starts from one `A` press.
 - Show concise tuning errors with retry guidance on the channel deck.
+- Begin playback after one validated HLS segment while the producer continues
+  filling the bounded ring buffer in parallel.
+- Replace the inherited status bar with a matching Pixel Deck signal strip.
+- Center the RetroTuner3DS banner and color-code button labels separately from
+  their actions for clearer controls.
 - Remove bundled stations; users now supply
   `sd:/3ds/retrotuner3ds/channels.m3u` themselves.
 - Rename the public project, application, and binary to RetroTuner3DS.

@@ -23,6 +23,8 @@
 #define UI_CREAM 0xFFB8EEFFu
 #define UI_ORANGE 0xFF00A8FFu
 #define UI_MINT 0xFF8FEA69u
+#define UI_PINK 0xFF9A4FFFu
+#define UI_CYAN 0xFFFFEB5Du
 #define UI_SHADOW 0xFF120C08u
 
 typedef enum {
@@ -48,6 +50,15 @@ typedef struct {
 } LiveApp;
 
 static LiveApp app;
+
+static void draw_key_hint(Draw_image_data *pixel, const char *key,
+                          const char *action, float x, float y,
+                          float key_width, uint32_t key_color) {
+    Draw_texture(pixel, key_color, x, y, key_width, 13);
+    Draw_align_c(key, x, y, 9.5f, UI_INK, DRAW_X_ALIGN_CENTER,
+                 DRAW_Y_ALIGN_CENTER, key_width, 13);
+    Draw_c(action, x + key_width + 5, y + 1, 9.5f, UI_CREAM);
+}
 
 static const char *stage_error_text(int result) {
     switch (result) {
@@ -95,7 +106,7 @@ static bool begin_player_handoff(void) {
         return false;
     }
     snprintf(app.status, sizeof(app.status), "%s",
-             "Tuned. Starting live playback...");
+             "SIGNAL LOCKED // STARTING PLAYER...");
     app.player_return_generation = Vid_query_playback_return_generation();
     app.awaiting_player_return = true;
     LightLock_Unlock(&app.lock);
@@ -215,7 +226,7 @@ static bool live_hid(const Hid_info *key) {
         if ((state == LIVE_APP_IDLE || state == LIVE_APP_ERROR) && count) {
             app.pending_channel = app.playlist.channels[app.selected];
             set_status_locked(LIVE_APP_LOADING,
-                              "TUNING > HLS SCAN > LIVE BUFFER...");
+                              "TUNING > LOCK > 1 SEGMENT > PLAY...");
             LightLock_Unlock(&app.lock);
             app.worker = threadCreate(worker_main, NULL, 128 * 1024,
                                       DEF_THREAD_PRIORITY_NORMAL, 1, false);
@@ -267,11 +278,13 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
         for (i = 19; i < 238; i += 8)
             Draw_texture(&pixel, UI_SHADOW, 0, (float)i, 400, 1);
 
-        Draw_texture(&pixel, UI_ORANGE, 12, 25, 376, 4);
-		Draw_c("+-------------- RETRO TUNER 3DS --------------+",
-			   27, 39, 13.0f, UI_CREAM);
-		Draw_align_c("NEW 3DS POCKET TELEVISION", 0, 59, 12.0f,
-                     UI_ORANGE, DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER,
+        Draw_texture(&pixel, UI_ORANGE, 12, 25, 376, 3);
+        Draw_texture(&pixel, UI_CYAN, 24, 43, 82, 2);
+        Draw_texture(&pixel, UI_PINK, 294, 43, 82, 2);
+		Draw_align_c("RETRO TUNER 3DS", 0, 31, 18.0f, UI_CREAM,
+                     DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 400, 24);
+		Draw_align_c("POCKET BROADCAST SYSTEM // 199X", 0, 61, 11.0f,
+                     UI_CYAN, DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER,
                      400, 18);
 
         Draw_texture(&pixel, UI_PANEL, 24, 88, 352, 70);
@@ -292,11 +305,13 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
                          DEF_DRAW_RED, DRAW_X_ALIGN_CENTER,
                          DRAW_Y_ALIGN_CENTER, 400, 20);
         } else {
-            Draw_align_c("A  TUNE IN     D-PAD  CHANNEL     START  EXIT",
-                         0, 180, 11.5f, UI_MINT, DRAW_X_ALIGN_CENTER,
-                         DRAW_Y_ALIGN_CENTER, 400, 20);
+            draw_key_hint(&pixel, "A", "TUNE", 22, 181, 18, UI_PINK);
+            draw_key_hint(&pixel, "D-PAD", "CHANNEL", 113, 181, 46,
+                          UI_CYAN);
+            draw_key_hint(&pixel, "START", "EXIT", 280, 181, 47,
+                          UI_ORANGE);
         }
-		Draw_align_c("PIXEL DECK 0.5.1-rc2 // H264", 0, 211, 9.5f,
+		Draw_align_c("PIXEL DECK 0.5.1-rc3 // H264", 0, 211, 9.5f,
                      UI_CREAM, DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER,
                      400, 14);
         return;
@@ -326,9 +341,9 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
                  state == LIVE_APP_ERROR || state == LIVE_APP_NO_PLAYLIST
                      ? DEF_DRAW_RED : UI_MINT,
                  DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 292, 24);
-    Draw_align_c("A TUNE   UP/DOWN PICK   START QUIT", 0, 212, 9.0f,
-                 UI_ORANGE, DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER,
-                 320, 12);
+    draw_key_hint(&pixel, "A", "TUNE", 9, 211, 17, UI_PINK);
+    draw_key_hint(&pixel, "UP/DN", "PICK", 77, 211, 42, UI_CYAN);
+    draw_key_hint(&pixel, "START", "QUIT", 209, 211, 45, UI_ORANGE);
 }
 
 void MiniIptv_live_app_init(void) {
