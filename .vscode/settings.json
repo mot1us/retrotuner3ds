@@ -1,0 +1,15 @@
+{
+  "C_Cpp.default.compilerPath": "/opt/devkitpro/devkitARM/bin/arm-none-eabi-gcc",
+  "C_Cpp.default.cStandard": "c99",
+  "C_Cpp.default.defines": ["__3DS__"],
+  "C_Cpp.default.includePath": [
+    "${workspaceFolder}/include",
+    "${workspaceFolder}/library/include",
+    "${workspaceFolder}/build"
+  ],
+  "files.associations": {
+    "*.h": "c"
+  },
+  "git.autofetch": true,
+  "git.confirmSync": false
+}

@@ -1,0 +1,20 @@
+{
+  "folders": [
+    {
+      "name": "RetroTuner3DS",
+      "path": "."
+    }
+  ],
+  "settings": {
+    "files.exclude": {
+      "build": true,
+      "tests/bin": true
+    },
+    "terminal.integrated.cwd": "${workspaceFolder}",
+    "terminal.integrated.env.osx": {
+      "DEVKITPRO": "/opt/devkitpro",
+      "DEVKITARM": "/opt/devkitpro/devkitARM",
+      "PATH": "/opt/devkitpro/devkitARM/bin:/opt/devkitpro/tools/bin:${env:PATH}"
+    }
+  }
+}

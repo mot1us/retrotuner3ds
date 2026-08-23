@@ -1,0 +1,18 @@
+# devkitARM outputs
+/build/
+/*.3dsx
+/*.cia
+/*.elf
+/*.map
+/*.smdh
+
+# Host-test outputs
+/tests/bin/
+
+# Local media fixtures are not distributable source
+/romfs/tvsturbo-reference.mkv
+
+# Editors and operating systems
+.DS_Store
+*.swp
+*~

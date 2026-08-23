@@ -1,0 +1,17 @@
+name: Host tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  sanitizers:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run HLS and H.264 tests
+        run: ./tests/run_live_host_tests.sh

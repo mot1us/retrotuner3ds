@@ -1,0 +1,46 @@
+name: Stream compatibility report
+description: Record a public channel that works or fails on real hardware
+title: "[Stream]: "
+labels: [compatibility]
+body:
+  - type: input
+    id: channel
+    attributes:
+      label: Channel name
+    validations:
+      required: true
+  - type: dropdown
+    id: result
+    attributes:
+      label: Result
+      options:
+        - Plays well
+        - Plays with rebuffering
+        - Audio/video stutters
+        - Does not start
+        - Crashes
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: RetroTuner3DS version or commit
+    validations:
+      required: true
+  - type: input
+    id: media
+    attributes:
+      label: Rendition details
+      placeholder: 480x360, 830 kbps, H.264 + AAC, MPEG-TS
+  - type: textarea
+    id: notes
+    attributes:
+      label: Hardware and playback notes
+      description: Include console model, duration tested, diagnostics, and whether the stream works in VLC.
+  - type: checkboxes
+    id: public
+    attributes:
+      label: Privacy
+      options:
+        - label: This report contains no credentials, private subscription URL, or access token.
+          required: true

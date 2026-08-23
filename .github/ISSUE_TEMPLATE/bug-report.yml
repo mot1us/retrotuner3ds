@@ -1,0 +1,50 @@
+name: Bug report
+description: Report a reproducible RetroTuner3DS problem
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Do not include private stream URLs, credentials, or access tokens.
+  - type: input
+    id: version
+    attributes:
+      label: RetroTuner3DS version or commit
+    validations:
+      required: true
+  - type: dropdown
+    id: hardware
+    attributes:
+      label: Hardware
+      options:
+        - New Nintendo 3DS
+        - New Nintendo 3DS XL
+        - New Nintendo 2DS XL
+        - Other / unsupported
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: What happened?
+      description: Include steps, timing, and any on-screen diagnostics.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: stream
+    attributes:
+      label: Public stream details
+      description: Resolution, bitrate, codecs, HLS segment type, and whether it works in VLC. A URL is optional.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I removed credentials and private playlist information.
+          required: true
