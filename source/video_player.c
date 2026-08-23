@@ -94,7 +94,6 @@
 #define MINIIPTV_COLOR_CYAN					(uint32_t)(0xFFFFEB5D)
 #define MINIIPTV_COLOR_SHADOW					(uint32_t)(0xFF120C08)
 #define MINIIPTV_BUFFER_METER_MS			(uint32_t)(8000)
-#define MINIIPTV_PI							(float)(3.14159265f)
 
 #define IS_X_IN_BOX(x, width, x_valid_start, x_valid_end)		(bool)((x >= x_valid_start) && (x <= (x_valid_end - width)))	//Whether element fits in box (for X direction).
 #define IS_Y_IN_BOX(y, height, y_valid_start, y_valid_end)		(bool)((y >= y_valid_start) && (y <= (y_valid_end - height)))	//Whether element fits in box (for Y direction).
@@ -771,7 +770,6 @@ static bool vid_embedded_exit_requested = false;
 static Vid_idle_hid_hook vid_idle_hid_hook = NULL;
 static Vid_idle_draw_hook vid_idle_draw_hook = NULL;
 static Vid_live_error_hook vid_live_error_hook = NULL;
-static Vid_live_channel_hook vid_live_channel_hook = NULL;
 static volatile uint32_t vid_playback_return_generation = 0;
 static bool vid_miniptv_force_initial_autoplay = false;
 static bool vid_miniptv_start_pending = false;
@@ -805,14 +803,9 @@ static void Vid_draw_miniiptv_live_overlay(void)
 	unsigned long read_kib = 0;
 	unsigned long underruns = 0;
 	int live_error = 0;
+	uint32_t bar_width = 0;
 	uint32_t buffer_color = MINIIPTV_COLOR_MINT;
 	unsigned long effective_bandwidth = 0;
-	static float displayed_buffer_ms = 0.0f;
-	static unsigned long previous_downloaded = 0;
-	float gauge_ratio = 0.0f;
-	float gauge_angle = 0.0f;
-	float needle_x = 0.0f;
-	float needle_y = 0.0f;
 	const char* state_text = "TUNING";
 	const char* rating_text = "CHECKING SIGNAL";
 	uint32_t state_color = MINIIPTV_COLOR_ORANGE;
@@ -821,7 +814,6 @@ static void Vid_draw_miniiptv_live_overlay(void)
 	miniiptv_live_stream_get_info(&live_info);
 	miniiptv_live_stream_get_stats(&buffered, &downloaded, &read_kib,
 		&underruns, &live_error);
-	(void)buffered;
 	(void)read_kib;
 
 	if(vid_player.state == PLAYER_STATE_PLAYING)
@@ -856,22 +848,13 @@ static void Vid_draw_miniiptv_live_overlay(void)
 			rating_text = "HEAVY SIGNAL";
 	}
 
-	if(live_info.rebuffering)
-		displayed_buffer_ms = 0.0f;
-	else if(downloaded < previous_downloaded || displayed_buffer_ms <= 0.0f)
-		displayed_buffer_ms = (float)live_info.buffered_milliseconds;
-	else
-		displayed_buffer_ms += ((float)live_info.buffered_milliseconds
-			- displayed_buffer_ms) * 0.08f;
-	previous_downloaded = downloaded;
-	gauge_ratio = displayed_buffer_ms / (float)MINIIPTV_BUFFER_METER_MS;
-	if(gauge_ratio < 0.0f)
-		gauge_ratio = 0.0f;
-	if(gauge_ratio > 1.0f)
-		gauge_ratio = 1.0f;
-	if(displayed_buffer_ms < 2000.0f)
+	bar_width = (uint32_t)(((uint64_t)live_info.buffered_milliseconds * 276u)
+		/ MINIIPTV_BUFFER_METER_MS);
+	if(bar_width > 276u)
+		bar_width = 276u;
+	if(live_info.buffered_milliseconds < 2000u)
 		buffer_color = DEF_DRAW_RED;
-	else if(displayed_buffer_ms < 5000.0f)
+	else if(live_info.buffered_milliseconds < 5000u)
 		buffer_color = MINIIPTV_COLOR_ORANGE;
 
 	Draw_texture(&pixel, MINIIPTV_COLOR_INK, 0, 0, 320, 225);
@@ -891,35 +874,15 @@ static void Vid_draw_miniiptv_live_overlay(void)
 		strcmp(rating_text, "3DS SWEET SPOT") == 0
 			? MINIIPTV_COLOR_MINT : MINIIPTV_COLOR_ORANGE);
 
-	Draw_texture(&pixel, MINIIPTV_COLOR_PANEL, 10, 96, 300, 75);
-	Draw_align_c("VACUUM RESERVE", 10, 99, 10.0f, MINIIPTV_COLOR_CREAM,
-		DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 300, 13);
-	Draw_c("DRY", 74, 148, 8.5f, DEF_DRAW_RED);
-	Draw_c("STEADY", 140, 112, 8.5f, MINIIPTV_COLOR_ORANGE);
-	Draw_c("FULL", 224, 148, 8.5f, MINIIPTV_COLOR_MINT);
-	for(uint32_t tick = 0; tick <= 8; tick++)
-	{
-		float tick_angle = (200.0f + (17.5f * tick)) * MINIIPTV_PI / 180.0f;
-		float inner_x = 160.0f + cosf(tick_angle) * 42.0f;
-		float inner_y = 158.0f + sinf(tick_angle) * 42.0f;
-		float outer_x = 160.0f + cosf(tick_angle) * 50.0f;
-		float outer_y = 158.0f + sinf(tick_angle) * 50.0f;
-		uint32_t tick_color = tick < 2 ? DEF_DRAW_RED
-			: (tick < 5 ? MINIIPTV_COLOR_ORANGE : MINIIPTV_COLOR_MINT);
-		Draw_line(inner_x, inner_y, tick_color, outer_x, outer_y, tick_color,
-			tick == 0 || tick == 8 ? 2.0f : 1.0f);
-	}
-	gauge_angle = (200.0f + (140.0f * gauge_ratio)) * MINIIPTV_PI / 180.0f;
-	needle_x = 160.0f + cosf(gauge_angle) * 39.0f;
-	needle_y = 158.0f + sinf(gauge_angle) * 39.0f;
-	Draw_line(160.0f, 158.0f, buffer_color, needle_x, needle_y,
-		buffer_color, 2.5f);
-	Draw_texture(&pixel, MINIIPTV_COLOR_CREAM, 157, 155, 6, 6);
-	snprintf(line, sizeof(line), "~%u.%us // U:%lu",
-		(unsigned int)displayed_buffer_ms / 1000u,
-		((unsigned int)displayed_buffer_ms % 1000u) / 100u, underruns);
-	Draw_align_c(line, 100, 154, 9.0f, MINIIPTV_COLOR_CREAM,
-		DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 120, 13);
+	Draw_c("PLAYABLE SIGNAL", 14, 101, 10.5f, MINIIPTV_COLOR_CREAM);
+	Draw_texture(&pixel, MINIIPTV_COLOR_SHADOW, 14, 117, 280, 13);
+	Draw_texture(&pixel, buffer_color, 16, 119, bar_width, 9);
+	snprintf(line, sizeof(line), "~%u.%us ready  //  %lu KiB",
+		live_info.buffered_milliseconds / 1000u,
+		(live_info.buffered_milliseconds % 1000u) / 100u,
+		(unsigned long)(buffered / 1024u));
+	Draw_align_c(line, 14, 134, 10.0f, MINIIPTV_COLOR_CREAM,
+		DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 280, 14);
 
 	if(vid_miniptv_show_details)
 	{
@@ -930,12 +893,12 @@ static void Vid_draw_miniiptv_live_overlay(void)
 		else
 			snprintf(line, sizeof(line), "AUTO QUALITY  DL:%lu  U:%lu  E:%d",
 				downloaded, underruns, live_error);
-		Draw_align_c(line, 8, 168, 9.0f,
+		Draw_align_c(line, 8, 154, 10.0f,
 			live_error == 0 ? MINIIPTV_COLOR_MINT : DEF_DRAW_RED,
 			DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 304, 16);
 	}
 
-	Draw_texture(&pixel, MINIIPTV_COLOR_PANEL, 8, 182, 304, 32);
+	Draw_texture(&pixel, MINIIPTV_COLOR_PANEL, 8, 180, 304, 34);
 	Draw_texture(&pixel, MINIIPTV_COLOR_PINK, 18, 184, 19, 13);
 	Draw_align_c("A", 18, 184, 10.0f, MINIIPTV_COLOR_INK,
 		DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 19, 13);
@@ -944,7 +907,7 @@ static void Vid_draw_miniiptv_live_overlay(void)
 	Draw_align_c("B", 171, 184, 10.0f, MINIIPTV_COLOR_INK,
 		DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 19, 13);
 	Draw_c("CHANNELS", 195, 185, 10.0f, MINIIPTV_COLOR_CREAM);
-	Draw_align_c("L/R CHANGE  //  SELECT DETAILS", 8, 199, 9.0f,
+	Draw_align_c("SELECT // SIGNAL DETAILS", 8, 199, 9.5f,
 		MINIIPTV_COLOR_ORANGE, DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER,
 		304, 12);
 }
@@ -985,13 +948,8 @@ void Vid_hid(const Hid_info* key)
 	&& (vid_player.state != PLAYER_STATE_IDLE
 		|| miniiptv_live_stream_is_active()
 		|| Util_err_query_show_flag())
-	&& (DEF_HID_PHY_PR(key->b) || DEF_HID_PHY_HE(key->b)
-		|| DEF_HID_PHY_PR(key->l) || DEF_HID_PHY_PR(key->r)))
+	&& (DEF_HID_PHY_PR(key->b) || DEF_HID_PHY_HE(key->b)))
 	{
-		if(vid_live_channel_hook && DEF_HID_PHY_PR(key->l))
-			vid_live_channel_hook(-1);
-		else if(vid_live_channel_hook && DEF_HID_PHY_PR(key->r))
-			vid_live_channel_hook(1);
 		Util_err_set_show_flag(false);
 		Util_err_clear_error_message();
 		vid_miniptv_return_requested =
@@ -1985,11 +1943,6 @@ void Vid_set_idle_hooks(Vid_idle_hid_hook hid_hook, Vid_idle_draw_hook draw_hook
 void Vid_set_live_error_hook(Vid_live_error_hook error_hook)
 {
 	vid_live_error_hook = error_hook;
-}
-
-void Vid_set_live_channel_hook(Vid_live_channel_hook channel_hook)
-{
-	vid_live_channel_hook = channel_hook;
 }
 
 bool Vid_prepare_file(const char* directory, const char* name)

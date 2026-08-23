@@ -10,14 +10,13 @@
 //#define DEF_VID_ENABLE_NAME
 #define DEF_VID_ICON_PATH				/*(const char*)(*/"romfs:/gfx/draw/icon/vid_icon.t3x"/*)*/
 #define DEF_VID_NAME					/*(const char*)(*/"Video\nplayer"/*)*/
-#define DEF_VID_VER						/*(const char*)(*/"RetroTuner3DS Pixel Deck 0.5.1-rc5"/*)*/
+#define DEF_VID_VER						/*(const char*)(*/"RetroTuner3DS Pixel Deck 0.5.1-rc6"/*)*/
 #define DEF_VID_SPEAKER_SESSION_ID		(uint8_t)(0)
 #define DEF_VID_DECORDER_SESSION_ID		(uint8_t)(0)
 
 typedef bool (*Vid_idle_hid_hook)(const Hid_info* key);
 typedef void (*Vid_idle_draw_hook)(bool top_screen, uint32_t color, uint32_t back_color);
 typedef void (*Vid_live_error_hook)(uint32_t error_code);
-typedef void (*Vid_live_channel_hook)(int direction);
 
 bool Vid_query_init_flag(void);
 
@@ -44,9 +43,6 @@ void Vid_set_idle_hooks(Vid_idle_hid_hook hid_hook, Vid_idle_draw_hook draw_hook
 
 //Route live-playback failures back to the RetroTuner3DS channel deck.
 void Vid_set_live_error_hook(Vid_live_error_hook error_hook);
-
-//Request the previous (-1) or next (+1) playlist entry during live playback.
-void Vid_set_live_channel_hook(Vid_live_channel_hook channel_hook);
 
 //Prepare a bounded file for the existing player while it is idle.
 bool Vid_prepare_file(const char* directory, const char* name);

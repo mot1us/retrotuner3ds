@@ -13,13 +13,15 @@
 #include "system/util/util.h"
 
 #define STREAM_RING_SIZE (6u * 1024u * 1024u)
-#define STREAM_START_TARGET_MS 2000u
-#define STREAM_START_MIN_BYTES (128u * 1024u)
-#define STREAM_START_MAX_BYTES (384u * 1024u)
-#define STREAM_START_TIMEOUT_MS 20000u
-#define STREAM_REBUFFER_TARGET_MS 3000u
-#define STREAM_REBUFFER_MIN_BYTES (128u * 1024u)
-#define STREAM_REBUFFER_MAX_BYTES (768u * 1024u)
+#define STREAM_INITIAL_SEGMENTS 1
+#define STREAM_REBUFFER_MIN_TARGET_MS 6000u
+#define STREAM_REBUFFER_MAX_TARGET_MS 12000u
+#define STREAM_REBUFFER_SEGMENT_MARGIN_MS 1000u
+#define STREAM_REBUFFER_MIN_BYTES (256u * 1024u)
+#define STREAM_REBUFFER_MAX_BYTES (1536u * 1024u)
+#define STREAM_LOW_WATER_TARGET_MS 1500u
+#define STREAM_LOW_WATER_MIN_BYTES (64u * 1024u)
+#define STREAM_LOW_WATER_MAX_BYTES (256u * 1024u)
 #define STREAM_HIGH_WATER_BYTES (5u * 1024u * 1024u)
 #define STREAM_SLEEP_US 10000ULL
 #define TS_PROBE_SIZE (188u * 2u)
@@ -27,13 +29,11 @@
 typedef struct {
     LightLock lock;
     MiniIptvChannel channel;
-    HlsSegment bootstrap_segment;
     char media_url[MINIIPTV_HLS_URL_MAX];
     Thread producer;
     bool initialized;
     bool stop_requested;
     bool producer_running;
-    bool bootstrap_pending;
     bool rebuffering;
     bool reader_started;
     unsigned int target_duration;
@@ -47,7 +47,6 @@ typedef struct {
     size_t ring_count;
     uint64_t bytes_written;
     uint64_t bytes_read;
-    uint64_t start_time_ms;
     uint64_t measured_segment_bytes;
     uint64_t measured_segment_milliseconds;
     unsigned long downloaded_segments;
@@ -82,21 +81,39 @@ static unsigned long effective_bandwidth_locked(void) {
 
 static size_t rebuffer_target_bytes_locked(void) {
     unsigned long bandwidth = effective_bandwidth_locked();
+    unsigned int target_ms = STREAM_REBUFFER_MIN_TARGET_MS;
     uint64_t target;
+    uint64_t segment_ms = 0;
+    if (stream.downloaded_segments > 0 &&
+        stream.measured_segment_milliseconds > 0) {
+        segment_ms = stream.measured_segment_milliseconds /
+                     stream.downloaded_segments;
+    } else if (stream.target_duration > 0) {
+        segment_ms = (uint64_t)stream.target_duration * 1000u;
+    }
+    segment_ms += STREAM_REBUFFER_SEGMENT_MARGIN_MS;
+    if (segment_ms >= STREAM_REBUFFER_MAX_TARGET_MS)
+        target_ms = STREAM_REBUFFER_MAX_TARGET_MS;
+    else if (segment_ms > target_ms)
+        target_ms = (unsigned int)segment_ms;
+    if (target_ms > STREAM_REBUFFER_MAX_TARGET_MS)
+        target_ms = STREAM_REBUFFER_MAX_TARGET_MS;
     if (bandwidth == 0) return STREAM_REBUFFER_MAX_BYTES;
-    target = ((uint64_t)bandwidth * STREAM_REBUFFER_TARGET_MS) / 8000u;
+    target = ((uint64_t)bandwidth * target_ms) / 8000u;
     if (target < STREAM_REBUFFER_MIN_BYTES) target = STREAM_REBUFFER_MIN_BYTES;
     if (target > STREAM_REBUFFER_MAX_BYTES) target = STREAM_REBUFFER_MAX_BYTES;
     return (size_t)target;
 }
 
-static size_t startup_target_bytes_locked(void) {
+static size_t low_water_bytes_locked(void) {
     unsigned long bandwidth = effective_bandwidth_locked();
     uint64_t target;
-    if (bandwidth == 0) return 192u * 1024u;
-    target = ((uint64_t)bandwidth * STREAM_START_TARGET_MS) / 8000u;
-    if (target < STREAM_START_MIN_BYTES) target = STREAM_START_MIN_BYTES;
-    if (target > STREAM_START_MAX_BYTES) target = STREAM_START_MAX_BYTES;
+    if (bandwidth == 0) return STREAM_LOW_WATER_MAX_BYTES;
+    target = ((uint64_t)bandwidth * STREAM_LOW_WATER_TARGET_MS) / 8000u;
+    if (target < STREAM_LOW_WATER_MIN_BYTES)
+        target = STREAM_LOW_WATER_MIN_BYTES;
+    if (target > STREAM_LOW_WATER_MAX_BYTES)
+        target = STREAM_LOW_WATER_MAX_BYTES;
     return (size_t)target;
 }
 
@@ -308,16 +325,6 @@ cleanup:
 
 static void producer_main(void *unused) {
     (void)unused;
-    if (!stop_was_requested()) {
-        HlsSegment bootstrap;
-        bool pending;
-        LightLock_Lock(&stream.lock);
-        pending = stream.bootstrap_pending;
-        bootstrap = stream.bootstrap_segment;
-        stream.bootstrap_pending = false;
-        LightLock_Unlock(&stream.lock);
-        if (pending) (void)stream_segment(&bootstrap, NULL);
-    }
     while (!stop_was_requested()) {
         HlsMediaPlaylist media;
         size_t buffered;
@@ -367,6 +374,9 @@ static void producer_main(void *unused) {
 int miniiptv_live_stream_start(const MiniIptvChannel *channel,
                                MiniIptvStageInfo *initial_info) {
     HlsMediaPlaylist media;
+    size_t selected;
+    size_t first;
+    size_t initial_segment_target;
     int result;
     if (!channel || !channel->url[0] || !initial_info)
         return MINIIPTV_STAGE_INVALID_ARGUMENT;
@@ -380,19 +390,29 @@ int miniiptv_live_stream_start(const MiniIptvChannel *channel,
     result = resolve_initial_playlist(channel, &media);
     if (result != MINIIPTV_STAGE_OK) goto failure;
     stream.target_duration = media.target_duration ? media.target_duration : 6;
-    if (media.count == 0) {
+    /* A complete transport-stream segment gives FFmpeg a reliable PAT/PMT,
+     * SPS/PPS, and keyframe before the player opens. Hardware testing showed
+     * that handing off a partially downloaded segment caused a long white
+     * screen and intermittent failure to produce a first frame. */
+    initial_segment_target = STREAM_INITIAL_SEGMENTS;
+    selected = media.count < initial_segment_target ? media.count
+                                                     : initial_segment_target;
+    if (selected == 0) {
         result = MINIIPTV_STAGE_MEDIA_INVALID;
         goto failure;
     }
-    /* Hand the player a live reader as soon as the manifests resolve. The
-     * producer downloads the newest segment in parallel while FFmpeg opens;
-     * the reader releases a measured two-second reserve instead of making the
-     * viewer wait for the entire segment first. */
-    stream.bootstrap_segment = media.segments[media.count - 1];
-    stream.bootstrap_pending = true;
-    stream.start_time_ms = osGetTime();
-    initial_info->first_sequence = stream.bootstrap_segment.sequence;
-    initial_info->last_sequence = stream.bootstrap_segment.sequence;
+    first = media.count - selected;
+    for (size_t i = first; i < media.count; i++) {
+        size_t bytes = 0;
+        result = stream_segment(&media.segments[i], &bytes);
+        if (result != MINIIPTV_STAGE_OK) goto failure;
+        if (initial_info->segments_staged == 0)
+            initial_info->first_sequence = media.segments[i].sequence;
+        initial_info->last_sequence = media.segments[i].sequence;
+        initial_info->segments_staged++;
+        initial_info->bytes_staged += bytes;
+        initial_info->duration_staged += media.segments[i].duration;
+    }
     snprintf(initial_info->media_url, sizeof(initial_info->media_url), "%s",
              stream.media_url);
     stream.producer_running = true;
@@ -444,28 +464,22 @@ int miniiptv_live_stream_read(unsigned char *buffer, int buffer_size) {
         size_t available;
         size_t contiguous;
         size_t chunk;
+        size_t low_water;
         size_t rebuffer_target;
         bool finished;
-        bool first_read;
-        bool startup_timed_out;
         LightLock_Lock(&stream.lock);
-        first_read = !stream.reader_started;
         stream.reader_started = true;
         available = stream.ring_count;
-        rebuffer_target = stream.bytes_read == 0
-                              ? startup_target_bytes_locked()
-                              : rebuffer_target_bytes_locked();
+        low_water = low_water_bytes_locked();
+        rebuffer_target = rebuffer_target_bytes_locked();
         finished = stream.stop_requested || !stream.producer_running;
-        startup_timed_out = stream.bytes_read == 0 && !finished &&
-            osGetTime() - stream.start_time_ms >= STREAM_START_TIMEOUT_MS;
-        if (startup_timed_out) {
-            stream.stop_requested = true;
-            if (stream.last_error == 0)
-                stream.last_error = MINIIPTV_STAGE_SEGMENT_FETCH_FAILED;
-        }
-        if ((first_read || available == 0) && !stream.rebuffering && !finished) {
+        /* Refill before the network ring is empty. FFmpeg and the player's
+         * packet queues can keep presenting their cached frames while this
+         * read blocks, hiding many segment-boundary gaps. */
+        if (stream.bytes_read > 0 && available <= low_water &&
+            !stream.rebuffering && !finished) {
             stream.rebuffering = true;
-            if (stream.bytes_read > 0) stream.underruns++;
+            if (available == 0) stream.underruns++;
         }
         if (stream.rebuffering && available >= rebuffer_target)
             stream.rebuffering = false;
@@ -482,7 +496,6 @@ int miniiptv_live_stream_read(unsigned char *buffer, int buffer_size) {
             return (int)chunk;
         }
         LightLock_Unlock(&stream.lock);
-        if (startup_timed_out) return 0;
         if (finished && available == 0) return 0;
         Util_sleep(STREAM_SLEEP_US);
     }
