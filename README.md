@@ -141,4 +141,6 @@ RetroTuner3DS is based on
 [Video player for 3DS](https://github.com/Core-2-Extreme/Video_player_for_3DS)
 by Core_2_Extreme. This modified version is licensed under
 **GPL-3.0-or-later**. See [LICENSE](LICENSE) and
-[Third-party notices](THIRD_PARTY_NOTICES.md).
+[Third-party notices](THIRD_PARTY_NOTICES.md). Exact source revisions and
+retained dependency licenses are listed in the [LICENSES](LICENSES/README.md)
+directory.

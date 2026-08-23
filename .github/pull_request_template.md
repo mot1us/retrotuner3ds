@@ -14,4 +14,5 @@ Hardware/stream notes:
 
 - [ ] No private playlist URLs, tokens, credentials, or copyrighted fixtures
 - [ ] Memory limits and cleanup paths remain bounded
+- [ ] Vendored dependency changes include updated source revisions and licenses
 - [ ] User-facing docs/changelog updated when needed

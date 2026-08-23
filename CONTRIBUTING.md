@@ -43,6 +43,8 @@ or memory limits need tests for both success and cleanup paths.
 - A clean devkitARM build succeeds.
 - The release candidate is tested on real New 3DS hardware.
 - `CHANGELOG.md` and the version string are updated.
+- `LICENSES/README.md` and retained license texts match every vendored
+  dependency revision.
 - The `.3dsx` checksum is recorded.
 - The release is tagged `vMAJOR.MINOR.PATCH` and uploaded as a GitHub Release.
 
