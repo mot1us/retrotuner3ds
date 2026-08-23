@@ -4,6 +4,7 @@
 #include <stddef.h>
 
 #define MINIIPTV_MANIFEST_LIMIT (128 * 1024)
+#define MINIIPTV_NETWORK_TOO_LARGE (-2001)
 
 typedef struct {
     unsigned int http_status;

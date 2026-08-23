@@ -13,13 +13,14 @@
 #include "system/util/util.h"
 
 #define STREAM_RING_SIZE (6u * 1024u * 1024u)
+#define STREAM_SEGMENT_LIMIT (2u * 1024u * 1024u)
 #define STREAM_INITIAL_SEGMENTS 1
 #define STREAM_REBUFFER_TARGET_MS 3000u
 #define STREAM_REBUFFER_MIN_BYTES (128u * 1024u)
 #define STREAM_REBUFFER_MAX_BYTES (768u * 1024u)
-#define STREAM_HIGH_WATER_BYTES (5u * 1024u * 1024u)
+#define STREAM_HIGH_WATER_BYTES (STREAM_RING_SIZE - STREAM_SEGMENT_LIMIT)
 #define STREAM_SLEEP_US 10000ULL
-#define TS_PROBE_SIZE (188u * 2u)
+#define TS_PACKET_SIZE 188u
 
 typedef struct {
     LightLock lock;
@@ -54,14 +55,14 @@ typedef struct {
 } LiveStream;
 
 typedef struct {
-    unsigned char probe[TS_PROBE_SIZE];
-    size_t probe_size;
     size_t total_size;
-    bool validated;
 } SegmentWriter;
 
 /* Static BSS storage uses ordinary application RAM, not scarce linear RAM. */
 static unsigned char stream_ring[STREAM_RING_SIZE];
+/* Commit complete segments atomically. A failed/truncated HTTP transfer must
+ * never leave a partial access unit in the ring where FFmpeg/MVD can see it. */
+static unsigned char segment_staging[STREAM_SEGMENT_LIMIT];
 static LiveStream stream;
 
 static unsigned long measured_bandwidth_locked(void) {
@@ -111,75 +112,60 @@ static int curl_should_cancel(void *unused) {
     return stop_was_requested();
 }
 
-static bool looks_like_mpeg_ts(const unsigned char *data, size_t size) {
-    if (!data || size < TS_PROBE_SIZE) return false;
-    for (size_t offset = 0; offset < 188; offset++) {
-        if (data[offset] == 0x47 && data[offset + 188] == 0x47)
-            return true;
+static bool is_complete_mpeg_ts(const unsigned char *data, size_t size) {
+    if (!data || size < TS_PACKET_SIZE || size % TS_PACKET_SIZE != 0)
+        return false;
+    for (size_t offset = 0; offset < size; offset += TS_PACKET_SIZE) {
+        if (data[offset] != 0x47) return false;
     }
-    return false;
+    return true;
 }
 
-static size_t ring_write_bytes(const unsigned char *data, size_t size) {
-    size_t written = 0;
-    while (written < size) {
+static bool ring_commit_segment(const unsigned char *data, size_t size) {
+    if (!data || size == 0 || size > STREAM_SEGMENT_LIMIT ||
+        size > STREAM_RING_SIZE)
+        return false;
+    while (true) {
         size_t free_space;
         size_t contiguous;
-        size_t chunk;
-        if (stop_was_requested()) break;
+        size_t first;
+        bool can_wait;
         LightLock_Lock(&stream.lock);
-        free_space = STREAM_RING_SIZE - stream.ring_count;
-        contiguous = STREAM_RING_SIZE - stream.ring_write;
-        chunk = size - written;
-        if (chunk > free_space) chunk = free_space;
-        if (chunk > contiguous) chunk = contiguous;
-        if (chunk > 0) {
-            memcpy(stream_ring + stream.ring_write, data + written, chunk);
-            stream.ring_write = (stream.ring_write + chunk) % STREAM_RING_SIZE;
-            stream.ring_count += chunk;
-            stream.bytes_written += chunk;
-        }
-        LightLock_Unlock(&stream.lock);
-        written += chunk;
-        if (chunk == 0) {
-            bool can_wait;
-            LightLock_Lock(&stream.lock);
-            can_wait = stream.reader_started;
+        if (stream.stop_requested) {
             LightLock_Unlock(&stream.lock);
-            /* Before playback starts there is no consumer that can free a
-             * completely full ring. Fail cleanly instead of deadlocking a
-             * high-bitrate channel during initial buffering. */
-            if (!can_wait) break;
-            Util_sleep(STREAM_SLEEP_US);
+            return false;
         }
+        free_space = STREAM_RING_SIZE - stream.ring_count;
+        if (free_space >= size) {
+            contiguous = STREAM_RING_SIZE - stream.ring_write;
+            first = size < contiguous ? size : contiguous;
+            memcpy(stream_ring + stream.ring_write, data, first);
+            if (first < size)
+                memcpy(stream_ring, data + first, size - first);
+            /* Publish only after both halves have been copied. The reader
+             * cannot observe a segment prefix because it uses this lock. */
+            stream.ring_write = (stream.ring_write + size) % STREAM_RING_SIZE;
+            stream.ring_count += size;
+            stream.bytes_written += size;
+            LightLock_Unlock(&stream.lock);
+            return true;
+        }
+        can_wait = stream.reader_started;
+        LightLock_Unlock(&stream.lock);
+        /* Before playback starts there is no consumer that can free space.
+         * Fail cleanly instead of deadlocking during initial buffering. */
+        if (!can_wait) return false;
+        Util_sleep(STREAM_SLEEP_US);
     }
-    return written;
 }
 
 static size_t segment_write_callback(const unsigned char *data, size_t size,
                                      void *userdata) {
     SegmentWriter *writer = userdata;
-    size_t offset = 0;
     if (!writer || (!data && size)) return 0;
-    if (size > MINIIPTV_SEGMENT_LIMIT - writer->total_size) return 0;
+    if (size > STREAM_SEGMENT_LIMIT - writer->total_size) return 0;
+    memcpy(segment_staging + writer->total_size, data, size);
     writer->total_size += size;
-
-    if (!writer->validated) {
-        size_t needed = TS_PROBE_SIZE - writer->probe_size;
-        size_t take = size < needed ? size : needed;
-        memcpy(writer->probe + writer->probe_size, data, take);
-        writer->probe_size += take;
-        offset += take;
-        if (writer->probe_size < TS_PROBE_SIZE) return size;
-        if (!looks_like_mpeg_ts(writer->probe, writer->probe_size)) return 0;
-        writer->validated = true;
-        if (ring_write_bytes(writer->probe, writer->probe_size) !=
-            writer->probe_size)
-            return 0;
-    }
-    if (offset < size &&
-        ring_write_bytes(data + offset, size - offset) != size - offset)
-        return 0;
     return size;
 }
 
@@ -188,47 +174,67 @@ static int stream_segment(const HlsSegment *segment, size_t *downloaded_size) {
     size_t bytes = 0;
     uint64_t download_started;
     uint64_t download_elapsed;
+    bool too_large = false;
+    bool valid_ts = false;
+    bool committed = false;
     int result;
     if (!segment) return MINIIPTV_STAGE_INVALID_ARGUMENT;
     memset(&writer, 0, sizeof(writer));
     download_started = osGetTime();
     result = network_stream_data(segment->url, stream.channel.user_agent,
                                  stream.channel.referrer,
-                                 MINIIPTV_SEGMENT_LIMIT,
+                                 STREAM_SEGMENT_LIMIT,
                                  segment_write_callback, &writer,
                                  curl_should_cancel, NULL, &bytes);
     download_elapsed = osGetTime() - download_started;
-    if (downloaded_size) *downloaded_size = bytes;
+    too_large = result == MINIIPTV_NETWORK_TOO_LARGE;
+    if (result == 0 && bytes == writer.total_size)
+        valid_ts = is_complete_mpeg_ts(segment_staging, writer.total_size);
+    if (result == 0 && valid_ts)
+        committed = ring_commit_segment(segment_staging, writer.total_size);
+    if (downloaded_size) *downloaded_size = committed ? writer.total_size : 0;
 
     LightLock_Lock(&stream.lock);
-    if (result == 0 && writer.validated) {
+    if (result == 0 && valid_ts && committed) {
         if (download_elapsed == 0) download_elapsed = 1;
         stream.downloaded_segments++;
-        stream.last_segment_bytes = bytes;
+        stream.last_segment_bytes = writer.total_size;
         stream.last_download_milliseconds = download_elapsed > 0xffffffffu
             ? 0xffffffffu : (unsigned int)download_elapsed;
         stream.last_segment_milliseconds = segment->duration > 0.0
             ? (unsigned int)(segment->duration * 1000.0 + 0.5) : 0;
         {
-            uint64_t network_bps = ((uint64_t)bytes * 8000u) / download_elapsed;
+            uint64_t network_bps =
+                ((uint64_t)writer.total_size * 8000u) / download_elapsed;
             stream.network_bandwidth = network_bps > 0xffffffffu
                 ? 0xffffffffu : (unsigned long)network_bps;
         }
         if (segment->duration > 0.0) {
-            stream.measured_segment_bytes += bytes;
+            stream.measured_segment_bytes += writer.total_size;
             stream.measured_segment_milliseconds +=
                 (uint64_t)(segment->duration * 1000.0 + 0.5);
         }
         stream.last_sequence = segment->sequence;
         stream.last_error = 0;
     } else {
-        stream.last_error = result != 0 ? MINIIPTV_STAGE_SEGMENT_FETCH_FAILED
-                                        : MINIIPTV_STAGE_NOT_MPEG_TS;
-        if (writer.validated && writer.total_size > 0)
-            stream.last_sequence = segment->sequence;
+        if (too_large) {
+            stream.last_error = MINIIPTV_STAGE_TOO_LARGE;
+            /* Retrying the same oversized live segment can never succeed and
+             * would repeatedly consume bandwidth and staging time. */
+            stream.stop_requested = true;
+        } else if (result == 0 && !valid_ts) {
+            stream.last_error = MINIIPTV_STAGE_NOT_MPEG_TS;
+            /* A successful HTTP body that is not a complete TS segment is a
+             * permanent compatibility/safety failure, not a network retry. */
+            stream.stop_requested = true;
+        } else if (result != 0 || !committed) {
+            stream.last_error = MINIIPTV_STAGE_SEGMENT_FETCH_FAILED;
+        } else {
+            stream.last_error = MINIIPTV_STAGE_NOT_MPEG_TS;
+        }
     }
-    result = (result == 0 && writer.validated) ? MINIIPTV_STAGE_OK
-                                               : stream.last_error;
+    result = (result == 0 && valid_ts && committed) ? MINIIPTV_STAGE_OK
+                                                    : stream.last_error;
     LightLock_Unlock(&stream.lock);
     return result;
 }
@@ -335,9 +341,26 @@ static void producer_main(void *unused) {
             continue;
         }
         if (media.target_duration) stream.target_duration = media.target_duration;
+        if (media.count > 0 && stream.last_sequence > 0 &&
+            media.segments[media.count - 1].sequence < stream.last_sequence) {
+            LightLock_Lock(&stream.lock);
+            stream.last_error = MINIIPTV_STAGE_DISCONTINUITY;
+            stream.stop_requested = true;
+            LightLock_Unlock(&stream.lock);
+            break;
+        }
         for (size_t i = 0; i < media.count && !stop_was_requested(); i++) {
             size_t ignored_size = 0;
             if (media.segments[i].sequence <= stream.last_sequence) continue;
+            if (media.segments[i].discontinuity ||
+                (stream.last_sequence > 0 &&
+                 media.segments[i].sequence != stream.last_sequence + 1)) {
+                LightLock_Lock(&stream.lock);
+                stream.last_error = MINIIPTV_STAGE_DISCONTINUITY;
+                stream.stop_requested = true;
+                LightLock_Unlock(&stream.lock);
+                break;
+            }
             result = stream_segment(&media.segments[i], &ignored_size);
             if (result != MINIIPTV_STAGE_OK) {
                 for (int retry = 0; retry < 5 && !stop_was_requested(); retry++)
@@ -381,15 +404,25 @@ int miniiptv_live_stream_start(const MiniIptvChannel *channel,
      * that handing off a partially downloaded segment caused a long white
      * screen and intermittent failure to produce a first frame. */
     initial_segment_target = STREAM_INITIAL_SEGMENTS;
-    selected = media.count < initial_segment_target ? media.count
-                                                     : initial_segment_target;
+    /* Avoid the newest live-edge entry: some CDNs advertise it before every
+     * edge node can serve it. The producer will fetch it immediately after
+     * the player opens. */
+    {
+        size_t end = media.count;
+        if (media.is_live && end > 1) end--;
+        selected = end < initial_segment_target ? end : initial_segment_target;
+        first = end - selected;
+    }
     if (selected == 0) {
         result = MINIIPTV_STAGE_MEDIA_INVALID;
         goto failure;
     }
-    first = media.count - selected;
-    for (size_t i = first; i < media.count; i++) {
+    for (size_t i = first; i < first + selected; i++) {
         size_t bytes = 0;
+        if (media.segments[i].discontinuity) {
+            result = MINIIPTV_STAGE_DISCONTINUITY;
+            goto failure;
+        }
         result = stream_segment(&media.segments[i], &bytes);
         if (result != MINIIPTV_STAGE_OK) goto failure;
         if (initial_info->segments_staged == 0)

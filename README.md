@@ -18,9 +18,9 @@ It has only been tested on that model; other 3DS-family systems are unverified.
 - Retro dual-screen channel deck, buffering state, and stream diagnostics.
 - Full teardown of the stream and decoder when leaving a channel.
 
-The most reliable hardware-tested signal so far is roughly **480x360 at 830
-kbps**. A practical starting target is H.264 + AAC, MPEG-TS HLS, no more than
-480p and about 1.5 Mbps. Higher-bitrate 720p stations may stutter or fail.
+The most reliable hardware-tested signals are **360p-class H.264/AAC streams
+below roughly 1 Mbps**. Live mode now fails closed above 640x480 or a known
+30 fps limit; 720p and larger sources are rejected before hardware decoding.
 
 ## Install
 
@@ -68,6 +68,11 @@ RetroTuner3DS currently targets:
 - unencrypted streams without byte ranges, discontinuities, or fMP4 init maps;
 - New 3DS hardware decoding;
 - low-resolution, low-bitrate variants.
+
+For console safety, the current live path also rejects video above 640x480,
+known frame rates above 30 fps, changed H.264 SPS/PPS parameters, partial
+segments, and mid-stream HLS discontinuities. A rejected channel returns to the
+deck instead of falling back to software decoding.
 
 At tuning time, the player selects the lowest rendition advertised by the
 channel and rejects unsupported HLS layouts. This compatibility filtering does

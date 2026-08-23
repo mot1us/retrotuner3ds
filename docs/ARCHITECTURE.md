@@ -11,15 +11,17 @@ return and tears down the live session before another channel is selected.
 
 ## HLS path
 
-1. `playlist.c` parses at most ten M3U entries with bounded names and URLs.
+1. `playlist.c` parses at most 32 M3U entries with bounded names and URLs.
 2. `network.c` performs bounded HTTP(S) requests with TLS verification,
    redirects, timeouts, and response-size caps.
 3. `hls.c` parses master and media playlists and resolves relative URLs.
 4. `live_stream.c` selects the lowest advertised rendition and downloads live
    MPEG-TS segments on a producer thread.
-5. A static 6 MiB BSS ring buffer separates network timing from playback while
+5. Each segment is first capped and staged in a 2 MiB ordinary-RAM buffer. Only
+   a complete, validated MPEG-TS response is committed to playback.
+6. A static 6 MiB BSS ring separates network timing from playback while
    avoiding scarce linear memory.
-6. A custom FFmpeg input bridge exposes the ring as a streaming media source.
+7. A custom FFmpeg input bridge exposes the ring as a streaming media source.
 
 ## Playback path
 
@@ -36,10 +38,17 @@ resolution, profile, frame rate, and bitrate.
 
 - Stream ring: 6 MiB in ordinary application BSS.
 - Manifest and segment requests have fixed maximum sizes.
+- Live MVD input is restricted to one H.264/YUV420 track at no more than
+  640x480 and, when reported, no more than 30 fps. Oversized sources fail
+  before `mvdstdInit`.
+- H.264 SPS/PPS changes, invalid physical buffers, incomplete MVD results, and
+  demux-detected packet corruption trigger serialized teardown instead of
+  feeding more packets to the decoder service.
 - The producer pauses at a high-water mark. Playback only enters its bounded
   three-second refill after the network ring actually runs empty.
-- Unsupported encrypted, byte-range, discontinuous, or fMP4 playlists are
-  rejected before player handoff.
+- Encrypted, byte-range, and fMP4 playlists are rejected before handoff;
+  later discontinuities or media-sequence gaps stop the producer before the
+  changed segment reaches the decoder.
 - Stop and channel-change paths request producer cancellation, join the thread,
   close FFmpeg/MVD resources, and reset the ring.
 

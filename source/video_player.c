@@ -57,6 +57,9 @@
 #define HW_DECODER_RAW_IMAGE_SIZE					(uint32_t)(vid_player.video_info[EYE_LEFT].width * vid_player.video_info[EYE_LEFT].height * 2)	//HW decoder always returns raw image in RGB565LE, so number of pixels * 2.
 #define SW_DECODER_RAW_IMAGE_SIZE(index)			(uint32_t)(vid_player.video_info[index].width * vid_player.video_info[index].height * 1.5)		//We are assuming raw image format is YUV420P because it is the most common format, so number of pixels * 1.5.
 #define HW_DECODER_MAX_PX							(uint32_t)(1920)						//Maximum image width/height that HW decoder supports in px.
+#define MINIIPTV_LIVE_MAX_WIDTH					(uint32_t)(640)
+#define MINIIPTV_LIVE_MAX_HEIGHT					(uint32_t)(480)
+#define MINIIPTV_LIVE_MAX_FPS						(double)(30.5)
 
 #define NUM_OF_THREADS_MIN							(uint8_t)(2)							//Minimum number of threads for multi-threaded decoding.
 #define NUM_OF_THREADS_MAX							(uint8_t)(8)							//Maximum number of threads for multi-threaded decoding.
@@ -628,6 +631,7 @@ typedef struct
 	uint8_t next_draw_index[EYE_MAX];				//Next texture buffer index that is ready to draw.
 	uint16_t vps[EYE_MAX];							//Actual video playback framerate.
 	uint16_t vps_cache[EYE_MAX];					//Actual video playback framerate cache.
+	volatile bool has_presented_frame;			//Whether a decoded frame reached a drawable texture.
 	double next_frame_update_time[EYE_MAX];			//Next timestamp to update a video frame.
 	double video_frametime[EYE_MAX];				//Video frametime in ms.
 	double video_x_offset[EYE_MAX];					//X (horizontal) offset for video.
@@ -728,6 +732,8 @@ static void Vid_update_video_delay(Vid_eye eye_index);
 static double Vid_get_media_duration(double video_track_0_duration, double video_track_1_duration, double audio_track_duration);
 static double Vid_get_current_media_pos(double video_track_0_pos, double video_track_1_pos, double audio_track_pos);
 static bool Vid_has_video(uint8_t num_of_video_tracks, double video_frametimes[EYE_MAX]);
+static uint16_t Vid_get_effective_restart_threshold(void);
+static int Vid_validate_embedded_live_video(const Vid_player* player, uint8_t num_of_video_tracks);
 static bool Vid_can_use_hw_decoder(const Vid_player* player, uint8_t num_of_video_tracks);
 static bool Vid_can_use_hw_color_converter(const Vid_player* player, uint8_t num_of_video_tracks);
 static void Vid_log_media_info(void);
@@ -776,6 +782,7 @@ static bool vid_miniptv_force_initial_autoplay = false;
 static bool vid_miniptv_start_pending = false;
 static bool vid_miniptv_show_details = true;
 static bool vid_miniptv_return_requested = false;
+static bool vid_miniptv_switch_requested = false;
 
 static void Vid_draw_miniiptv_top_bar(void)
 {
@@ -832,9 +839,10 @@ static void Vid_draw_miniiptv_live_overlay(void)
 		state_text = "SIGNAL ERROR";
 		state_color = DEF_DRAW_RED;
 	}
-	if(vid_miniptv_return_requested)
+	if(__atomic_load_n(&vid_miniptv_return_requested, __ATOMIC_ACQUIRE))
 	{
-		state_text = "RETURNING";
+		state_text = __atomic_load_n(&vid_miniptv_switch_requested,
+			__ATOMIC_ACQUIRE) ? "HANDOFF" : "RETURNING";
 		state_color = MINIIPTV_COLOR_ORANGE;
 	}
 
@@ -842,8 +850,9 @@ static void Vid_draw_miniiptv_live_overlay(void)
 		? live_info.measured_bandwidth : live_info.bandwidth;
 	if(effective_bandwidth > 0)
 	{
-		if(effective_bandwidth <= 1500000ul
-		&& (live_info.height == 0 || live_info.height <= 480))
+		if(effective_bandwidth <= 1000000ul
+		&& (live_info.width == 0 || live_info.width <= MINIIPTV_LIVE_MAX_WIDTH)
+		&& (live_info.height == 0 || live_info.height <= MINIIPTV_LIVE_MAX_HEIGHT))
 			rating_text = "3DS SWEET SPOT";
 		else
 			rating_text = "HEAVY SIGNAL";
@@ -853,9 +862,13 @@ static void Vid_draw_miniiptv_live_overlay(void)
 		/ MINIIPTV_BUFFER_METER_MS);
 	if(bar_width > 276u)
 		bar_width = 276u;
-	if(live_info.buffered_milliseconds < 2000u)
+	/* This is only the compressed network ring. FFmpeg packets, decoded MVD
+	 * frames, and speaker buffers are downstream and intentionally excluded.
+	 * Color it against the real refill target instead of arbitrary seconds. */
+	if(live_error != 0 || live_info.rebuffering || buffered == 0)
 		buffer_color = DEF_DRAW_RED;
-	else if(live_info.buffered_milliseconds < 5000u)
+	else if(live_info.rebuffer_target_bytes > 0
+	&& buffered < live_info.rebuffer_target_bytes)
 		buffer_color = MINIIPTV_COLOR_ORANGE;
 
 	Draw_texture(&pixel, MINIIPTV_COLOR_INK, 0, 0, 320, 225);
@@ -875,13 +888,13 @@ static void Vid_draw_miniiptv_live_overlay(void)
 		strcmp(rating_text, "3DS SWEET SPOT") == 0
 			? MINIIPTV_COLOR_MINT : MINIIPTV_COLOR_ORANGE);
 
-	Draw_c("PLAYABLE SIGNAL", 14, 101, 10.5f, MINIIPTV_COLOR_CREAM);
+	Draw_c("NETWORK RESERVE", 14, 101, 10.5f, MINIIPTV_COLOR_CREAM);
 	Draw_texture(&pixel, MINIIPTV_COLOR_SHADOW, 14, 117, 280, 13);
 	Draw_texture(&pixel, buffer_color, 16, 119, bar_width, 9);
-	snprintf(line, sizeof(line), "~%u.%us ready  //  %lu KiB",
+	snprintf(line, sizeof(line), "~%u.%us ring  //  %lu KiB  //  U:%lu",
 		live_info.buffered_milliseconds / 1000u,
 		(live_info.buffered_milliseconds % 1000u) / 100u,
-		(unsigned long)(buffered / 1024u));
+		(unsigned long)(buffered / 1024u), underruns);
 	Draw_align_c(line, 14, 134, 10.0f, MINIIPTV_COLOR_CREAM,
 		DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 280, 14);
 
@@ -929,7 +942,7 @@ bool Vid_query_init_flag(void)
 
 bool Vid_query_running_flag(void)
 {
-	return vid_player.main_run;
+	return __atomic_load_n(&vid_player.main_run, __ATOMIC_ACQUIRE);
 }
 
 void Vid_hid(const Hid_info* key)
@@ -944,7 +957,7 @@ void Vid_hid(const Hid_info* key)
 	//The standalone diagnostic owns START so it can always exit cleanly.
 	if(vid_embedded_test_mode && DEF_HID_PHY_PR(key->start))
 	{
-		vid_embedded_exit_requested = true;
+		__atomic_store_n(&vid_embedded_exit_requested, true, __ATOMIC_RELEASE);
 		return;
 	}
 
@@ -954,17 +967,16 @@ void Vid_hid(const Hid_info* key)
 	 * cancel a potentially blocked network read, and keep a high-priority abort
 	 * queued until the decode thread reaches IDLE. */
 	if(vid_embedded_test_mode
-	&& (vid_player.state != PLAYER_STATE_IDLE
-		|| miniiptv_live_stream_is_active()
-		|| Util_err_query_show_flag())
+	&& vid_player.state != PLAYER_STATE_IDLE
 	&& (DEF_HID_PHY_PR(key->l) || DEF_HID_PHY_PR(key->r)))
 	{
+		__atomic_store_n(&vid_miniptv_switch_requested, true, __ATOMIC_RELEASE);
 		if(vid_live_channel_hook)
 			vid_live_channel_hook(DEF_HID_PHY_PR(key->l) ? -1 : 1);
 		Util_err_set_show_flag(false);
 		Util_err_clear_error_message();
-		vid_miniptv_return_requested =
-			(vid_player.state != PLAYER_STATE_IDLE);
+		__atomic_store_n(&vid_miniptv_return_requested,
+			(vid_player.state != PLAYER_STATE_IDLE), __ATOMIC_RELEASE);
 		miniiptv_live_stream_request_stop();
 		Draw_set_refresh_needed(true);
 	}
@@ -974,18 +986,20 @@ void Vid_hid(const Hid_info* key)
 		|| Util_err_query_show_flag())
 	&& (DEF_HID_PHY_PR(key->b) || DEF_HID_PHY_HE(key->b)))
 	{
+		__atomic_store_n(&vid_miniptv_switch_requested, false, __ATOMIC_RELEASE);
 		Util_err_set_show_flag(false);
 		Util_err_clear_error_message();
-		vid_miniptv_return_requested =
-			(vid_player.state != PLAYER_STATE_IDLE);
+		__atomic_store_n(&vid_miniptv_return_requested,
+			(vid_player.state != PLAYER_STATE_IDLE), __ATOMIC_RELEASE);
 		miniiptv_live_stream_request_stop();
 		Draw_set_refresh_needed(true);
 	}
-	if(vid_miniptv_return_requested)
+	if(__atomic_load_n(&vid_miniptv_return_requested, __ATOMIC_ACQUIRE))
 	{
 		if(vid_player.state == PLAYER_STATE_IDLE)
 		{
-			vid_miniptv_return_requested = false;
+			__atomic_store_n(&vid_miniptv_return_requested, false,
+				__ATOMIC_RELEASE);
 			Draw_set_refresh_needed(true);
 		}
 		else
@@ -1873,7 +1887,7 @@ void Vid_hid(const Hid_info* key)
 void Vid_resume(void)
 {
 	vid_player.thread_suspend = false;
-	vid_player.main_run = true;
+	__atomic_store_n(&vid_player.main_run, true, __ATOMIC_RELEASE);
 	//Reset key state on scene change.
 	Util_hid_reset_key_state(HID_KEY_BIT_ALL);
 	Draw_set_refresh_needed(true);
@@ -1886,7 +1900,7 @@ void Vid_resume(void)
 void Vid_suspend(void)
 {
 	vid_player.thread_suspend = true;
-	vid_player.main_run = false;
+	__atomic_store_n(&vid_player.main_run, false, __ATOMIC_RELEASE);
 	Menu_resume();
 }
 
@@ -1947,14 +1961,14 @@ void Vid_init(bool draw)
 void Vid_prepare_embedded_test(void)
 {
 	vid_embedded_test_mode = true;
-	vid_embedded_exit_requested = false;
+	__atomic_store_n(&vid_embedded_exit_requested, false, __ATOMIC_RELEASE);
 	Vid_prepare_file("romfs:/", "tvsturbo-reference.mkv");
 }
 
 void Vid_enable_standalone_mode(void)
 {
 	vid_embedded_test_mode = true;
-	vid_embedded_exit_requested = false;
+	__atomic_store_n(&vid_embedded_exit_requested, false, __ATOMIC_RELEASE);
 }
 
 void Vid_set_idle_hooks(Vid_idle_hid_hook hid_hook, Vid_idle_draw_hook draw_hook)
@@ -2008,7 +2022,8 @@ bool Vid_prepare_and_start_file(const char* directory, const char* name)
 	vid_miniptv_force_initial_autoplay =
 		(strcmp(name, MINIIPTV_LIVE_STREAM_URL) == 0);
 	vid_miniptv_start_pending = true;
-	vid_miniptv_return_requested = false;
+	__atomic_store_n(&vid_miniptv_return_requested, false, __ATOMIC_RELEASE);
+	__atomic_store_n(&vid_miniptv_switch_requested, false, __ATOMIC_RELEASE);
 	vid_player.menu_mode = MENU_CONTROLS;
 	Util_err_set_show_flag(false);
 	Util_err_clear_error_message();
@@ -2031,19 +2046,24 @@ bool Vid_query_idle_flag(void)
 
 uint32_t Vid_query_playback_return_generation(void)
 {
-	return vid_playback_return_generation;
+	return __atomic_load_n(&vid_playback_return_generation, __ATOMIC_ACQUIRE);
 }
 
 bool Vid_query_embedded_exit_requested(void)
 {
-	return vid_embedded_exit_requested;
+	return __atomic_load_n(&vid_embedded_exit_requested, __ATOMIC_ACQUIRE);
 }
 
 void Vid_exit(bool draw)
 {
 	DEF_LOG_STRING("Exiting...");
 	uint32_t result = DEF_ERR_OTHER;
+	uint64_t join_timeout = vid_embedded_test_mode ? UINT64_MAX
+		: DEF_THREAD_WAIT_TIME;
 
+	/* Stop the global HID dispatcher before exit tears down queues, sync
+	 * objects, and textures used by Vid_hid(). */
+	__atomic_store_n(&vid_player.main_run, false, __ATOMIC_RELEASE);
 	vid_player.exit_thread = threadCreate(Vid_exit_thread, NULL, DEF_THREAD_STACKSIZE, DEF_THREAD_PRIORITY_NORMAL, 1, false);
 
 	while(vid_player.inited)
@@ -2054,7 +2074,7 @@ void Vid_exit(bool draw)
 			Util_sleep(20000);
 	}
 
-	DEF_LOG_RESULT_SMART(result, threadJoin(vid_player.exit_thread, DEF_THREAD_WAIT_TIME), (result == DEF_SUCCESS), result);
+	DEF_LOG_RESULT_SMART(result, threadJoin(vid_player.exit_thread, join_timeout), (result == DEF_SUCCESS), result);
 	threadFree(vid_player.exit_thread);
 
 	Util_watch_remove(WATCH_HANDLE_VIDEO_PLAYER, &vid_player.status.sequential_id);
@@ -2196,6 +2216,11 @@ void Vid_main(void)
 								vid_player.next_draw_index[i]++;
 							else
 								vid_player.next_draw_index[i] = 0;
+
+							/* The draw thread owns this flag. Flip it only after it
+							 * selects a texture that the producer already published. */
+							__atomic_store_n(&vid_player.has_presented_frame, true,
+								__ATOMIC_RELEASE);
 
 							Draw_set_refresh_needed(true);
 							vid_player.vps_cache[i]++;
@@ -2463,8 +2488,10 @@ void Vid_main(void)
 
 			if(vid_player.state != PLAYER_STATE_IDLE)
 			{
-				//Draw videos.
-				if(Util_sync_lock(&vid_player.texture_init_free_lock, 0) == DEF_SUCCESS)
+				//Draw videos only after a real frame has populated the texture.
+				if((!vid_embedded_test_mode || __atomic_load_n(
+					&vid_player.has_presented_frame, __ATOMIC_ACQUIRE))
+				&& Util_sync_lock(&vid_player.texture_init_free_lock, 0) == DEF_SUCCESS)
 				{
 					Vid_screen_pos screen = SCREEN_POS_TOP_LEFT;
 					Vid_eye eye = screen_pos_to_eye[screen];
@@ -2473,6 +2500,20 @@ void Vid_main(void)
 					Draw_large_texture_with_crop(&vid_player.large_image[image_index[eye]][eye], DEF_DRAW_NO_COLOR, video_x_offset[screen], video_y_offset[screen],
 					image_width[eye], image_height[eye], image_crop_x_start[eye_crop], image_crop_x_end[eye_crop], image_crop_y_start[eye_crop], image_crop_y_end[eye_crop]);
 					Util_sync_unlock(&vid_player.texture_init_free_lock);
+				}
+				else if(vid_embedded_test_mode && !__atomic_load_n(
+					&vid_player.has_presented_frame, __ATOMIC_ACQUIRE))
+				{
+					Draw_image_data pixel = Draw_get_empty_image();
+					Draw_texture(&pixel, MINIIPTV_COLOR_INK, 0,
+						vid_player.is_full_screen ? 0 : 15, 400,
+						vid_player.is_full_screen ? 240 : 225);
+					Draw_align_c("LOCKING SIGNAL...", 0, 100, 13.0f,
+						MINIIPTV_COLOR_MINT, DRAW_X_ALIGN_CENTER,
+						DRAW_Y_ALIGN_CENTER, TOP_SCREEN_WIDTH, 24);
+					Draw_align_c("SAFE VIDEO CHECK // ONE MOMENT", 0, 127,
+						9.0f, MINIIPTV_COLOR_CREAM, DRAW_X_ALIGN_CENTER,
+						DRAW_Y_ALIGN_CENTER, TOP_SCREEN_WIDTH, 18);
 				}
 
 				//Draw subtitles.
@@ -2485,7 +2526,6 @@ void Vid_main(void)
 
 						Util_sync_unlock(&vid_player.texture_init_free_lock);
 					}
-
 					if(vid_player.subtitle_data[subtitle_index].text)
 					{
 						Draw_with_background_c(vid_player.subtitle_data[subtitle_index].text, text_subtitle_x_offset[SCREEN_POS_TOP_LEFT], text_subtitle_y_offset[SCREEN_POS_TOP_LEFT],
@@ -2780,8 +2820,10 @@ void Vid_main(void)
 
 				if(vid_player.state != PLAYER_STATE_IDLE)
 				{
-					//Draw videos.
-					if(Util_sync_lock(&vid_player.texture_init_free_lock, 0) == DEF_SUCCESS)
+					//Draw videos only after a real frame has populated the texture.
+					if((!vid_embedded_test_mode || __atomic_load_n(
+						&vid_player.has_presented_frame, __ATOMIC_ACQUIRE))
+					&& Util_sync_lock(&vid_player.texture_init_free_lock, 0) == DEF_SUCCESS)
 					{
 						Vid_screen_pos screen = SCREEN_POS_BOTTOM;
 						Vid_eye eye = screen_pos_to_eye[screen];
@@ -3984,16 +4026,17 @@ static void Vid_update_decoding_statistics_every_100ms(void)
 		if(vid_player.state == PLAYER_STATE_BUFFERING)
 		{
 			uint16_t available_buffer = 0;
+			uint16_t restart_threshold = Vid_get_effective_restart_threshold();
 
 			for(uint32_t i = 0; i < EYE_MAX; i++)
 				available_buffer = Util_max(available_buffer, vid_player.raw_video_buffer_list[i][last_index]);
 
-			if(available_buffer >= vid_player.restart_playback_threshold)
+			if(restart_threshold == 0 || available_buffer >= restart_threshold)
 				vid_player.buffer_progress = 100;//Done.
 			else if(available_buffer == 0)
 				vid_player.buffer_progress = 0;
 			else
-				vid_player.buffer_progress = (((double)available_buffer / vid_player.restart_playback_threshold) * 100);
+				vid_player.buffer_progress = (((double)available_buffer / restart_threshold) * 100);
 		}
 		else
 			vid_player.buffer_progress = 0;//Not applicable.
@@ -4082,6 +4125,43 @@ static bool Vid_has_video(uint8_t num_of_video_tracks, double video_frametimes[E
 	}
 }
 
+static uint16_t Vid_get_effective_restart_threshold(void)
+{
+	uint16_t threshold = vid_player.restart_playback_threshold;
+
+	/* RetroTuner caps MVD to three raw-image slots, of which at most two can
+	 * be queued. The inherited setting defaults to 48 frames, which made
+	 * video-only streams stop forever at 2/48 = 4.17%. */
+	if(vid_player.sub_state & PLAYER_SUB_STATE_HW_DECODING)
+	{
+		uint32_t buffers = Util_decoder_mvd_get_raw_image_buffer_size(DEF_VID_DECORDER_SESSION_ID);
+		uint16_t maximum = buffers > 1 ? (uint16_t)(buffers - 1) : 1;
+		if(threshold == 0 || threshold > maximum)
+			threshold = maximum;
+	}
+
+	return threshold;
+}
+
+static int Vid_validate_embedded_live_video(const Vid_player* player, uint8_t num_of_video_tracks)
+{
+	const Media_v_info* video;
+
+	if(!player || num_of_video_tracks != 1)
+		return MINIIPTV_STAGE_UNSUPPORTED_HLS;
+	video = &player->video_info[EYE_LEFT];
+	if(strcmp(video->short_format_name, "h264") != 0
+	|| video->pixel_format != RAW_PIXEL_YUV420P)
+		return MINIIPTV_STAGE_UNSUPPORTED_HLS;
+	if(video->codec_width == 0 || video->codec_height == 0
+	|| video->codec_width > MINIIPTV_LIVE_MAX_WIDTH
+	|| video->codec_height > MINIIPTV_LIVE_MAX_HEIGHT
+	|| (video->framerate > 0 && video->framerate > MINIIPTV_LIVE_MAX_FPS))
+		return MINIIPTV_STAGE_TOO_LARGE;
+
+	return MINIIPTV_STAGE_OK;
+}
+
 static bool Vid_can_use_hw_decoder(const Vid_player* player, uint8_t num_of_video_tracks)
 {
 	if(!player->use_hw_decoding)
@@ -4090,8 +4170,7 @@ static bool Vid_can_use_hw_decoder(const Vid_player* player, uint8_t num_of_vide
 		return false;//HW decoder only supports 1 track at a time.
 	if(player->video_info[EYE_LEFT].pixel_format != RAW_PIXEL_YUV420P)
 		return false;//Color format is unsupported.
-	//todo fix string comparison
-	if(strcmp(player->video_info[EYE_LEFT].format_name, "H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10") != 0)
+	if(strcmp(player->video_info[EYE_LEFT].short_format_name, "h264") != 0)
 		return false;//Video format is unsupported.
 	if(player->video_info[EYE_LEFT].codec_width > HW_DECODER_MAX_PX || player->video_info[EYE_LEFT].codec_height > HW_DECODER_MAX_PX)
 		return false;//Resolution is unsupported.
@@ -4350,6 +4429,7 @@ static void Vid_init_video_data(void)
 	vid_player.num_of_video_tracks = 0;
 	vid_player.next_vfps_update = (current_ts + 1000);
 	vid_player.buffer_progress = 0;
+	__atomic_store_n(&vid_player.has_presented_frame, false, __ATOMIC_RELEASE);
 
 	for(uint32_t i = 0; i < EYE_MAX; i++)
 	{
@@ -4911,6 +4991,8 @@ void Vid_exit_thread(void* arg)
 	(void)arg;
 	DEF_LOG_STRING("Thread started.");
 	uint32_t result = DEF_ERR_OTHER;
+	uint64_t join_timeout = vid_embedded_test_mode ? UINT64_MAX
+		: DEF_THREAD_WAIT_TIME;
 
 	vid_player.inited = false;
 	vid_player.thread_suspend = false;
@@ -4927,10 +5009,10 @@ void Vid_exit_thread(void* arg)
 	DEF_LOG_RESULT_SMART(result, Vid_save_settings(), (result == DEF_SUCCESS), result);
 
 	Util_str_add(&vid_player.status, "\nExiting threads...");
-	DEF_LOG_RESULT_SMART(result, threadJoin(vid_player.decode_thread, DEF_THREAD_WAIT_TIME), (result == DEF_SUCCESS), result);
-	DEF_LOG_RESULT_SMART(result, threadJoin(vid_player.decode_video_thread, DEF_THREAD_WAIT_TIME), (result == DEF_SUCCESS), result);
-	DEF_LOG_RESULT_SMART(result, threadJoin(vid_player.convert_thread, DEF_THREAD_WAIT_TIME), (result == DEF_SUCCESS), result);
-	DEF_LOG_RESULT_SMART(result, threadJoin(vid_player.read_packet_thread, DEF_THREAD_WAIT_TIME), (result == DEF_SUCCESS), result);
+	DEF_LOG_RESULT_SMART(result, threadJoin(vid_player.decode_thread, join_timeout), (result == DEF_SUCCESS), result);
+	DEF_LOG_RESULT_SMART(result, threadJoin(vid_player.decode_video_thread, join_timeout), (result == DEF_SUCCESS), result);
+	DEF_LOG_RESULT_SMART(result, threadJoin(vid_player.convert_thread, join_timeout), (result == DEF_SUCCESS), result);
+	DEF_LOG_RESULT_SMART(result, threadJoin(vid_player.read_packet_thread, join_timeout), (result == DEF_SUCCESS), result);
 	Util_decoder_mvd_release_packet_buffer();
 
 	Util_str_add(&vid_player.status, "\nCleaning up...");
@@ -5272,6 +5354,31 @@ void Vid_decode_thread(void* arg)
 										vid_player.video_frametime[i] = (1000.0 / vid_player.video_info[i].framerate);
 								}
 
+								/* The Nintendo MVD sysmodule can take the whole console down
+								 * on incompatible live input. Fail closed before mvdstdInit;
+								 * never silently software-decode a heavy broadcast. */
+								if(vid_embedded_test_mode && miniiptv_live_stream_is_active())
+								{
+									int live_validation = Vid_validate_embedded_live_video(&vid_player, num_of_video_tracks);
+									if(live_validation != MINIIPTV_STAGE_OK)
+									{
+										DEF_LOG_FORMAT("Rejected live video: %" PRIu32 "x%" PRIu32 " @ %.3f, %s",
+											vid_player.video_info[EYE_LEFT].codec_width,
+											vid_player.video_info[EYE_LEFT].codec_height,
+											vid_player.video_info[EYE_LEFT].framerate,
+											vid_player.video_info[EYE_LEFT].short_format_name);
+										result = (uint32_t)(int32_t)live_validation;
+										goto error;
+									}
+								}
+
+								if(vid_embedded_test_mode && miniiptv_live_stream_is_active()
+								&& !Vid_can_use_hw_decoder(&vid_player, num_of_video_tracks))
+								{
+									result = (uint32_t)(int32_t)MINIIPTV_STAGE_UNSUPPORTED_HLS;
+									goto error;
+								}
+
 								if(Vid_can_use_hw_decoder(&vid_player, num_of_video_tracks))
 								{
 									//We can use HW decoding for this video.
@@ -5280,6 +5387,14 @@ void Vid_decode_thread(void* arg)
 									DEF_LOG_RESULT_SMART(result, Util_decoder_mvd_init(DEF_VID_DECORDER_SESSION_ID), (result == DEF_SUCCESS), result);
 									if(result != DEF_SUCCESS)
 									{
+										if(vid_embedded_test_mode && miniiptv_live_stream_is_active())
+										{
+											/* Software fallback cannot keep up with broadcast H.264 and
+											 * would bypass the guarded MVD-only live path. */
+											vid_player.sub_state = (Vid_player_sub_state)(vid_player.sub_state & ~PLAYER_SUB_STATE_HW_DECODING);
+											Util_decoder_mvd_release_packet_buffer();
+											goto error;
+										}
 										/*
 										 * A large previous clip can leave linear RAM too
 										 * fragmented for MVD's contiguous work buffer. The
@@ -5808,7 +5923,8 @@ void Vid_decode_thread(void* arg)
 						vid_player.state = PLAYER_STATE_IDLE;
 						vid_miniptv_force_initial_autoplay = false;
 						vid_miniptv_start_pending = false;
-						vid_playback_return_generation++;
+						__atomic_fetch_add(&vid_playback_return_generation, 1,
+							__ATOMIC_RELEASE);
 					}
 
 					vid_player.sub_state = PLAYER_SUB_STATE_NONE;
@@ -6439,6 +6555,7 @@ void Vid_decode_video_thread(void* arg)
 	uint32_t result = DEF_ERR_OTHER;
 	double skip[EYE_MAX] = { 0, };
 	TickCounter counter = { 0, };
+	bool live_decode_failed = false;
 
 	osTickCounterStart(&counter);
 
@@ -6470,6 +6587,20 @@ void Vid_decode_video_thread(void* arg)
 
 					key_frame = packet_info->is_key_frame;
 					packet_index = packet_info->packet_index;
+
+					/* Once a fatal live MVD result is observed, do not let any
+					 * already-queued packet enter the service before teardown. */
+					if(live_decode_failed && vid_embedded_test_mode
+					&& (vid_player.sub_state & PLAYER_SUB_STATE_HW_DECODING))
+					{
+						Util_decoder_skip_video_packet(packet_index, DEF_VID_DECORDER_SESSION_ID);
+						result = Util_queue_add(&vid_player.decode_thread_notification_queue,
+							DECODE_VIDEO_THREAD_FINISHED_COPYING_PACKET_NOTIFICATION,
+							NULL, QUEUE_OP_TIMEOUT_US, QUEUE_OPTION_NONE);
+						if(result != DEF_SUCCESS)
+							DEF_LOG_RESULT(Util_queue_add, false, result);
+						break;
+					}
 
 					if(vid_player.allow_skip_frames && skip[packet_index] > vid_player.video_frametime[packet_index]
 					&& (!key_frame || vid_player.allow_skip_key_frames) && vid_player.video_frametime[packet_index] != 0)
@@ -6596,12 +6727,40 @@ void Vid_decode_video_thread(void* arg)
 									Vid_update_decoding_delay(time, &skip[packet_index], packet_index);
 								}
 							}
-							else if(result != DEF_ERR_NEED_MORE_INPUT)
+							else if(result != DEF_ERR_NEED_MORE_INPUT
+							&& result != DEF_ERR_DECODER_TRY_AGAIN
+							&& result != DEF_ERR_DECODER_TRY_AGAIN_NO_OUTPUT
+							&& result != DEF_ERR_TRY_AGAIN)
 							{
 								if(vid_player.sub_state & PLAYER_SUB_STATE_HW_DECODING)
 									DEF_LOG_RESULT(Util_decoder_mvd_decode, false, result);
 								else
 									DEF_LOG_RESULT(Util_decoder_video_decode, false, result);
+
+								/* A fatal MVD result is not recoverable by feeding later live
+								 * packets. Continuing can poison the sysmodule; stop and perform
+								 * the normal serialized teardown instead. */
+								if((vid_player.sub_state & PLAYER_SUB_STATE_HW_DECODING)
+								&& vid_embedded_test_mode && !live_decode_failed)
+								{
+									bool stop_already_pending = __atomic_load_n(
+										&vid_miniptv_return_requested, __ATOMIC_ACQUIRE)
+										|| Util_queue_check_event_exist(
+											&vid_player.decode_video_thread_command_queue,
+											DECODE_VIDEO_THREAD_ABORT_REQUEST);
+									live_decode_failed = true;
+									if(!stop_already_pending)
+									{
+										miniiptv_live_stream_request_stop();
+										__atomic_store_n(&vid_miniptv_return_requested,
+											true, __ATOMIC_RELEASE);
+										if(vid_live_error_hook)
+											vid_live_error_hook(result);
+										Util_queue_add(&vid_player.decode_thread_command_queue,
+											DECODE_THREAD_ABORT_REQUEST, NULL,
+											QUEUE_OP_TIMEOUT_US, QUEUE_OPTION_SEND_TO_FRONT);
+									}
+								}
 							}
 						}
 						else
@@ -6615,6 +6774,28 @@ void Vid_decode_video_thread(void* arg)
 								DEF_LOG_RESULT_SMART(result, Util_queue_add(&vid_player.decode_thread_command_queue, DECODE_THREAD_INCREASE_KEEP_RAM_REQUEST,
 								NULL, QUEUE_OP_TIMEOUT_US, QUEUE_OPTION_DO_NOT_ADD_IF_EXIST), (result == DEF_SUCCESS), result);
 							}
+							if(result != DEF_ERR_TRY_AGAIN
+							&& (vid_player.sub_state & PLAYER_SUB_STATE_HW_DECODING)
+							&& vid_embedded_test_mode && !live_decode_failed)
+							{
+								bool stop_already_pending = __atomic_load_n(
+									&vid_miniptv_return_requested, __ATOMIC_ACQUIRE)
+									|| Util_queue_check_event_exist(
+										&vid_player.decode_video_thread_command_queue,
+										DECODE_VIDEO_THREAD_ABORT_REQUEST);
+								live_decode_failed = true;
+								if(!stop_already_pending)
+								{
+									miniiptv_live_stream_request_stop();
+									__atomic_store_n(&vid_miniptv_return_requested,
+										true, __ATOMIC_RELEASE);
+									if(vid_live_error_hook)
+										vid_live_error_hook(result);
+									Util_queue_add(&vid_player.decode_thread_command_queue,
+										DECODE_THREAD_ABORT_REQUEST, NULL,
+										QUEUE_OP_TIMEOUT_US, QUEUE_OPTION_SEND_TO_FRONT);
+								}
+							}
 						}
 					}
 
@@ -6626,6 +6807,15 @@ void Vid_decode_video_thread(void* arg)
 					//Do nothing if player state is idle or prepare playing.
 					if(vid_player.state == PLAYER_STATE_IDLE || vid_player.state == PLAYER_STATE_PREPARE_PLAYING)
 						break;
+					if(live_decode_failed && vid_embedded_test_mode)
+					{
+						/* Preserve the seek/clear notification chain without making
+						 * another service call after a fatal live MVD result. */
+						Util_queue_add(&vid_player.convert_thread_command_queue,
+							CONVERT_THREAD_CLEAR_CACHE_REQUEST, NULL,
+							QUEUE_OP_TIMEOUT_US, QUEUE_OPTION_NONE);
+						break;
+					}
 
 					//Flush the decoder.
 					while(true)
@@ -6654,10 +6844,10 @@ void Vid_decode_video_thread(void* arg)
 					for(uint32_t i = 0; i < EYE_MAX; i++)
 						skip[i] = 0;
 
-					//Clear cache.
-					if(vid_player.sub_state & PLAYER_SUB_STATE_HW_DECODING)
-						Util_decoder_mvd_clear_raw_image(DEF_VID_DECORDER_SESSION_ID);
-					else
+					/* Keep MVD output surfaces alive until close_file() first
+					 * calls mvdstdExit(). Freeing them before service teardown
+					 * can race an internal asynchronous write. */
+					if(!(vid_player.sub_state & PLAYER_SUB_STATE_HW_DECODING))
 					{
 						for(uint8_t i = 0; i < vid_player.num_of_video_tracks; i++)
 							Util_decoder_video_clear_raw_image(i, DEF_VID_DECORDER_SESSION_ID);
@@ -6666,14 +6856,18 @@ void Vid_decode_video_thread(void* arg)
 					//Flush the command queue.
 					while(true)
 					{
-						result = Util_queue_get(&vid_player.decode_video_thread_command_queue, (uint32_t*)&event, NULL, 0);
+						void* pending_message = NULL;
+						result = Util_queue_get(&vid_player.decode_video_thread_command_queue,
+							(uint32_t*)&event, &pending_message, 0);
 						if(result != DEF_SUCCESS)
 							break;
+						free(pending_message);
 					}
 
 					//Notify we've done aborting.
 					DEF_LOG_RESULT_SMART(result, Util_queue_add(&vid_player.decode_thread_notification_queue, DECODE_VIDEO_THREAD_FINISHED_ABORTING_NOTIFICATION,
 					NULL, QUEUE_OP_TIMEOUT_US, QUEUE_OPTION_NONE), (result == DEF_SUCCESS), result);
+					live_decode_failed = false;
 
 					break;
 				}
@@ -7091,11 +7285,13 @@ void Vid_convert_thread(void* arg)
 		}
 		else if(vid_player.state == PLAYER_STATE_BUFFERING)
 		{
+			uint16_t restart_threshold = Vid_get_effective_restart_threshold();
+
 			Util_sync_lock(&vid_player.delay_update_lock, UINT64_MAX);
 			Vid_init_desync_data();
 			Util_sync_unlock(&vid_player.delay_update_lock);
 
-			if(num_of_cached_raw_images >= vid_player.restart_playback_threshold
+			if(restart_threshold == 0 || num_of_cached_raw_images >= restart_threshold
 			|| (Util_speaker_get_available_buffer_num(DEF_VID_SPEAKER_SESSION_ID) + 1) >= DEF_SPEAKER_MAX_BUFFERS)
 			{
 				//Notify we've finished buffering.

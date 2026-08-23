@@ -93,6 +93,126 @@ static void test_malformed_and_capacity(void) {
            MINIIPTV_H264_OUTPUT_TOO_SMALL);
 }
 
+static void test_parameter_guard(void) {
+    const uint8_t baseline[] = {
+        0, 0, 1, 0x67, 0x4d, 0x40, 0x1e,
+        0, 0, 1, 0x68, 0xee, 0x3c, 0x80
+    };
+    const uint8_t repeated[] = {
+        0, 0, 0, 1, 0x67, 0x4d, 0x40, 0x1e,
+        0, 0, 1, 0x68, 0xee, 0x3c, 0x80,
+        0, 0, 1, 0x65, 0x88
+    };
+    const uint8_t changed_sps[] = {
+        0, 0, 1, 0x67, 0x64, 0x00, 0x28,
+        0, 0, 1, 0x65, 0x88
+    };
+    const uint8_t changed_pps[] = {
+        0, 0, 1, 0x68, 0xee, 0x3d, 0x80
+    };
+    const uint8_t equivalent_padded[] = {
+        0, 0, 0, 1, 0x27, 0x4d, 0x40, 0x1e, 0, 0,
+        0, 0, 1, 0x28, 0xee, 0x3c, 0x80, 0, 0
+    };
+    const uint8_t multiple_initial_sets[] = {
+        0, 0, 1, 0x67, 0x42, 0x00, 0x1e,
+        0, 0, 1, 0x67, 0x4d, 0x00, 0x1e,
+        0, 0, 1, 0x68, 0xce, 0x06, 0xe2,
+        0, 0, 1, 0x68, 0xee, 0x3c, 0x80
+    };
+    const uint8_t first_sps_only[] = {
+        0, 0, 1, 0x67, 0x42, 0x00, 0x1e, 0xe9
+    };
+    const uint8_t first_pps_only[] = {
+        0, 0, 1, 0x68, 0xce, 0x06, 0xe2
+    };
+    const uint8_t baseline_with_slice[] = {
+        0, 0, 1, 0x67, 0x4d, 0x40, 0x1e,
+        0, 0, 1, 0x68, 0xee, 0x3c, 0x80,
+        0, 0, 1, 0x65, 0x88
+    };
+    const uint8_t slice_before_baseline[] = {
+        0, 0, 1, 0x65, 0x88,
+        0, 0, 1, 0x67, 0x4d, 0x40, 0x1e,
+        0, 0, 1, 0x68, 0xee, 0x3c, 0x80
+    };
+    const uint8_t second_sps_before_pps[] = {
+        0, 0, 1, 0x67, 0x4d, 0x00, 0x1e, 0xe9
+    };
+    const uint8_t slices_only[] = {0, 0, 1, 0x65, 0x88};
+    const uint8_t invalid_header[] = {0, 0, 1, 0xe7, 0x11};
+    const uint8_t reserved_type[] = {0, 0, 1, 0x76, 0x11};
+    MiniIptvH264ParameterGuard guard;
+
+    miniiptv_h264_parameter_guard_reset(&guard);
+    assert(miniiptv_h264_parameter_guard_check(
+               &guard, slices_only, sizeof(slices_only)) ==
+           MINIIPTV_H264_PARAMETERS_MISSING);
+    assert(!guard.sps_locked && !guard.pps_locked);
+    assert(miniiptv_h264_parameter_guard_check(
+               &guard, slice_before_baseline,
+               sizeof(slice_before_baseline)) ==
+           MINIIPTV_H264_PARAMETERS_MISSING);
+    assert(guard.sps_count == 0 && guard.pps_count == 0);
+    assert(miniiptv_h264_parameter_guard_check(
+               &guard, baseline_with_slice, sizeof(baseline_with_slice)) ==
+           MINIIPTV_H264_OK);
+
+    miniiptv_h264_parameter_guard_reset(&guard);
+    assert(miniiptv_h264_parameter_guard_check(
+               &guard, baseline, sizeof(baseline)) == MINIIPTV_H264_OK);
+    assert(guard.sps_locked && guard.pps_locked);
+    assert(guard.sps_count == 1 && guard.pps_count == 1);
+    assert(miniiptv_h264_parameter_guard_check(
+               &guard, repeated, sizeof(repeated)) == MINIIPTV_H264_OK);
+    assert(miniiptv_h264_parameter_guard_check(
+               &guard, equivalent_padded, sizeof(equivalent_padded)) ==
+           MINIIPTV_H264_OK);
+    assert(miniiptv_h264_parameter_guard_check(
+               &guard, changed_sps, sizeof(changed_sps)) ==
+           MINIIPTV_H264_PARAMETER_CHANGED);
+    assert(miniiptv_h264_parameter_guard_check(
+               &guard, changed_pps, sizeof(changed_pps)) ==
+           MINIIPTV_H264_PARAMETER_CHANGED);
+
+    miniiptv_h264_parameter_guard_reset(&guard);
+    assert(miniiptv_h264_parameter_guard_check(
+               &guard, multiple_initial_sets,
+               sizeof(multiple_initial_sets)) ==
+           MINIIPTV_H264_PARAMETER_CHANGED);
+    assert(guard.sps_count == 1 && guard.pps_count == 0);
+
+    miniiptv_h264_parameter_guard_reset(&guard);
+    assert(miniiptv_h264_parameter_guard_check(
+               &guard, first_sps_only, sizeof(first_sps_only)) ==
+           MINIIPTV_H264_OK);
+    assert(guard.sps_locked && !guard.pps_locked);
+    assert(miniiptv_h264_parameter_guard_check(
+               &guard, slices_only, sizeof(slices_only)) ==
+           MINIIPTV_H264_PARAMETERS_MISSING);
+    assert(miniiptv_h264_parameter_guard_check(
+               &guard, second_sps_before_pps,
+               sizeof(second_sps_before_pps)) ==
+           MINIIPTV_H264_PARAMETER_CHANGED);
+
+    miniiptv_h264_parameter_guard_reset(&guard);
+    assert(miniiptv_h264_parameter_guard_check(
+               &guard, first_pps_only, sizeof(first_pps_only)) ==
+           MINIIPTV_H264_OK);
+    assert(miniiptv_h264_parameter_guard_check(
+               &guard, slices_only, sizeof(slices_only)) ==
+           MINIIPTV_H264_PARAMETERS_MISSING);
+
+    miniiptv_h264_parameter_guard_reset(&guard);
+    assert(miniiptv_h264_parameter_guard_check(
+               &guard, invalid_header, sizeof(invalid_header)) ==
+           MINIIPTV_H264_INVALID_DATA);
+    miniiptv_h264_parameter_guard_reset(&guard);
+    assert(miniiptv_h264_parameter_guard_check(
+               &guard, reserved_type, sizeof(reserved_type)) ==
+           MINIIPTV_H264_INVALID_DATA);
+}
+
 static uint32_t fuzz_next(uint32_t *state) {
     uint32_t value = *state;
     value ^= value << 13;
@@ -150,6 +270,7 @@ int main(void) {
     test_captured_transport_stream_prefix();
     test_avcc_extradata_and_packet();
     test_malformed_and_capacity();
+    test_parameter_guard();
     test_malformed_input_safety();
     puts("h264_annexb tests passed");
     return 0;

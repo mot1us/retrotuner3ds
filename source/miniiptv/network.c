@@ -31,6 +31,7 @@ typedef struct {
     void *cancel_userdata;
     size_t size;
     size_t maximum_size;
+    int too_large;
 } CurlStream;
 
 static size_t write_callback(char *incoming, size_t size, size_t count, void *userdata) {
@@ -75,9 +76,11 @@ static size_t stream_write_callback(char *incoming, size_t size, size_t count,
     size_t bytes;
     if (size && count > SIZE_MAX / size) return 0;
     bytes = size * count;
-    if (!output || !output->write_data ||
-        bytes > output->maximum_size - output->size)
+    if (!output || !output->write_data) return 0;
+    if (bytes > output->maximum_size - output->size) {
+        output->too_large = 1;
         return 0;
+    }
     if (output->write_data((const unsigned char *)incoming, bytes,
                            output->write_userdata) != bytes)
         return 0;
@@ -90,11 +93,16 @@ static int stream_progress_callback(void *userdata, curl_off_t download_total,
                                     curl_off_t upload_total,
                                     curl_off_t upload_now) {
     CurlStream *output = userdata;
-    (void)download_total;
     (void)download_now;
     (void)upload_total;
     (void)upload_now;
-    return output && output->should_cancel &&
+    if (!output) return 0;
+    if (download_total > 0 &&
+        (uint64_t)download_total > (uint64_t)output->maximum_size) {
+        output->too_large = 1;
+        return 1;
+    }
+    return output->should_cancel &&
            output->should_cancel(output->cancel_userdata);
 }
 
@@ -149,7 +157,7 @@ int network_get_data(const char *url, const char *user_agent, const char *referr
     curl_easy_setopt(curl, CURLOPT_TIMEOUT,
                      maximum_size > MINIIPTV_MANIFEST_LIMIT ? 60L : 20L);
     curl_easy_setopt(curl, CURLOPT_USERAGENT,
-        user_agent && *user_agent ? user_agent : "RetroTuner3DS/0.5.1-rc1");
+        user_agent && *user_agent ? user_agent : "RetroTuner3DS/0.5.1-rc8");
     if (referrer && *referrer) curl_easy_setopt(curl, CURLOPT_REFERER, referrer);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buffer);
@@ -216,7 +224,7 @@ int network_download_file(const char *url, const char *user_agent,
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 15L);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 60L);
     curl_easy_setopt(curl, CURLOPT_USERAGENT,
-        user_agent && *user_agent ? user_agent : "RetroTuner3DS/0.5.1-rc1");
+        user_agent && *user_agent ? user_agent : "RetroTuner3DS/0.5.1-rc8");
     if (referrer && *referrer) curl_easy_setopt(curl, CURLOPT_REFERER, referrer);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, file_write_callback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &output);
@@ -287,7 +295,7 @@ int network_stream_data(const char *url, const char *user_agent,
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 60L);
     curl_easy_setopt(curl, CURLOPT_FAILONERROR, 1L);
     curl_easy_setopt(curl, CURLOPT_USERAGENT,
-        user_agent && *user_agent ? user_agent : "RetroTuner3DS/0.5.1-rc1");
+        user_agent && *user_agent ? user_agent : "RetroTuner3DS/0.5.1-rc8");
     if (referrer && *referrer) curl_easy_setopt(curl, CURLOPT_REFERER, referrer);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, stream_write_callback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &output);
@@ -304,6 +312,8 @@ int network_stream_data(const char *url, const char *user_agent,
     result = curl_easy_perform(curl);
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
     if (downloaded_size) *downloaded_size = output.size;
+    if (output.too_large || result == CURLE_FILESIZE_EXCEEDED)
+        return MINIIPTV_NETWORK_TOO_LARGE;
     if (result == CURLE_ABORTED_BY_CALLBACK && should_cancel &&
         should_cancel(cancel_userdata))
         return -5;

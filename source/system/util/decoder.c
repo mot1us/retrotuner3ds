@@ -84,9 +84,13 @@ static bool util_mvd_video_decoder_init = false;
 static bool util_mvd_video_decoder_changeable_buffer_size = false;
 static bool util_mvd_video_decoder_first = false;
 static bool util_mvd_video_decoder_should_skip_process_nal_unit = false;
+/* A fatal MVD result poisons the session until a full exit/re-init. This is a
+ * decoder-level backstop so no caller can feed another packet after failure. */
+static bool util_mvd_video_decoder_poisoned = false;
 static uint8_t util_mvd_video_decoder_current_cached_pts_index = 0;
 static uint8_t util_mvd_video_decoder_next_cached_pts_index = 0;
 static uint8_t* util_mvd_video_decoder_packet = NULL;
+static MiniIptvH264ParameterGuard util_mvd_parameter_guard = { 0, };
 static uint16_t util_mvd_video_decoder_available_raw_image[DEF_DECODER_MAX_SESSIONS] = { 0, };
 static uint16_t util_mvd_video_decoder_raw_image_ready_index[DEF_DECODER_MAX_SESSIONS] = { 0, };
 static uint16_t util_mvd_video_decoder_raw_image_current_index[DEF_DECODER_MAX_SESSIONS] = { 0, };
@@ -97,6 +101,7 @@ static LightLock util_mvd_video_decoder_raw_image_mutex[DEF_DECODER_MAX_SESSIONS
 static AVFrame* util_mvd_video_decoder_raw_image[DEF_DECODER_MAX_SESSIONS][DEF_DECODER_MAX_RAW_IMAGE] = { 0, };
 
 #define MINIIPTV_MVD_MAX_RAW_IMAGES 3
+#define MINIIPTV_MVD_RENDER_BUSY_LIMIT 500
 
 static bool util_subtitle_decoder_init[DEF_DECODER_MAX_SESSIONS][DEF_DECODER_MAX_SUBTITLE_TRACKS] = { 0, };
 static bool util_subtitle_decoder_packet_ready[DEF_DECODER_MAX_SESSIONS][DEF_DECODER_MAX_SUBTITLE_TRACKS] = { 0, };
@@ -873,6 +878,13 @@ uint32_t Util_decoder_mvd_init(uint8_t session)
 
 	width = util_video_decoder_context[session][0]->width;
 	height = util_video_decoder_context[session][0]->height;
+	/* MVD decodes into 16-pixel-aligned surfaces. Calculate its work buffer
+	 * from the same dimensions later passed to the default configuration;
+	 * otherwise widths such as 466 could under-size the service allocation. */
+	if(width % 16 != 0)
+		width += 16 - width % 16;
+	if(height % 16 != 0)
+		height += 16 - height % 16;
 
 	for(uint8_t i = 0; i < 32; i++)
 		util_mvd_video_decoder_cached_pts[i] = 0;
@@ -884,6 +896,8 @@ uint32_t Util_decoder_mvd_init(uint8_t session)
 	util_mvd_video_decoder_raw_image_ready_index[session] = 0;
 	util_mvd_video_decoder_available_raw_image[session] = 0;
 	util_mvd_video_decoder_should_skip_process_nal_unit = false;
+	util_mvd_video_decoder_poisoned = false;
+	miniiptv_h264_parameter_guard_reset(&util_mvd_parameter_guard);
 
 	/* Lazily allocate the per-session Annex-B packet scratch buffer. */
 	if(!util_mvd_video_decoder_packet)
@@ -1968,15 +1982,30 @@ static bool Util_decoder_mvd_reserve_packet(size_t required_size)
 	return true;
 }
 
+static void Util_decoder_mvd_free_unbound_output(uint8_t session,
+	uint16_t buffer_num)
+{
+	AVFrame* frame = util_mvd_video_decoder_raw_image[session][buffer_num];
+
+	if(!frame)
+		return;
+	free(frame->data[0]);
+	frame->data[0] = NULL;
+	av_frame_free(&util_mvd_video_decoder_raw_image[session][buffer_num]);
+}
+
 uint32_t Util_decoder_mvd_decode(uint8_t session)
 {
 	bool got_a_frame = false;
 	bool got_a_frame_after_processing_nal_unit = false;
+	bool output_bound_to_mvd = false;
 	int32_t normalization_result = MINIIPTV_H264_INVALID_DATA;
 	size_t normalized_size = 0;
 	uint16_t buffer_num = 0;
+	uint16_t render_busy_count = 0;
 	uint32_t width = 0;
 	uint32_t height = 0;
+	uint32_t output_physical = 0;
 	uint32_t result = DEF_ERR_OTHER;
 
 	if(session >= DEF_DECODER_MAX_SESSIONS)
@@ -1984,12 +2013,18 @@ uint32_t Util_decoder_mvd_decode(uint8_t session)
 
 	if(!util_decoder_opened_file[session] || !util_video_decoder_init[session][0] || !util_mvd_video_decoder_init)
 		goto not_inited;
+	if(util_mvd_video_decoder_poisoned)
+		return DEF_ERR_UNSAFE_VIDEO_STREAM;
 
 	if(!util_video_decoder_packet_ready[session][0])
 	{
 		//DEF_LOG_STRING("No packets are available!!!!!");
 		goto try_again;
 	}
+	/* FFmpeg found corruption that transport-level sync checks cannot rule out.
+	 * Fail closed before allocating an output or entering Nintendo's service. */
+	if(util_video_decoder_packet[session][0]->flags & AV_PKT_FLAG_CORRUPT)
+		goto unsafe_stream_no_frame;
 
 	util_mvd_video_decoder_changeable_buffer_size = false;
 	if(util_mvd_video_decoder_available_raw_image[session] + 1 >= util_mvd_video_decoder_max_raw_image[session])
@@ -2018,8 +2053,33 @@ uint32_t Util_decoder_mvd_decode(uint8_t session)
 		goto out_of_linear_memory;
 
 	if(util_mvd_video_decoder_first)
-	{
 		mvdstdGenerateDefaultConfig(&util_decoder_mvd_config, width, height, width, height, NULL, NULL, NULL);
+	output_physical = osConvertVirtToPhys(util_mvd_video_decoder_raw_image[session][buffer_num]->data[0]);
+	if(output_physical == 0)
+		goto out_of_linear_memory;
+	util_decoder_mvd_config.physaddr_outdata0 = output_physical;
+
+	//Set 0x11 to top-left, top-right, bottom-left and bottom-right then check them later.
+	//For more information, see: https://gbatemp.net/threads/release-video-player-for-3ds.586094/page-20#post-9915780
+	*util_mvd_video_decoder_raw_image[session][buffer_num]->data[0] = 0x11;
+	*(util_mvd_video_decoder_raw_image[session][buffer_num]->data[0] + (width * 2 - 1)) = 0x11;
+	*(util_mvd_video_decoder_raw_image[session][buffer_num]->data[0] + ((width * height * 2) - (width * 2))) = 0x11;
+	*(util_mvd_video_decoder_raw_image[session][buffer_num]->data[0] + (width * height * 2 - 1)) = 0x11;
+
+	/* The output target must be valid before any call enters Nintendo's MVD
+	 * service, including codec extradata on the first packet. */
+	/* Treat the surface as registered before crossing the service boundary. A
+	 * failed SetConfig cannot prove MVD did not retain the physical address. */
+	output_bound_to_mvd = true;
+	result = MVDSTD_SetConfig(&util_decoder_mvd_config);
+	if(result != DEF_SUCCESS)
+	{
+		DEF_LOG_RESULT(MVDSTD_SetConfig, false, result);
+		goto nintendo_inflight_failed;
+	}
+
+	if(util_mvd_video_decoder_first)
+	{
 
 		/*
 		 * MP4-style streams expose SPS/PPS in avcC extradata. MPEG-TS commonly
@@ -2048,11 +2108,25 @@ uint32_t Util_decoder_mvd_decode(uint8_t session)
 				util_mvd_video_decoder_packet_size, &normalized_size);
 			if(normalization_result != MINIIPTV_H264_OK || normalized_size > UINT32_MAX)
 				goto ffmpeg_api_failed;
-			mvdstdProcessVideoFrame(util_mvd_video_decoder_packet,
+			normalization_result = miniiptv_h264_parameter_guard_check(
+				&util_mvd_parameter_guard, util_mvd_video_decoder_packet,
+				normalized_size);
+			if(normalization_result != MINIIPTV_H264_OK)
+				goto unsafe_stream;
+			if(miniiptv_live_stream_is_active()
+			&& (util_mvd_parameter_guard.sps_count != 1
+			|| util_mvd_parameter_guard.pps_count != 1))
+				goto unsafe_stream;
+			if(osConvertVirtToPhys(util_mvd_video_decoder_packet) == 0)
+				goto out_of_linear_memory;
+			result = mvdstdProcessVideoFrame(util_mvd_video_decoder_packet,
 				(uint32_t)normalized_size, 0, NULL);
+			/* Extradata must only establish codec parameters. A ready frame means
+			 * slice data or stale service state reached this path. */
+			if(result != MVD_STATUS_PARAMSET && result != MVD_STATUS_OK)
+				goto nintendo_inflight_failed;
 		}
 	}
-	util_decoder_mvd_config.physaddr_outdata0 = osConvertVirtToPhys(util_mvd_video_decoder_raw_image[session][buffer_num]->data[0]);
 
 	if(util_video_decoder_packet[session][0]->size <= 0 ||
 		util_video_decoder_context[session][0]->extradata_size < 0)
@@ -2080,22 +2154,35 @@ uint32_t Util_decoder_mvd_decode(uint8_t session)
 	if(normalization_result != MINIIPTV_H264_OK || normalized_size == 0 ||
 		normalized_size > UINT32_MAX)
 		goto ffmpeg_api_failed;
-
-	//Set 0x11 to top-left, top-right, bottom-left and bottom-right then check them later.
-	//For more information, see: https://gbatemp.net/threads/release-video-player-for-3ds.586094/page-20#post-9915780
-	*util_mvd_video_decoder_raw_image[session][buffer_num]->data[0] = 0x11;
-	*(util_mvd_video_decoder_raw_image[session][buffer_num]->data[0] + (width * 2 - 1)) = 0x11;
-	*(util_mvd_video_decoder_raw_image[session][buffer_num]->data[0] + ((width * height * 2) - (width * 2))) = 0x11;
-	*(util_mvd_video_decoder_raw_image[session][buffer_num]->data[0] + (width * height * 2 - 1)) = 0x11;
-
-	// DEF_LOG_STRING("-------------------------------");
-
-	MVDSTD_SetConfig(&util_decoder_mvd_config);
+	normalization_result = miniiptv_h264_parameter_guard_check(
+		&util_mvd_parameter_guard, util_mvd_video_decoder_packet,
+		normalized_size);
+	if(normalization_result != MINIIPTV_H264_OK)
+	{
+		DEF_LOG_FORMAT("Unsafe H.264 parameter change: %" PRIi32,
+			normalization_result);
+		goto unsafe_stream;
+	}
+	/* Multiple initial parameter sets can describe different frame layouts.
+	 * Without parsing and proving them equivalent, a live switch between them
+	 * could make MVD write using dimensions its output was not sized for. */
+	if(miniiptv_live_stream_is_active()
+	&& (util_mvd_parameter_guard.sps_count != 1
+	|| util_mvd_parameter_guard.pps_count != 1))
+		goto unsafe_stream;
+	if(osConvertVirtToPhys(util_mvd_video_decoder_packet) == 0)
+		goto out_of_linear_memory;
 
 	if(!util_mvd_video_decoder_should_skip_process_nal_unit)
 	{
 		// DEF_LOG_STRING("util_mvd_video_decoder_should_skip_process_nal_unit is not set, so call mvdstdProcessVideoFrame()");
 		result = mvdstdProcessVideoFrame(util_mvd_video_decoder_packet, (uint32_t)normalized_size, 0, NULL);
+		if(result != MVD_STATUS_FRAMEREADY && result != MVD_STATUS_PARAMSET
+		&& result != MVD_STATUS_OK)
+		{
+			DEF_LOG_RESULT(mvdstdProcessVideoFrame, false, result);
+			goto nintendo_inflight_failed;
+		}
 
 		//Save pts
 		util_mvd_video_decoder_cached_pts[util_mvd_video_decoder_next_cached_pts_index] = util_video_decoder_packet[session][0]->dts;
@@ -2108,6 +2195,12 @@ uint32_t Util_decoder_mvd_decode(uint8_t session)
 		{
 			//Do I need to send same nal data at first frame?
 			result = mvdstdProcessVideoFrame(util_mvd_video_decoder_packet, (uint32_t)normalized_size, 0, NULL);
+			if(result != MVD_STATUS_FRAMEREADY && result != MVD_STATUS_PARAMSET
+			&& result != MVD_STATUS_OK)
+			{
+				DEF_LOG_RESULT(mvdstdProcessVideoFrame, false, result);
+				goto nintendo_inflight_failed;
+			}
 			util_mvd_video_decoder_first = false;
 		}
 
@@ -2125,11 +2218,6 @@ uint32_t Util_decoder_mvd_decode(uint8_t session)
 		// else
 		// 	DEF_LOG_STRING("no frames after mvdstdProcessVideoFrame()");
 
-		if(result != MVD_STATUS_FRAMEREADY && result != MVD_STATUS_PARAMSET)
-		{
-			DEF_LOG_RESULT(mvdstdProcessVideoFrame, false, result);
-			goto nintendo_api_failed;
-		}
 	}
 	// else
 	// 	DEF_LOG_STRING("util_mvd_video_decoder_should_skip_process_nal_unit is set, so skip mvdstdProcessVideoFrame()");
@@ -2157,6 +2245,13 @@ uint32_t Util_decoder_mvd_decode(uint8_t session)
 
 			if(result != MVD_STATUS_BUSY || got_a_frame)
 				break;
+			render_busy_count++;
+			if(render_busy_count >= MINIIPTV_MVD_RENDER_BUSY_LIMIT)
+			{
+				DEF_LOG_STRING("MVD render remained busy; retaining output until service exit.");
+				goto nintendo_inflight_failed;
+			}
+			Util_sleep(1000);
 			// else
 			// 	DEF_LOG_STRING("mvdstdRenderVideoFrame() returned MVD_STATUS_BUSY, so try again");
 		}
@@ -2164,7 +2259,7 @@ uint32_t Util_decoder_mvd_decode(uint8_t session)
 		if(result != MVD_STATUS_OK)
 		{
 			DEF_LOG_RESULT(mvdstdRenderVideoFrame, false, result);
-			goto nintendo_api_failed;
+			goto nintendo_inflight_failed;
 		}
 	}
 	// else
@@ -2219,9 +2314,7 @@ uint32_t Util_decoder_mvd_decode(uint8_t session)
 	return DEF_ERR_TRY_AGAIN;
 
 	try_again_no_output:
-	free(util_mvd_video_decoder_raw_image[session][buffer_num]->data[0]);
-	util_mvd_video_decoder_raw_image[session][buffer_num]->data[0] = NULL;
-	av_frame_free(&util_mvd_video_decoder_raw_image[session][buffer_num]);
+	Util_decoder_mvd_free_unbound_output(session, buffer_num);
 	return DEF_ERR_DECODER_TRY_AGAIN_NO_OUTPUT;
 
 	try_again_with_output:
@@ -2229,33 +2322,55 @@ uint32_t Util_decoder_mvd_decode(uint8_t session)
 
 	need_more_packet:
 	util_video_decoder_packet_ready[session][0] = false;
-	free(util_mvd_video_decoder_raw_image[session][buffer_num]->data[0]);
-	util_mvd_video_decoder_raw_image[session][buffer_num]->data[0] = NULL;
+	Util_decoder_mvd_free_unbound_output(session, buffer_num);
 	av_packet_free(&util_video_decoder_packet[session][0]);
-	av_frame_free(&util_mvd_video_decoder_raw_image[session][buffer_num]);
 	return DEF_ERR_NEED_MORE_INPUT;
 
 	out_of_linear_memory:
-	free(util_mvd_video_decoder_raw_image[session][buffer_num]->data[0]);
-	util_mvd_video_decoder_raw_image[session][buffer_num]->data[0] = NULL;
-	av_frame_free(&util_mvd_video_decoder_raw_image[session][buffer_num]);
+	if(output_bound_to_mvd)
+	{
+		util_mvd_video_decoder_poisoned = true;
+		util_video_decoder_packet_ready[session][0] = false;
+		av_packet_free(&util_video_decoder_packet[session][0]);
+		return DEF_ERR_OUT_OF_LINEAR_MEMORY;
+	}
+	Util_decoder_mvd_free_unbound_output(session, buffer_num);
 	return DEF_ERR_OUT_OF_LINEAR_MEMORY;
 
 	ffmpeg_api_failed:
 	util_video_decoder_packet_ready[session][0] = false;
-	free(util_mvd_video_decoder_raw_image[session][buffer_num]->data[0]);
-	util_mvd_video_decoder_raw_image[session][buffer_num]->data[0] = NULL;
+	if(output_bound_to_mvd)
+	{
+		util_mvd_video_decoder_poisoned = true;
+		av_packet_free(&util_video_decoder_packet[session][0]);
+		return DEF_ERR_FFMPEG_RETURNED_NOT_SUCCESS;
+	}
+	Util_decoder_mvd_free_unbound_output(session, buffer_num);
 	av_packet_free(&util_video_decoder_packet[session][0]);
-	av_frame_free(&util_mvd_video_decoder_raw_image[session][buffer_num]);
 	return DEF_ERR_FFMPEG_RETURNED_NOT_SUCCESS;
 
-	nintendo_api_failed:
+	unsafe_stream:
+	util_mvd_video_decoder_poisoned = true;
 	util_video_decoder_packet_ready[session][0] = false;
-	free(util_mvd_video_decoder_raw_image[session][buffer_num]->data[0]);
-	util_mvd_video_decoder_raw_image[session][buffer_num]->data[0] = NULL;
 	av_packet_free(&util_video_decoder_packet[session][0]);
-	av_frame_free(&util_mvd_video_decoder_raw_image[session][buffer_num]);
-	return result;
+	/* The output remains registered in MVDSTD_Config. Keep it alive until
+	 * Util_decoder_mvd_exit() stops the service and then frees every surface. */
+	return DEF_ERR_UNSAFE_VIDEO_STREAM;
+
+	unsafe_stream_no_frame:
+	util_mvd_video_decoder_poisoned = true;
+	util_video_decoder_packet_ready[session][0] = false;
+	av_packet_free(&util_video_decoder_packet[session][0]);
+	return DEF_ERR_UNSAFE_VIDEO_STREAM;
+
+	nintendo_inflight_failed:
+	util_mvd_video_decoder_poisoned = true;
+	util_video_decoder_packet_ready[session][0] = false;
+	av_packet_free(&util_video_decoder_packet[session][0]);
+	/* Process/render may still own physaddr_outdata0. Never free or reuse this
+	 * surface until mvdstdExit() has completed. */
+	return DEF_ERR_UNSAFE_VIDEO_STREAM;
+
 }
 
 uint32_t Util_decoder_subtitle_decode(Media_s_data* subtitle_data, uint8_t packet_index, uint8_t session)
@@ -2482,6 +2597,10 @@ void Util_decoder_mvd_clear_raw_image(uint8_t session)
 		return;
 
 	if(!util_decoder_opened_file[session] || !util_video_decoder_init[session][0] || !util_mvd_video_decoder_init)
+		return;
+	/* A poisoned session may still have a surface registered with the service.
+	 * Only mvdstdExit(), called by close_file(), may release it. */
+	if(util_mvd_video_decoder_poisoned)
 		return;
 
 	for(uint16_t i = 0; i < util_mvd_video_decoder_max_raw_image[session]; i++)
@@ -2934,6 +3053,8 @@ static void Util_decoder_mvd_exit(uint8_t session)
 
 	util_mvd_video_decoder_init = false;
 	mvdstdExit();
+	util_mvd_video_decoder_poisoned = false;
+	miniiptv_h264_parameter_guard_reset(&util_mvd_parameter_guard);
 	util_mvd_video_decoder_available_raw_image[session] = 0;
 	util_mvd_video_decoder_raw_image_ready_index[session] = 0;
 	util_mvd_video_decoder_raw_image_current_index[session] = 0;

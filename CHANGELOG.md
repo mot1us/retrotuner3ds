@@ -5,6 +5,26 @@ versioning while the player remains experimental.
 
 ## [Unreleased]
 
+- Add an rc8 fail-closed live decoder path after two matching MVD service crash
+  dumps: reject streams above 640x480/30 fps and never software-fallback live
+  video.
+- Reject changed H.264 SPS/PPS data, invalid MVD buffers/configuration, corrupt
+  packets, and unsupported processing results before another packet can enter
+  the hardware service.
+- Stage each HLS segment atomically so failed or truncated HTTP transfers never
+  expose partial transport-stream data to FFmpeg/MVD.
+- Bound stalled MVD render waits, keep registered output surfaces alive until
+  service exit, and join every live worker before freeing shared state.
+- Order START shutdown as producer cancellation, player-thread join, decoder
+  close, then stream and network teardown.
+- Stop cleanly at HLS discontinuities or media-sequence gaps.
+- Fix the inherited 48-frame restart threshold that left the three-slot MVD
+  queue permanently stuck at 4.17% on video-only or unsupported-audio feeds.
+- Replace blank startup textures with a dark animated signal-lock screen.
+- Keep channel changes in a dedicated current-to-next handoff view while the
+  existing one-decoder teardown barrier runs.
+- Relabel the meter as compressed `NETWORK RESERVE` and color it against the
+  real refill target; decoded video and audio queues are downstream of it.
 - Prepare the project for public GitHub development.
 - Add repository documentation, issue forms, and host-test automation.
 - Standardize the build output as `retrotuner3ds.3dsx`.
