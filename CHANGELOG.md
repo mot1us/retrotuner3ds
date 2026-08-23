@@ -5,6 +5,14 @@ versioning while the player remains experimental.
 
 ## [Unreleased]
 
+- Let `B` return to the deck and `L`/`R` change signals directly from a
+  no-signal or player-error state, without requiring `A` to retry first.
+- Keep the live status badge stable during ordinary raw-frame refills and hide
+  the inherited `Processing video 0/100%` pulse while preserving true network
+  rebuffer warnings.
+- Keep queued live audio running through brief decoder-only video refills when
+  the compressed network ring is healthy, reducing pause/resume audio chop
+  without allocating more decoder or stream memory.
 - Bound the entire initial tune to 30 seconds and make manifest downloads
   cancelable, preventing a dead signal from leaving the deck stuck on
   `RETUNING`.

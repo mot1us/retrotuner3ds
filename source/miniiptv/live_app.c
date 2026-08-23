@@ -125,8 +125,11 @@ static int tune_should_cancel(void *unused) {
 
 static void player_error(uint32_t error_code) {
     LightLock_Lock(&app.lock);
-    app.pending_channel_step = 0;
-    app.switching_from_player = false;
+    /* A player failure can race an already-latched L/R request. Keep that
+     * request so teardown returns into the requested channel, not the failed
+     * one. With no request, this remains an ordinary NO SIGNAL state. */
+    if (app.pending_channel_step == 0)
+        app.switching_from_player = false;
     app.state = LIVE_APP_ERROR;
     if ((int32_t)error_code == MINIIPTV_STAGE_TOO_LARGE)
         snprintf(app.status, sizeof(app.status),
@@ -147,10 +150,22 @@ static void player_error(uint32_t error_code) {
 
 static void player_channel_request(int direction) {
     LightLock_Lock(&app.lock);
+    if (direction == 0) {
+        /* B wins over an earlier bumper press and returns to the deck after the
+         * decoder has completed its serialized teardown. */
+        app.cancel_to_deck = true;
+        app.queued_tune = false;
+        app.pending_channel_step = 0;
+        app.switching_from_player = false;
+        LightLock_Unlock(&app.lock);
+        Draw_set_refresh_needed(true);
+        return;
+    }
     if (app.switching_from_player || app.pending_channel_step != 0) {
         LightLock_Unlock(&app.lock);
         return;
     }
+    app.cancel_to_deck = false;
     app.pending_channel_step = direction < 0 ? -1 : 1;
     app.switching_from_player = app.playlist.count > 0;
     app.switch_from_index = app.selected;
@@ -387,7 +402,11 @@ static void reap_worker_if_finished(void) {
         threadFree(finished_worker);
 
         LightLock_Lock(&app.lock);
-        if (!app.exit_requested && app.queued_tune && !app.cancel_to_deck &&
+        /* STOP cleanup is the sole stream owner while this flag is set. Leave
+         * queued_tune intact so process_player_return_action() launches it only
+         * after miniiptv_live_stream_stop() has completed. */
+        if (!app.exit_requested && !app.stream_cleanup_pending &&
+            app.queued_tune && !app.cancel_to_deck &&
             app.playlist.count > 0) {
             app.queued_tune = false;
             app.pending_channel = app.playlist.channels[app.selected];
@@ -402,7 +421,8 @@ static void reap_worker_if_finished(void) {
             app.switching_from_player = false;
             set_status_locked(LIVE_APP_IDLE,
                               "TUNING CANCELED // READY FOR ANOTHER SIGNAL");
-        } else if (!app.exit_requested && app.launch_after_reap) {
+        } else if (!app.exit_requested && !app.stream_cleanup_pending &&
+                   app.launch_after_reap) {
             launch_queued = true;
         }
         app.launch_after_reap = false;
@@ -414,14 +434,16 @@ static void reap_worker_if_finished(void) {
 
 static PlayerReturnAction update_player_return_locked(void) {
     uint32_t generation;
+    bool deck_requested;
 
     if (!app.awaiting_player_return) return PLAYER_RETURN_NONE;
     generation = Vid_query_playback_return_generation();
     if (generation == app.player_return_generation) return PLAYER_RETURN_NONE;
 
     app.awaiting_player_return = false;
-    if (app.pending_channel_step != 0 && app.playlist.count > 0 &&
-        app.state != LIVE_APP_ERROR) {
+    deck_requested = app.cancel_to_deck;
+    if (!deck_requested && app.pending_channel_step != 0 &&
+        app.playlist.count > 0) {
         if (app.pending_channel_step < 0)
             app.selected = app.selected == 0 ? app.playlist.count - 1
                                              : app.selected - 1;
@@ -443,17 +465,23 @@ static PlayerReturnAction update_player_return_locked(void) {
     }
     app.pending_channel_step = 0;
     app.switching_from_player = false;
+    app.cancel_to_deck = false;
     app.stream_cleanup_pending = true;
     if (app.state != LIVE_APP_ERROR) {
         app.state = LIVE_APP_IDLE;
         snprintf(app.status, sizeof(app.status),
                  "OFF AIR // %.1f MiB linear free // A to retune",
                  Util_check_free_linear_space() / 1048576.0);
+    } else if (deck_requested) {
+        set_status_locked(LIVE_APP_IDLE,
+                          "READY // press A to tune this signal");
     }
     return PLAYER_RETURN_STOP;
 }
 
 static void process_player_return_action(PlayerReturnAction action) {
+    bool launch_queued = false;
+
     if (action == PLAYER_RETURN_NONE) return;
     miniiptv_live_stream_request_stop();
     if (action == PLAYER_RETURN_RETUNE) {
@@ -466,8 +494,21 @@ static void process_player_return_action(PlayerReturnAction action) {
         miniiptv_live_stream_stop();
         LightLock_Lock(&app.lock);
         app.stream_cleanup_pending = false;
+        /* HID and draw run independently. If L/R arrived while the old stream
+         * was being joined, consume that queued choice as soon as cleanup has
+         * released the single stream/decoder owner. */
+        if (!app.exit_requested && app.queued_tune && !app.cancel_to_deck &&
+            !app.worker && !app.worker_reaping && app.playlist.count > 0) {
+            app.queued_tune = false;
+            app.pending_channel = app.playlist.channels[app.selected];
+            app.tuning_started_ms = osGetTime();
+            set_status_locked(LIVE_APP_LOADING,
+                              "SWITCHING > LOCK > 1 SEGMENT > PLAY...");
+            launch_queued = true;
+        }
         LightLock_Unlock(&app.lock);
         Draw_set_refresh_needed(true);
+        if (launch_queued) launch_tune_worker();
     }
 }
 
@@ -477,6 +518,9 @@ static bool live_hid(const Hid_info *key) {
     PlayerReturnAction return_action;
     int loading_step = 0;
     bool cancel_loading = false;
+    bool launch_error_tune = false;
+    bool stop_error_stream = false;
+    bool error_return_input_latched = false;
 
     if (!key) return false;
 
@@ -493,6 +537,32 @@ static bool live_hid(const Hid_info *key) {
         LightLock_Unlock(&app.lock);
         return false;
     }
+    /* If the player reached IDLE in the same scan as the user's error-screen
+     * input, latch that input before consuming the return generation. */
+    if (app.awaiting_player_return && app.state == LIVE_APP_ERROR) {
+        if (DEF_HID_PHY_PR(key->b)) {
+            app.cancel_to_deck = true;
+            app.queued_tune = false;
+            app.pending_channel_step = 0;
+            app.switching_from_player = false;
+            error_return_input_latched = true;
+        } else if (app.playlist.count > 0 && DEF_HID_PHY_PR(key->l)) {
+            app.cancel_to_deck = false;
+            app.pending_channel_step = -1;
+            app.switching_from_player = true;
+            app.switch_from_index = app.selected;
+            app.switch_to_index = app.selected == 0
+                ? app.playlist.count - 1 : app.selected - 1;
+            error_return_input_latched = true;
+        } else if (app.playlist.count > 0 && DEF_HID_PHY_PR(key->r)) {
+            app.cancel_to_deck = false;
+            app.pending_channel_step = 1;
+            app.switching_from_player = true;
+            app.switch_from_index = app.selected;
+            app.switch_to_index = (app.selected + 1) % app.playlist.count;
+            error_return_input_latched = true;
+        }
+    }
     return_action = update_player_return_locked();
     state = app.state;
     count = app.playlist.count;
@@ -500,6 +570,15 @@ static bool live_hid(const Hid_info *key) {
     if (return_action != PLAYER_RETURN_NONE) {
         LightLock_Unlock(&app.lock);
         process_player_return_action(return_action);
+        return true;
+    }
+    if (error_return_input_latched) {
+        /* The decode thread publishes IDLE immediately before incrementing the
+         * return generation. Keep this key's pending B/L/R intent intact until
+         * the next scan observes that increment; falling through would treat
+         * it as a fresh idle-error action and race a new tune against cleanup. */
+        LightLock_Unlock(&app.lock);
+        Draw_set_refresh_needed(true);
         return true;
     }
 
@@ -542,7 +621,54 @@ static bool live_hid(const Hid_info *key) {
         }
     }
 
-    if (!app.stream_cleanup_pending && state != LIVE_APP_LOADING && count &&
+    if (state == LIVE_APP_ERROR && DEF_HID_PHY_PR(key->b)) {
+        app.cancel_to_deck = app.worker || app.worker_reaping;
+        app.queued_tune = false;
+        app.pending_channel_step = 0;
+        app.switching_from_player = false;
+        set_status_locked(LIVE_APP_IDLE,
+                          "READY // press A to tune this signal");
+        LightLock_Unlock(&app.lock);
+        miniiptv_live_stream_request_stop();
+        Draw_set_refresh_needed(true);
+        return true;
+    }
+
+    if (state == LIVE_APP_ERROR && count &&
+        (DEF_HID_PHY_PR(key->l) || DEF_HID_PHY_PR(key->r))) {
+        int direction = DEF_HID_PHY_PR(key->l) ? -1 : 1;
+        size_t previous = app.selected;
+
+        app.selected = direction < 0
+            ? (app.selected == 0 ? count - 1 : app.selected - 1)
+            : (app.selected + 1) % count;
+        app.pending_channel_step = 0;
+        app.cancel_to_deck = false;
+        app.switching_from_player = true;
+        app.switch_from_index = previous;
+        app.switch_to_index = app.selected;
+        if (app.worker || app.worker_reaping || app.stream_cleanup_pending) {
+            app.queued_tune = true;
+            set_status_locked(LIVE_APP_LOADING,
+                              "NEXT SIGNAL QUEUED // FINISHING CLEAN STOP...");
+            stop_error_stream = true;
+        } else {
+            app.queued_tune = false;
+            app.pending_channel = app.playlist.channels[app.selected];
+            app.tuning_started_ms = osGetTime();
+            set_status_locked(LIVE_APP_LOADING,
+                              "SWITCHING > LOCK > 1 SEGMENT > PLAY...");
+            launch_error_tune = true;
+        }
+        LightLock_Unlock(&app.lock);
+        if (stop_error_stream) miniiptv_live_stream_request_stop();
+        if (launch_error_tune) launch_tune_worker();
+        Draw_set_refresh_needed(true);
+        return true;
+    }
+
+    if (!app.stream_cleanup_pending && !app.worker && !app.worker_reaping &&
+        state != LIVE_APP_LOADING && count &&
         DEF_HID_PHY_PR(key->d_up)) {
         app.selected = app.selected == 0 ? count - 1 : app.selected - 1;
         set_status_locked(LIVE_APP_IDLE, "READY // press A to tune this signal");
@@ -551,7 +677,8 @@ static bool live_hid(const Hid_info *key) {
         Draw_set_refresh_needed(true);
         return true;
     }
-    if (!app.stream_cleanup_pending && state != LIVE_APP_LOADING && count &&
+    if (!app.stream_cleanup_pending && !app.worker && !app.worker_reaping &&
+        state != LIVE_APP_LOADING && count &&
         DEF_HID_PHY_PR(key->d_down)) {
         app.selected = (app.selected + 1) % count;
         set_status_locked(LIVE_APP_IDLE, "READY // press A to tune this signal");
@@ -663,8 +790,13 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
             Draw_align_c("B CANCEL // L/R CHANGE", 0, 201, 9.0f, UI_MINT,
                          DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 400, 10);
             Draw_set_refresh_needed(true);
-        } else if (state == LIVE_APP_ERROR || state == LIVE_APP_NO_PLAYLIST) {
-            Draw_align_c("NO SIGNAL // PRESS A TO RETRY", 0, 174, 12.0f,
+        } else if (state == LIVE_APP_ERROR) {
+            Draw_align_c("NO SIGNAL // A RETRY // B DECK // L/R CHANGE",
+                         0, 174, 12.0f,
+                         DEF_DRAW_RED, DRAW_X_ALIGN_CENTER,
+                         DRAW_Y_ALIGN_CENTER, 400, 20);
+        } else if (state == LIVE_APP_NO_PLAYLIST) {
+            Draw_align_c("NO PLAYLIST // ADD CHANNELS.M3U", 0, 174, 12.0f,
                          DEF_DRAW_RED, DRAW_X_ALIGN_CENTER,
                          DRAW_Y_ALIGN_CENTER, 400, 20);
         } else {
@@ -747,6 +879,10 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
     if (state == LIVE_APP_LOADING) {
         draw_key_hint(&pixel, "B", "CANCEL", 9, 211, 17, UI_PINK);
         draw_key_hint(&pixel, "L/R", "CHANGE", 77, 211, 32, UI_CYAN);
+    } else if (state == LIVE_APP_ERROR) {
+        draw_key_hint(&pixel, "A", "RETRY", 9, 211, 17, UI_PINK);
+        draw_key_hint(&pixel, "B", "DECK", 75, 211, 17, UI_MINT);
+        draw_key_hint(&pixel, "L/R", "CHANGE", 133, 211, 29, UI_CYAN);
     } else {
         draw_key_hint(&pixel, "A", "TUNE", 9, 211, 17, UI_PINK);
         draw_key_hint(&pixel, "UP/DN", "PICK", 77, 211, 42, UI_CYAN);

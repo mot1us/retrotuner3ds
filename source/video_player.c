@@ -806,6 +806,8 @@ static void Vid_draw_miniiptv_live_overlay(void)
 {
 	Draw_image_data pixel = Draw_get_empty_image();
 	MiniIptvLiveInfo live_info = { 0, };
+	bool has_presented_frame = __atomic_load_n(&vid_player.has_presented_frame,
+		__ATOMIC_ACQUIRE);
 	size_t buffered = 0;
 	unsigned long downloaded = 0;
 	unsigned long read_kib = 0;
@@ -824,15 +826,21 @@ static void Vid_draw_miniiptv_live_overlay(void)
 		&underruns, &live_error);
 	(void)read_kib;
 
-	if(vid_player.state == PLAYER_STATE_PLAYING)
+	/* PLAYER_STATE_BUFFERING also covers the decoder's very short raw-frame
+	 * refills.  Those refills can pulse every few frames while the compressed
+	 * live ring is healthy, so reflecting them here makes the badge alternate
+	 * between ON AIR and BUFFERING.  The live reader's rebuffering flag is the
+	 * authoritative compressed-ring underrun signal and must remain visible. */
+	if(live_info.rebuffering)
+		state_text = "BUFFERING";
+	else if(vid_player.state == PLAYER_STATE_PLAYING
+	|| (vid_player.state == PLAYER_STATE_BUFFERING && has_presented_frame))
 	{
 		state_text = "ON AIR";
 		state_color = MINIIPTV_COLOR_MINT;
 	}
 	else if(vid_player.state == PLAYER_STATE_PAUSE)
 		state_text = "PAUSED";
-	else if(vid_player.state == PLAYER_STATE_BUFFERING || live_info.rebuffering)
-		state_text = "BUFFERING";
 
 	if(live_error != 0)
 	{
@@ -994,6 +1002,10 @@ void Vid_hid(const Hid_info* key)
 	&& (DEF_HID_PHY_PR(key->b) || DEF_HID_PHY_HE(key->b)))
 	{
 		__atomic_store_n(&vid_miniptv_switch_requested, false, __ATOMIC_RELEASE);
+		/* Preserve the user's explicit deck request across an asynchronous player
+		 * error/abort. A zero direction distinguishes it from an L/R handoff. */
+		if(vid_live_channel_hook)
+			vid_live_channel_hook(0);
 		Util_err_set_show_flag(false);
 		Util_err_clear_error_message();
 		__atomic_store_n(&vid_miniptv_return_requested,
@@ -2591,7 +2603,12 @@ void Vid_main(void)
 				//Display seeking message.
 				Util_str_format_append(&bottom_center_msg, "%s(%.2f%%)", vid_msg[MSG_SEEKING].buffer, vid_player.seek_progress);
 			}
-			if(vid_player.state == PLAYER_STATE_BUFFERING)
+			/* The custom live overlay reports real compressed-ring underruns.
+			 * Suppress the inherited raw-frame refill percentage for live input;
+			 * it commonly flips between 0% and 100% for a single draw and reads as
+			 * a playback failure even when the network reserve is healthy. */
+			if(vid_player.state == PLAYER_STATE_BUFFERING
+			&& !miniiptv_live_stream_is_active())
 			{
 				if(Util_str_has_data(&bottom_center_msg))
 					Util_str_add(&bottom_center_msg, "\n");
@@ -6046,6 +6063,8 @@ void Vid_decode_thread(void* arg)
 
 				case CONVERT_THREAD_OUT_OF_BUFFER_NOTIFICATION:
 				{
+					bool keep_live_audio_running = false;
+
 					//Do nothing if player state is not playing nor pause.
 					if(vid_player.state != PLAYER_STATE_PLAYING && vid_player.state != PLAYER_STATE_PAUSE)
 						break;
@@ -6056,8 +6075,19 @@ void Vid_decode_thread(void* arg)
 
 					if(vid_player.state == PLAYER_STATE_PLAYING)
 					{
-						//Pause the playback.
-						Util_speaker_pause(DEF_VID_SPEAKER_SESSION_ID);
+						if(miniiptv_live_stream_is_active())
+						{
+							MiniIptvLiveInfo live_info = { 0, };
+
+							miniiptv_live_stream_get_info(&live_info);
+							keep_live_audio_running = (!live_info.rebuffering
+								&& Util_speaker_get_available_buffer_size(DEF_VID_SPEAKER_SESSION_ID) > 0);
+						}
+
+						/* A healthy live ring can briefly outrun the two-frame MVD queue.
+						 * Keep its remaining audio clock running while video refills. */
+						if(!keep_live_audio_running)
+							Util_speaker_pause(DEF_VID_SPEAKER_SESSION_ID);
 						//Add resume later bit.
 						vid_player.sub_state = (Vid_player_sub_state)(vid_player.sub_state | PLAYER_SUB_STATE_RESUME_LATER);
 					}

@@ -43,7 +43,7 @@ void Vid_set_idle_hooks(Vid_idle_hid_hook hid_hook, Vid_idle_draw_hook draw_hook
 //Route live-playback failures back to the RetroTuner3DS channel deck.
 void Vid_set_live_error_hook(Vid_live_error_hook error_hook);
 
-//Request a clean previous/next channel handoff from active live playback.
+//Request a clean live-player handoff (-1 previous, +1 next, 0 channel deck).
 void Vid_set_live_channel_hook(Vid_live_channel_hook channel_hook);
 
 //Prepare a bounded file for the existing player while it is idle.

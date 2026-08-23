@@ -44,6 +44,9 @@ playlist and are responsible for having permission to access its streams.
 | Select | Toggle playback details |
 | Start | Exit |
 
+After a no-signal or player error, use `A` to retry, `B` to return to the
+channel deck, or `L`/`R` to try the adjacent signal.
+
 ## Playlist format
 
 RetroTuner3DS supports a deliberately small subset of extended M3U:
