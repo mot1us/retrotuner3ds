@@ -19,6 +19,9 @@ versioning while the player remains experimental.
 - Replace the inherited status bar with a matching Pixel Deck signal strip.
 - Center the RetroTuner3DS banner and color-code button labels separately from
   their actions for clearer controls.
+- Estimate playable buffer time from measured segment bitrate, display buffer
+  health in seconds, and scale rebuffer recovery to roughly three seconds of
+  each stream instead of a fixed byte count.
 - Remove bundled stations; users now supply
   `sd:/3ds/retrotuner3ds/channels.m3u` themselves.
 - Rename the public project, application, and binary to RetroTuner3DS.

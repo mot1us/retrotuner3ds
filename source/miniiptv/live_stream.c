@@ -14,7 +14,9 @@
 
 #define STREAM_RING_SIZE (6u * 1024u * 1024u)
 #define STREAM_INITIAL_SEGMENTS 1
-#define STREAM_REBUFFER_BYTES (768u * 1024u)
+#define STREAM_REBUFFER_TARGET_MS 3000u
+#define STREAM_REBUFFER_MIN_BYTES (128u * 1024u)
+#define STREAM_REBUFFER_MAX_BYTES (768u * 1024u)
 #define STREAM_HIGH_WATER_BYTES (5u * 1024u * 1024u)
 #define STREAM_SLEEP_US 10000ULL
 #define TS_PROBE_SIZE (188u * 2u)
@@ -40,6 +42,8 @@ typedef struct {
     size_t ring_count;
     uint64_t bytes_written;
     uint64_t bytes_read;
+    uint64_t measured_segment_bytes;
+    uint64_t measured_segment_milliseconds;
     unsigned long downloaded_segments;
     unsigned long underruns;
     int last_error;
@@ -55,6 +59,39 @@ typedef struct {
 /* Static BSS storage uses ordinary application RAM, not scarce linear RAM. */
 static unsigned char stream_ring[STREAM_RING_SIZE];
 static LiveStream stream;
+
+static unsigned long measured_bandwidth_locked(void) {
+    uint64_t bits_per_second;
+    if (stream.measured_segment_milliseconds == 0) return 0;
+    bits_per_second = (stream.measured_segment_bytes * 8000u) /
+                      stream.measured_segment_milliseconds;
+    return bits_per_second > 0xffffffffu ? 0xffffffffu
+                                         : (unsigned long)bits_per_second;
+}
+
+static unsigned long effective_bandwidth_locked(void) {
+    unsigned long measured = measured_bandwidth_locked();
+    return measured ? measured : stream.variant_bandwidth;
+}
+
+static size_t rebuffer_target_bytes_locked(void) {
+    unsigned long bandwidth = effective_bandwidth_locked();
+    uint64_t target;
+    if (bandwidth == 0) return STREAM_REBUFFER_MAX_BYTES;
+    target = ((uint64_t)bandwidth * STREAM_REBUFFER_TARGET_MS) / 8000u;
+    if (target < STREAM_REBUFFER_MIN_BYTES) target = STREAM_REBUFFER_MIN_BYTES;
+    if (target > STREAM_REBUFFER_MAX_BYTES) target = STREAM_REBUFFER_MAX_BYTES;
+    return (size_t)target;
+}
+
+static unsigned int buffered_milliseconds_locked(void) {
+    unsigned long bandwidth = effective_bandwidth_locked();
+    uint64_t milliseconds;
+    if (bandwidth == 0) return 0;
+    milliseconds = ((uint64_t)stream.ring_count * 8000u) / bandwidth;
+    return milliseconds > 0xffffffffu ? 0xffffffffu
+                                      : (unsigned int)milliseconds;
+}
 
 static bool stop_was_requested(void) {
     bool stopped;
@@ -158,6 +195,11 @@ static int stream_segment(const HlsSegment *segment, size_t *downloaded_size) {
     LightLock_Lock(&stream.lock);
     if (result == 0 && writer.validated) {
         stream.downloaded_segments++;
+        if (segment->duration > 0.0) {
+            stream.measured_segment_bytes += bytes;
+            stream.measured_segment_milliseconds +=
+                (uint64_t)(segment->duration * 1000.0 + 0.5);
+        }
         stream.last_sequence = segment->sequence;
         stream.last_error = 0;
     } else {
@@ -389,16 +431,18 @@ int miniiptv_live_stream_read(unsigned char *buffer, int buffer_size) {
         size_t available;
         size_t contiguous;
         size_t chunk;
+        size_t rebuffer_target;
         bool finished;
         LightLock_Lock(&stream.lock);
         stream.reader_started = true;
         available = stream.ring_count;
+        rebuffer_target = rebuffer_target_bytes_locked();
         finished = stream.stop_requested || !stream.producer_running;
         if (available == 0 && !stream.rebuffering && !finished) {
             stream.rebuffering = true;
             stream.underruns++;
         }
-        if (stream.rebuffering && available >= STREAM_REBUFFER_BYTES)
+        if (stream.rebuffering && available >= rebuffer_target)
             stream.rebuffering = false;
         if ((!stream.rebuffering || finished) && available > 0) {
             contiguous = STREAM_RING_SIZE - stream.ring_read;
@@ -448,7 +492,11 @@ void miniiptv_live_stream_get_info(MiniIptvLiveInfo *info) {
              stream.channel.name);
     snprintf(info->codecs, sizeof(info->codecs), "%s", stream.variant_codecs);
     info->bandwidth = stream.variant_bandwidth;
+    info->measured_bandwidth = measured_bandwidth_locked();
+    info->rebuffer_target_bytes = rebuffer_target_bytes_locked();
+    info->buffered_milliseconds = buffered_milliseconds_locked();
     info->width = stream.variant_width;
     info->height = stream.variant_height;
+    info->rebuffering = stream.rebuffering;
     LightLock_Unlock(&stream.lock);
 }

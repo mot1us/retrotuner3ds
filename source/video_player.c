@@ -93,7 +93,7 @@
 #define MINIIPTV_COLOR_PINK					(uint32_t)(0xFF9A4FFF)
 #define MINIIPTV_COLOR_CYAN					(uint32_t)(0xFFFFEB5D)
 #define MINIIPTV_COLOR_SHADOW					(uint32_t)(0xFF120C08)
-#define MINIIPTV_STREAM_RING_BYTES			(uint32_t)(6 * 1024 * 1024)
+#define MINIIPTV_BUFFER_METER_MS			(uint32_t)(8000)
 
 #define IS_X_IN_BOX(x, width, x_valid_start, x_valid_end)		(bool)((x >= x_valid_start) && (x <= (x_valid_end - width)))	//Whether element fits in box (for X direction).
 #define IS_Y_IN_BOX(y, height, y_valid_start, y_valid_end)		(bool)((y >= y_valid_start) && (y <= (y_valid_end - height)))	//Whether element fits in box (for Y direction).
@@ -804,6 +804,8 @@ static void Vid_draw_miniiptv_live_overlay(void)
 	unsigned long underruns = 0;
 	int live_error = 0;
 	uint32_t bar_width = 0;
+	uint32_t buffer_color = MINIIPTV_COLOR_MINT;
+	unsigned long effective_bandwidth = 0;
 	const char* state_text = "TUNING";
 	const char* rating_text = "CHECKING SIGNAL";
 	uint32_t state_color = MINIIPTV_COLOR_ORANGE;
@@ -821,7 +823,7 @@ static void Vid_draw_miniiptv_live_overlay(void)
 	}
 	else if(vid_player.state == PLAYER_STATE_PAUSE)
 		state_text = "PAUSED";
-	else if(vid_player.state == PLAYER_STATE_BUFFERING)
+	else if(vid_player.state == PLAYER_STATE_BUFFERING || live_info.rebuffering)
 		state_text = "BUFFERING";
 
 	if(live_error != 0)
@@ -835,18 +837,25 @@ static void Vid_draw_miniiptv_live_overlay(void)
 		state_color = MINIIPTV_COLOR_ORANGE;
 	}
 
-	if(live_info.bandwidth > 0)
+	effective_bandwidth = live_info.measured_bandwidth > 0
+		? live_info.measured_bandwidth : live_info.bandwidth;
+	if(effective_bandwidth > 0)
 	{
-		if(live_info.bandwidth <= 1500000ul
+		if(effective_bandwidth <= 1500000ul
 		&& (live_info.height == 0 || live_info.height <= 480))
 			rating_text = "3DS SWEET SPOT";
 		else
 			rating_text = "HEAVY SIGNAL";
 	}
 
-	bar_width = (uint32_t)((buffered * 276u) / MINIIPTV_STREAM_RING_BYTES);
+	bar_width = (uint32_t)(((uint64_t)live_info.buffered_milliseconds * 276u)
+		/ MINIIPTV_BUFFER_METER_MS);
 	if(bar_width > 276u)
 		bar_width = 276u;
+	if(live_info.buffered_milliseconds < 2000u)
+		buffer_color = DEF_DRAW_RED;
+	else if(live_info.buffered_milliseconds < 5000u)
+		buffer_color = MINIIPTV_COLOR_ORANGE;
 
 	Draw_texture(&pixel, MINIIPTV_COLOR_INK, 0, 0, 320, 225);
 	for(uint32_t y = 4; y < 220; y += 8)
@@ -865,10 +874,12 @@ static void Vid_draw_miniiptv_live_overlay(void)
 		strcmp(rating_text, "3DS SWEET SPOT") == 0
 			? MINIIPTV_COLOR_MINT : MINIIPTV_COLOR_ORANGE);
 
-	Draw_c("STREAM BUFFER", 14, 101, 10.5f, MINIIPTV_COLOR_CREAM);
+	Draw_c("PLAYABLE SIGNAL", 14, 101, 10.5f, MINIIPTV_COLOR_CREAM);
 	Draw_texture(&pixel, MINIIPTV_COLOR_SHADOW, 14, 117, 280, 13);
-	Draw_texture(&pixel, MINIIPTV_COLOR_ORANGE, 16, 119, bar_width, 9);
-	snprintf(line, sizeof(line), "%lu KiB / 6144 KiB",
+	Draw_texture(&pixel, buffer_color, 16, 119, bar_width, 9);
+	snprintf(line, sizeof(line), "~%u.%us ready  //  %lu KiB",
+		live_info.buffered_milliseconds / 1000u,
+		(live_info.buffered_milliseconds % 1000u) / 100u,
 		(unsigned long)(buffered / 1024u));
 	Draw_align_c(line, 14, 134, 10.0f, MINIIPTV_COLOR_CREAM,
 		DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 280, 14);
@@ -876,9 +887,9 @@ static void Vid_draw_miniiptv_live_overlay(void)
 	if(vid_miniptv_show_details)
 	{
 		if(live_info.width && live_info.height)
-			snprintf(line, sizeof(line), "%ux%u  %lukbps  DL:%lu  U:%lu  E:%d",
+			snprintf(line, sizeof(line), "%ux%u  ~%luk  DL:%lu  U:%lu  E:%d",
 				live_info.width, live_info.height,
-				live_info.bandwidth / 1000ul, downloaded, underruns, live_error);
+				effective_bandwidth / 1000ul, downloaded, underruns, live_error);
 		else
 			snprintf(line, sizeof(line), "AUTO QUALITY  DL:%lu  U:%lu  E:%d",
 				downloaded, underruns, live_error);
@@ -2696,7 +2707,11 @@ void Vid_main(void)
 					int live_error = 0;
 					miniiptv_live_stream_get_stats(&live_buffered, &live_downloaded,
 						&live_read_kib, &live_underruns, &live_error);
-					Util_str_format(&format_str, "LIVE B:%luK U:%lu DL:%lu E:%d",
+					MiniIptvLiveInfo live_info = { 0, };
+					miniiptv_live_stream_get_info(&live_info);
+					Util_str_format(&format_str, "LIVE ~%u.%us %luK U:%lu DL:%lu E:%d",
+						live_info.buffered_milliseconds / 1000u,
+						(live_info.buffered_milliseconds % 1000u) / 100u,
 						(unsigned long)(live_buffered / 1024u), live_underruns,
 						live_downloaded, live_error);
 					Draw(&format_str, 0, 46, FONT_SIZE_MEDIA_INFO,

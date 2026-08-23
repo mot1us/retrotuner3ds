@@ -12,8 +12,12 @@ typedef struct {
     char channel_name[MINIIPTV_NAME_MAX];
     char codecs[96];
     unsigned long bandwidth;
+    unsigned long measured_bandwidth;
+    size_t rebuffer_target_bytes;
+    unsigned int buffered_milliseconds;
     unsigned int width;
     unsigned int height;
+    int rebuffering;
 } MiniIptvLiveInfo;
 
 int miniiptv_live_stream_start(const MiniIptvChannel *channel,
