@@ -14,14 +14,16 @@ versioning while the player remains experimental.
   inherited modal error screen.
 - Close the idle handoff race so a tuned channel starts from one `A` press.
 - Show concise tuning errors with retry guidance on the channel deck.
-- Begin playback after one validated HLS segment while the producer continues
-  filling the bounded ring buffer in parallel.
+- Begin opening playback while the newest HLS segment downloads, releasing a
+  bounded two-second startup reserve instead of waiting for the entire segment.
 - Replace the inherited status bar with a matching Pixel Deck signal strip.
 - Center the RetroTuner3DS banner and color-code button labels separately from
   their actions for clearer controls.
 - Estimate playable buffer time from measured segment bitrate, display buffer
   health in seconds, and scale rebuffer recovery to roughly three seconds of
   each stream instead of a fixed byte count.
+- Replace the jumpy capacity bar with a damped analog reserve gauge and add
+  direct `L`/`R` channel surfing with full cleanup between feeds.
 - Remove bundled stations; users now supply
   `sd:/3ds/retrotuner3ds/channels.m3u` themselves.
 - Rename the public project, application, and binary to RetroTuner3DS.
