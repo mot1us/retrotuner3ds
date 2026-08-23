@@ -767,8 +767,10 @@ static bool vid_embedded_test_mode = false;
 static bool vid_embedded_exit_requested = false;
 static Vid_idle_hid_hook vid_idle_hid_hook = NULL;
 static Vid_idle_draw_hook vid_idle_draw_hook = NULL;
+static Vid_live_error_hook vid_live_error_hook = NULL;
 static volatile uint32_t vid_playback_return_generation = 0;
 static bool vid_miniptv_force_initial_autoplay = false;
+static bool vid_miniptv_start_pending = false;
 static bool vid_miniptv_show_details = true;
 static bool vid_miniptv_return_requested = false;
 
@@ -906,10 +908,16 @@ void Vid_hid(const Hid_info* key)
 	 * channel deck intermittent. Latch the request on the physical press,
 	 * cancel a potentially blocked network read, and keep a high-priority abort
 	 * queued until the decode thread reaches IDLE. */
-	if(vid_embedded_test_mode && vid_player.state != PLAYER_STATE_IDLE
+	if(vid_embedded_test_mode
+	&& (vid_player.state != PLAYER_STATE_IDLE
+		|| miniiptv_live_stream_is_active()
+		|| Util_err_query_show_flag())
 	&& (DEF_HID_PHY_PR(key->b) || DEF_HID_PHY_HE(key->b)))
 	{
-		vid_miniptv_return_requested = true;
+		Util_err_set_show_flag(false);
+		Util_err_clear_error_message();
+		vid_miniptv_return_requested =
+			(vid_player.state != PLAYER_STATE_IDLE);
 		miniiptv_live_stream_request_stop();
 		Draw_set_refresh_needed(true);
 	}
@@ -931,6 +939,8 @@ void Vid_hid(const Hid_info* key)
 			return;
 		}
 	}
+	if(vid_miniptv_start_pending && vid_player.state == PLAYER_STATE_IDLE)
+		return;
 	if(vid_player.state == PLAYER_STATE_IDLE && !Util_err_query_show_flag()
 	&& !Util_expl_query_show_flag() && vid_idle_hid_hook && vid_idle_hid_hook(key))
 		return;
@@ -1894,6 +1904,11 @@ void Vid_set_idle_hooks(Vid_idle_hid_hook hid_hook, Vid_idle_draw_hook draw_hook
 	Draw_set_refresh_needed(true);
 }
 
+void Vid_set_live_error_hook(Vid_live_error_hook error_hook)
+{
+	vid_live_error_hook = error_hook;
+}
+
 bool Vid_prepare_file(const char* directory, const char* name)
 {
 	int directory_length = 0;
@@ -1927,10 +1942,19 @@ bool Vid_prepare_and_start_file(const char* directory, const char* name)
 
 	vid_miniptv_force_initial_autoplay =
 		(strcmp(name, MINIIPTV_LIVE_STREAM_URL) == 0);
+	vid_miniptv_start_pending = true;
 	vid_miniptv_return_requested = false;
+	vid_player.menu_mode = MENU_CONTROLS;
+	Util_err_set_show_flag(false);
+	Util_err_clear_error_message();
 
 	result = Util_queue_add(&vid_player.decode_thread_command_queue, DECODE_THREAD_PLAY_REQUEST,
 	NULL, QUEUE_OP_TIMEOUT_US, QUEUE_OPTION_DO_NOT_ADD_IF_EXIST);
+	if(result != DEF_SUCCESS)
+	{
+		vid_miniptv_start_pending = false;
+		vid_miniptv_force_initial_autoplay = false;
+	}
 	DEF_LOG_RESULT(Util_queue_add, (result == DEF_SUCCESS), result);
 	return result == DEF_SUCCESS;
 }
@@ -4979,6 +5003,7 @@ void Vid_decode_thread(void* arg)
 				case DECODE_THREAD_PLAY_REQUEST:
 				{
 					Vid_file* new_file = (Vid_file*)message;
+					vid_miniptv_start_pending = false;
 
 					if(vid_player.state == PLAYER_STATE_IDLE || vid_player.state == PLAYER_STATE_PREPARE_PLAYING)
 					{
@@ -5078,7 +5103,13 @@ void Vid_decode_thread(void* arg)
 							{
 								DEF_LOG_RESULT(Util_speaker_init, false, result);
 								Util_err_set_error_message(Util_err_get_error_msg(result), "You have to run dsp1 in order to listen to audio.\n(https://github.com/zoogie/DSP1/releases)", DEF_LOG_GET_FUNCTION_NAME(), result);
-								Util_err_set_show_flag(true);
+								if(miniiptv_live_stream_is_active())
+								{
+									Util_err_set_show_flag(false);
+									Util_err_clear_error_message();
+								}
+								else
+									Util_err_set_show_flag(true);
 								//Continue initialization.
 							}
 
@@ -5370,7 +5401,15 @@ void Vid_decode_thread(void* arg)
 
 						error:
 						//An error occurred, reset everything.
-						Util_err_set_show_flag(true);
+						if(miniiptv_live_stream_is_active())
+						{
+							if(vid_live_error_hook)
+								vid_live_error_hook(result);
+							Util_err_set_show_flag(false);
+							Util_err_clear_error_message();
+						}
+						else
+							Util_err_set_show_flag(true);
 						Draw_set_refresh_needed(true);
 
 						//Log media info for better debugging.
@@ -5683,6 +5722,7 @@ void Vid_decode_thread(void* arg)
 						Util_hid_reset_key_state(HID_KEY_BIT_ALL);
 						vid_player.state = PLAYER_STATE_IDLE;
 						vid_miniptv_force_initial_autoplay = false;
+						vid_miniptv_start_pending = false;
 						vid_playback_return_generation++;
 					}
 

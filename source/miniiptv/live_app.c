@@ -49,9 +49,41 @@ typedef struct {
 
 static LiveApp app;
 
+static const char *stage_error_text(int result) {
+    switch (result) {
+        case MINIIPTV_STAGE_MANIFEST_FETCH_FAILED:
+        case MINIIPTV_STAGE_MEDIA_FETCH_FAILED:
+        case MINIIPTV_STAGE_SEGMENT_FETCH_FAILED:
+            return "NETWORK ERROR // CHECK SIGNAL AND RETRY";
+        case MINIIPTV_STAGE_MASTER_INVALID:
+        case MINIIPTV_STAGE_MEDIA_INVALID:
+            return "INVALID HLS PLAYLIST // TRY ANOTHER SIGNAL";
+        case MINIIPTV_STAGE_UNSUPPORTED_HLS:
+            return "UNSUPPORTED HLS FORMAT // TRY ANOTHER SIGNAL";
+        case MINIIPTV_STAGE_NOT_MPEG_TS:
+            return "UNSUPPORTED VIDEO CONTAINER // TRY ANOTHER SIGNAL";
+        case MINIIPTV_STAGE_TOO_LARGE:
+            return "SEGMENT TOO LARGE // TRY ANOTHER SIGNAL";
+        case MINIIPTV_STAGE_DISCONTINUITY:
+            return "SIGNAL CHANGED // PRESS A TO RETRY";
+        default:
+            return "TUNING FAILED // PRESS A TO RETRY";
+    }
+}
+
 static void set_status_locked(LiveAppState state, const char *message) {
     app.state = state;
     snprintf(app.status, sizeof(app.status), "%s", message ? message : "");
+}
+
+static void player_error(uint32_t error_code) {
+    LightLock_Lock(&app.lock);
+    app.state = LIVE_APP_ERROR;
+    snprintf(app.status, sizeof(app.status),
+             "PLAYER ERROR 0x%08lX // PRESS A TO RETRY",
+             (unsigned long)error_code);
+    LightLock_Unlock(&app.lock);
+    Draw_set_refresh_needed(true);
 }
 
 static bool begin_player_handoff(void) {
@@ -106,8 +138,8 @@ static void worker_main(void *unused) {
         auto_start = true;
     } else {
         app.state = LIVE_APP_ERROR;
-        snprintf(app.status, sizeof(app.status),
-                 "Live staging failed: %d. Press A to retry.", result);
+        snprintf(app.status, sizeof(app.status), "%s (%d)",
+                 stage_error_text(result), result);
     }
     LightLock_Unlock(&app.lock);
     Draw_set_refresh_needed(true);
@@ -137,10 +169,12 @@ static void update_player_return_locked(void) {
 
     miniiptv_live_stream_stop();
     app.awaiting_player_return = false;
-    app.state = LIVE_APP_IDLE;
-    snprintf(app.status, sizeof(app.status),
-             "OFF AIR // %.1f MiB linear free // A to retune",
-             Util_check_free_linear_space() / 1048576.0);
+    if (app.state != LIVE_APP_ERROR) {
+        app.state = LIVE_APP_IDLE;
+        snprintf(app.status, sizeof(app.status),
+                 "OFF AIR // %.1f MiB linear free // A to retune",
+                 Util_check_free_linear_space() / 1048576.0);
+    }
 }
 
 static bool live_hid(const Hid_info *key) {
@@ -262,7 +296,7 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
                          0, 180, 11.5f, UI_MINT, DRAW_X_ALIGN_CENTER,
                          DRAW_Y_ALIGN_CENTER, 400, 20);
         }
-		Draw_align_c("PIXEL DECK 0.5.1-rc1 // H264", 0, 211, 9.5f,
+		Draw_align_c("PIXEL DECK 0.5.1-rc2 // H264", 0, 211, 9.5f,
                      UI_CREAM, DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER,
                      400, 14);
         return;
@@ -309,9 +343,11 @@ void MiniIptv_live_app_init(void) {
     }
 
     Vid_set_idle_hooks(live_hid, live_draw);
+    Vid_set_live_error_hook(player_error);
 }
 
 void MiniIptv_live_app_exit(void) {
+    Vid_set_live_error_hook(NULL);
     Vid_set_idle_hooks(NULL, NULL);
     miniiptv_live_stream_request_stop();
     if (app.worker) {

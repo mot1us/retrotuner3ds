@@ -10,6 +10,10 @@ versioning while the player remains experimental.
 - Standardize the build output as `retrotuner3ds.3dsx`.
 - Make `B` a latched, high-priority return-to-channels action during playing,
   pausing, buffering, and player error states.
+- Route live-playback failures into the Pixel Deck status panel instead of the
+  inherited modal error screen.
+- Close the idle handoff race so a tuned channel starts from one `A` press.
+- Show concise tuning errors with retry guidance on the channel deck.
 - Remove bundled stations; users now supply
   `sd:/3ds/retrotuner3ds/channels.m3u` themselves.
 - Rename the public project, application, and binary to RetroTuner3DS.
