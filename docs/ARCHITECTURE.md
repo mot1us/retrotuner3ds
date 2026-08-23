@@ -36,8 +36,8 @@ resolution, profile, frame rate, and bitrate.
 
 - Stream ring: 6 MiB in ordinary application BSS.
 - Manifest and segment requests have fixed maximum sizes.
-- The producer pauses at a high-water mark and playback rebuffers at a low-water
-  mark.
+- The producer pauses at a high-water mark. Playback only enters its bounded
+  three-second refill after the network ring actually runs empty.
 - Unsupported encrypted, byte-range, discontinuous, or fMP4 playlists are
   rejected before player handoff.
 - Stop and channel-change paths request producer cancellation, join the thread,

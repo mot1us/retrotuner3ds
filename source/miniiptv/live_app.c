@@ -16,6 +16,7 @@
 #include "video_player.h"
 
 #define USER_PLAYLIST "sdmc:/3ds/retrotuner3ds/channels.m3u"
+#define CHANNELS_PER_PAGE 10u
 
 /* Retro broadcast palette (ABGR8888). */
 #define UI_INK 0xFF21160Fu
@@ -47,6 +48,8 @@ typedef struct {
     bool network_ready;
     bool awaiting_player_return;
     uint32_t player_return_generation;
+    int pending_channel_step;
+    uint64_t tuning_started_ms;
 } LiveApp;
 
 static LiveApp app;
@@ -93,6 +96,13 @@ static void player_error(uint32_t error_code) {
     snprintf(app.status, sizeof(app.status),
              "PLAYER ERROR 0x%08lX // PRESS A TO RETRY",
              (unsigned long)error_code);
+    LightLock_Unlock(&app.lock);
+    Draw_set_refresh_needed(true);
+}
+
+static void player_channel_request(int direction) {
+    LightLock_Lock(&app.lock);
+    app.pending_channel_step = direction < 0 ? -1 : 1;
     LightLock_Unlock(&app.lock);
     Draw_set_refresh_needed(true);
 }
@@ -161,12 +171,14 @@ static bool prepare_selected_tune_locked(void) {
         app.playlist.count == 0 || app.worker)
         return false;
     app.pending_channel = app.playlist.channels[app.selected];
+    app.tuning_started_ms = osGetTime();
     set_status_locked(LIVE_APP_LOADING,
                       "TUNING > LOCK > 1 SEGMENT > PLAY...");
     return true;
 }
 
 static void launch_tune_worker(void) {
+    if (app.worker) return;
     app.worker = threadCreate(worker_main, NULL, 128 * 1024,
                               DEF_THREAD_PRIORITY_NORMAL, 1, false);
     if (!app.worker) {
@@ -191,34 +203,57 @@ static void reap_worker_if_finished(void) {
     }
 }
 
-static void update_player_return_locked(void) {
+static bool update_player_return_locked(void) {
     uint32_t generation;
 
-    if (!app.awaiting_player_return) return;
+    if (!app.awaiting_player_return) return false;
     generation = Vid_query_playback_return_generation();
-    if (generation == app.player_return_generation) return;
+    if (generation == app.player_return_generation) return false;
 
     miniiptv_live_stream_stop();
     app.awaiting_player_return = false;
+    if (app.pending_channel_step != 0 && app.playlist.count > 0 &&
+        app.state != LIVE_APP_ERROR) {
+        if (app.pending_channel_step < 0)
+            app.selected = app.selected == 0 ? app.playlist.count - 1
+                                             : app.selected - 1;
+        else
+            app.selected = (app.selected + 1) % app.playlist.count;
+        app.pending_channel_step = 0;
+        app.pending_channel = app.playlist.channels[app.selected];
+        app.tuning_started_ms = osGetTime();
+        set_status_locked(LIVE_APP_LOADING,
+                          "SWITCHING > LOCK > 1 SEGMENT > PLAY...");
+        return true;
+    }
+    app.pending_channel_step = 0;
     if (app.state != LIVE_APP_ERROR) {
         app.state = LIVE_APP_IDLE;
         snprintf(app.status, sizeof(app.status),
                  "OFF AIR // %.1f MiB linear free // A to retune",
                  Util_check_free_linear_space() / 1048576.0);
     }
+    return false;
 }
 
 static bool live_hid(const Hid_info *key) {
     LiveAppState state;
     size_t count;
+    bool launch_switch;
 
     if (!key) return false;
     reap_worker_if_finished();
 
     LightLock_Lock(&app.lock);
-    update_player_return_locked();
+    launch_switch = update_player_return_locked();
     state = app.state;
     count = app.playlist.count;
+
+    if (launch_switch) {
+        LightLock_Unlock(&app.lock);
+        launch_tune_worker();
+        return true;
+    }
 
     if (state != LIVE_APP_LOADING && count && DEF_HID_PHY_PR(key->d_up)) {
         miniiptv_live_stream_stop();
@@ -265,24 +300,34 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
     LiveAppState state;
     size_t count;
     size_t selected;
+    uint64_t tuning_started_ms;
     char status[160];
     char line[112];
     size_t i;
+    size_t page_start;
+    size_t page_end;
+    bool launch_switch;
 
     (void)color;
     (void)back_color;
 
     reap_worker_if_finished();
     LightLock_Lock(&app.lock);
-    update_player_return_locked();
+    launch_switch = update_player_return_locked();
     count = app.playlist.count;
     for (i = 0; i < count; i++)
         snprintf(channel_names[i], sizeof(channel_names[i]), "%s",
                  app.playlist.channels[i].name);
     state = app.state;
     selected = app.selected;
+    tuning_started_ms = app.tuning_started_ms;
     snprintf(status, sizeof(status), "%s", app.status);
     LightLock_Unlock(&app.lock);
+    if (launch_switch) launch_tune_worker();
+
+    page_start = count ? (selected / CHANNELS_PER_PAGE) * CHANNELS_PER_PAGE : 0;
+    page_end = page_start + CHANNELS_PER_PAGE;
+    if (page_end > count) page_end = count;
 
     if (top_screen) {
         Draw_texture(&pixel, UI_INK, 0, 15, 400, 225);
@@ -308,9 +353,18 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
         }
 
         if (state == LIVE_APP_LOADING) {
-            Draw_c("TUNING SIGNAL >>>", 119, 169, 13.0f, UI_ORANGE);
+            uint64_t elapsed = osGetTime() - tuning_started_ms;
+            unsigned int phase = (unsigned int)((elapsed / 180u) % 12u);
+            snprintf(line, sizeof(line), "TUNING SIGNAL // %lu.%lus",
+                     (unsigned long)(elapsed / 1000u),
+                     (unsigned long)((elapsed % 1000u) / 100u));
+            Draw_align_c(line, 0, 169, 13.0f, UI_ORANGE,
+                         DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 400, 16);
             Draw_texture(&pixel, UI_SHADOW, 74, 190, 252, 10);
-            Draw_texture(&pixel, UI_ORANGE, 76, 192, 160, 6);
+            for (i = 0; i < 12; i++)
+                Draw_texture(&pixel, i == phase ? UI_CREAM : UI_ORANGE,
+                             78 + (float)i * 20, 192, 14, 6);
+            Draw_set_refresh_needed(true);
         } else if (state == LIVE_APP_ERROR || state == LIVE_APP_NO_PLAYLIST) {
             Draw_align_c("NO SIGNAL // PRESS A TO RETRY", 0, 174, 12.0f,
                          DEF_DRAW_RED, DRAW_X_ALIGN_CENTER,
@@ -322,7 +376,7 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
             draw_key_hint(&pixel, "START", "EXIT", 280, 181, 47,
                           UI_ORANGE);
         }
-		Draw_align_c("PIXEL DECK 0.5.1-rc6 // H264", 0, 211, 9.5f,
+		Draw_align_c("PIXEL DECK 0.5.1-rc7 // H264", 0, 211, 9.5f,
                      UI_CREAM, DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER,
                      400, 14);
         return;
@@ -333,12 +387,15 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
         Draw_texture(&pixel, UI_SHADOW, 0, (float)i, 320, 1);
 
     Draw_texture(&pixel, UI_ORANGE, 8, 8, 304, 3);
-    snprintf(line, sizeof(line), "CHANNEL DECK // %lu STATIONS",
-             (unsigned long)count);
+    snprintf(line, sizeof(line), "CHANNEL DECK // %lu STATIONS // P%lu/%lu",
+             (unsigned long)count,
+             (unsigned long)(count ? page_start / CHANNELS_PER_PAGE + 1 : 0),
+             (unsigned long)(count ? (count + CHANNELS_PER_PAGE - 1) /
+                                      CHANNELS_PER_PAGE : 0));
     Draw_c(line, 14, 16, 13.0f, UI_CREAM);
 
-    for (i = 0; i < count; i++) {
-        float y = 39 + (float)i * 14;
+    for (i = page_start; i < page_end; i++) {
+        float y = 39 + (float)(i - page_start) * 14;
         Draw_texture(&pixel, i == selected ? UI_ORANGE : UI_PANEL,
                      10, y, 300, 12);
         snprintf(line, sizeof(line), "%02lu  %.39s",
@@ -370,10 +427,12 @@ void MiniIptv_live_app_init(void) {
 
     Vid_set_idle_hooks(live_hid, live_draw);
     Vid_set_live_error_hook(player_error);
+    Vid_set_live_channel_hook(player_channel_request);
 }
 
 void MiniIptv_live_app_exit(void) {
     Vid_set_live_error_hook(NULL);
+    Vid_set_live_channel_hook(NULL);
     Vid_set_idle_hooks(NULL, NULL);
     miniiptv_live_stream_request_stop();
     if (app.worker) {

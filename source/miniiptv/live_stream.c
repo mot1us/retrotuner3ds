@@ -14,14 +14,9 @@
 
 #define STREAM_RING_SIZE (6u * 1024u * 1024u)
 #define STREAM_INITIAL_SEGMENTS 1
-#define STREAM_REBUFFER_MIN_TARGET_MS 6000u
-#define STREAM_REBUFFER_MAX_TARGET_MS 12000u
-#define STREAM_REBUFFER_SEGMENT_MARGIN_MS 1000u
-#define STREAM_REBUFFER_MIN_BYTES (256u * 1024u)
-#define STREAM_REBUFFER_MAX_BYTES (1536u * 1024u)
-#define STREAM_LOW_WATER_TARGET_MS 1500u
-#define STREAM_LOW_WATER_MIN_BYTES (64u * 1024u)
-#define STREAM_LOW_WATER_MAX_BYTES (256u * 1024u)
+#define STREAM_REBUFFER_TARGET_MS 3000u
+#define STREAM_REBUFFER_MIN_BYTES (128u * 1024u)
+#define STREAM_REBUFFER_MAX_BYTES (768u * 1024u)
 #define STREAM_HIGH_WATER_BYTES (5u * 1024u * 1024u)
 #define STREAM_SLEEP_US 10000ULL
 #define TS_PROBE_SIZE (188u * 2u)
@@ -49,6 +44,10 @@ typedef struct {
     uint64_t bytes_read;
     uint64_t measured_segment_bytes;
     uint64_t measured_segment_milliseconds;
+    size_t last_segment_bytes;
+    unsigned int last_download_milliseconds;
+    unsigned int last_segment_milliseconds;
+    unsigned long network_bandwidth;
     unsigned long downloaded_segments;
     unsigned long underruns;
     int last_error;
@@ -81,39 +80,11 @@ static unsigned long effective_bandwidth_locked(void) {
 
 static size_t rebuffer_target_bytes_locked(void) {
     unsigned long bandwidth = effective_bandwidth_locked();
-    unsigned int target_ms = STREAM_REBUFFER_MIN_TARGET_MS;
     uint64_t target;
-    uint64_t segment_ms = 0;
-    if (stream.downloaded_segments > 0 &&
-        stream.measured_segment_milliseconds > 0) {
-        segment_ms = stream.measured_segment_milliseconds /
-                     stream.downloaded_segments;
-    } else if (stream.target_duration > 0) {
-        segment_ms = (uint64_t)stream.target_duration * 1000u;
-    }
-    segment_ms += STREAM_REBUFFER_SEGMENT_MARGIN_MS;
-    if (segment_ms >= STREAM_REBUFFER_MAX_TARGET_MS)
-        target_ms = STREAM_REBUFFER_MAX_TARGET_MS;
-    else if (segment_ms > target_ms)
-        target_ms = (unsigned int)segment_ms;
-    if (target_ms > STREAM_REBUFFER_MAX_TARGET_MS)
-        target_ms = STREAM_REBUFFER_MAX_TARGET_MS;
     if (bandwidth == 0) return STREAM_REBUFFER_MAX_BYTES;
-    target = ((uint64_t)bandwidth * target_ms) / 8000u;
+    target = ((uint64_t)bandwidth * STREAM_REBUFFER_TARGET_MS) / 8000u;
     if (target < STREAM_REBUFFER_MIN_BYTES) target = STREAM_REBUFFER_MIN_BYTES;
     if (target > STREAM_REBUFFER_MAX_BYTES) target = STREAM_REBUFFER_MAX_BYTES;
-    return (size_t)target;
-}
-
-static size_t low_water_bytes_locked(void) {
-    unsigned long bandwidth = effective_bandwidth_locked();
-    uint64_t target;
-    if (bandwidth == 0) return STREAM_LOW_WATER_MAX_BYTES;
-    target = ((uint64_t)bandwidth * STREAM_LOW_WATER_TARGET_MS) / 8000u;
-    if (target < STREAM_LOW_WATER_MIN_BYTES)
-        target = STREAM_LOW_WATER_MIN_BYTES;
-    if (target > STREAM_LOW_WATER_MAX_BYTES)
-        target = STREAM_LOW_WATER_MAX_BYTES;
     return (size_t)target;
 }
 
@@ -215,19 +186,34 @@ static size_t segment_write_callback(const unsigned char *data, size_t size,
 static int stream_segment(const HlsSegment *segment, size_t *downloaded_size) {
     SegmentWriter writer;
     size_t bytes = 0;
+    uint64_t download_started;
+    uint64_t download_elapsed;
     int result;
     if (!segment) return MINIIPTV_STAGE_INVALID_ARGUMENT;
     memset(&writer, 0, sizeof(writer));
+    download_started = osGetTime();
     result = network_stream_data(segment->url, stream.channel.user_agent,
                                  stream.channel.referrer,
                                  MINIIPTV_SEGMENT_LIMIT,
                                  segment_write_callback, &writer,
                                  curl_should_cancel, NULL, &bytes);
+    download_elapsed = osGetTime() - download_started;
     if (downloaded_size) *downloaded_size = bytes;
 
     LightLock_Lock(&stream.lock);
     if (result == 0 && writer.validated) {
+        if (download_elapsed == 0) download_elapsed = 1;
         stream.downloaded_segments++;
+        stream.last_segment_bytes = bytes;
+        stream.last_download_milliseconds = download_elapsed > 0xffffffffu
+            ? 0xffffffffu : (unsigned int)download_elapsed;
+        stream.last_segment_milliseconds = segment->duration > 0.0
+            ? (unsigned int)(segment->duration * 1000.0 + 0.5) : 0;
+        {
+            uint64_t network_bps = ((uint64_t)bytes * 8000u) / download_elapsed;
+            stream.network_bandwidth = network_bps > 0xffffffffu
+                ? 0xffffffffu : (unsigned long)network_bps;
+        }
         if (segment->duration > 0.0) {
             stream.measured_segment_bytes += bytes;
             stream.measured_segment_milliseconds +=
@@ -464,22 +450,20 @@ int miniiptv_live_stream_read(unsigned char *buffer, int buffer_size) {
         size_t available;
         size_t contiguous;
         size_t chunk;
-        size_t low_water;
         size_t rebuffer_target;
         bool finished;
         LightLock_Lock(&stream.lock);
         stream.reader_started = true;
         available = stream.ring_count;
-        low_water = low_water_bytes_locked();
         rebuffer_target = rebuffer_target_bytes_locked();
         finished = stream.stop_requested || !stream.producer_running;
-        /* Refill before the network ring is empty. FFmpeg and the player's
-         * packet queues can keep presenting their cached frames while this
-         * read blocks, hiding many segment-boundary gaps. */
-        if (stream.bytes_read > 0 && available <= low_water &&
+        /* Only block FFmpeg after a real underrun. Holding back readable data
+         * at a synthetic low-water mark caused visible stalls on healthy
+         * low-bitrate channels. */
+        if (stream.bytes_read > 0 && available == 0 &&
             !stream.rebuffering && !finished) {
             stream.rebuffering = true;
-            if (available == 0) stream.underruns++;
+            stream.underruns++;
         }
         if (stream.rebuffering && available >= rebuffer_target)
             stream.rebuffering = false;
@@ -532,6 +516,10 @@ void miniiptv_live_stream_get_info(MiniIptvLiveInfo *info) {
     snprintf(info->codecs, sizeof(info->codecs), "%s", stream.variant_codecs);
     info->bandwidth = stream.variant_bandwidth;
     info->measured_bandwidth = measured_bandwidth_locked();
+    info->network_bandwidth = stream.network_bandwidth;
+    info->last_segment_bytes = stream.last_segment_bytes;
+    info->last_download_milliseconds = stream.last_download_milliseconds;
+    info->last_segment_milliseconds = stream.last_segment_milliseconds;
     info->rebuffer_target_bytes = rebuffer_target_bytes_locked();
     info->buffered_milliseconds = buffered_milliseconds_locked();
     info->width = stream.variant_width;

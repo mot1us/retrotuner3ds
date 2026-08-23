@@ -21,12 +21,15 @@ versioning while the player remains experimental.
   their actions for clearer controls.
 - Estimate playable buffer time from measured segment bitrate and display
   buffer health in seconds instead of treating every stream alike.
-- Scale underrun recovery to the feed's HLS segment duration, with bounded
-  six-to-twelve-second targets that avoid repeated micro-stalls.
-- Begin refilling at a small low-water reserve so the decoder's packet cache
-  can continue presenting frames across HLS segment-boundary delays.
-- Keep channel changes on the proven `B`-to-deck flow while direct switching is
-  redesigned outside the playback teardown path.
+- Restore the proven three-second recovery target and only block after a real
+  empty-ring underrun; the proactive low-water pause caused healthy feeds to
+  stall prematurely.
+- Show source bitrate, measured network throughput, buffer time, download time,
+  and real underrun counts for useful hardware diagnostics.
+- Add animated tuning progress with elapsed time.
+- Expand playlists to 32 stations with a ten-row paged channel deck.
+- Add `L`/`R` live channel switching through the same full teardown path as
+  returning to the deck, so two decoders or stream buffers never coexist.
 - Remove bundled stations; users now supply
   `sd:/3ds/retrotuner3ds/channels.m3u` themselves.
 - Rename the public project, application, and binary to RetroTuner3DS.

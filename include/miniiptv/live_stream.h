@@ -13,6 +13,10 @@ typedef struct {
     char codecs[96];
     unsigned long bandwidth;
     unsigned long measured_bandwidth;
+    unsigned long network_bandwidth;
+    size_t last_segment_bytes;
+    unsigned int last_download_milliseconds;
+    unsigned int last_segment_milliseconds;
     size_t rebuffer_target_bytes;
     unsigned int buffered_milliseconds;
     unsigned int width;

@@ -770,6 +770,7 @@ static bool vid_embedded_exit_requested = false;
 static Vid_idle_hid_hook vid_idle_hid_hook = NULL;
 static Vid_idle_draw_hook vid_idle_draw_hook = NULL;
 static Vid_live_error_hook vid_live_error_hook = NULL;
+static Vid_live_channel_hook vid_live_channel_hook = NULL;
 static volatile uint32_t vid_playback_return_generation = 0;
 static bool vid_miniptv_force_initial_autoplay = false;
 static bool vid_miniptv_start_pending = false;
@@ -887,15 +888,23 @@ static void Vid_draw_miniiptv_live_overlay(void)
 	if(vid_miniptv_show_details)
 	{
 		if(live_info.width && live_info.height)
-			snprintf(line, sizeof(line), "%ux%u  ~%luk  DL:%lu  U:%lu  E:%d",
+			snprintf(line, sizeof(line), "%ux%u SRC:%luk NET:%luk U:%lu",
 				live_info.width, live_info.height,
-				effective_bandwidth / 1000ul, downloaded, underruns, live_error);
+				effective_bandwidth / 1000ul,
+				live_info.network_bandwidth / 1000ul, underruns);
 		else
-			snprintf(line, sizeof(line), "AUTO QUALITY  DL:%lu  U:%lu  E:%d",
-				downloaded, underruns, live_error);
+			snprintf(line, sizeof(line), "AUTO  NET:%luk SEG:%ums U:%lu",
+				live_info.network_bandwidth / 1000ul,
+				live_info.last_download_milliseconds, underruns);
 		Draw_align_c(line, 8, 154, 10.0f,
 			live_error == 0 ? MINIIPTV_COLOR_MINT : DEF_DRAW_RED,
 			DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 304, 16);
+		snprintf(line, sizeof(line), "SEG:%luK/%ums MEDIA:%ums DL:%lu",
+			(unsigned long)(live_info.last_segment_bytes / 1024u),
+			live_info.last_download_milliseconds,
+			live_info.last_segment_milliseconds, downloaded);
+		Draw_align_c(line, 8, 166, 9.0f, MINIIPTV_COLOR_CYAN,
+			DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 304, 12);
 	}
 
 	Draw_texture(&pixel, MINIIPTV_COLOR_PANEL, 8, 180, 304, 34);
@@ -907,7 +916,7 @@ static void Vid_draw_miniiptv_live_overlay(void)
 	Draw_align_c("B", 171, 184, 10.0f, MINIIPTV_COLOR_INK,
 		DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 19, 13);
 	Draw_c("CHANNELS", 195, 185, 10.0f, MINIIPTV_COLOR_CREAM);
-	Draw_align_c("SELECT // SIGNAL DETAILS", 8, 199, 9.5f,
+	Draw_align_c("L PREV  //  R NEXT  //  SELECT INFO", 8, 199, 9.5f,
 		MINIIPTV_COLOR_ORANGE, DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER,
 		304, 12);
 }
@@ -944,6 +953,21 @@ void Vid_hid(const Hid_info* key)
 	 * channel deck intermittent. Latch the request on the physical press,
 	 * cancel a potentially blocked network read, and keep a high-priority abort
 	 * queued until the decode thread reaches IDLE. */
+	if(vid_embedded_test_mode
+	&& (vid_player.state != PLAYER_STATE_IDLE
+		|| miniiptv_live_stream_is_active()
+		|| Util_err_query_show_flag())
+	&& (DEF_HID_PHY_PR(key->l) || DEF_HID_PHY_PR(key->r)))
+	{
+		if(vid_live_channel_hook)
+			vid_live_channel_hook(DEF_HID_PHY_PR(key->l) ? -1 : 1);
+		Util_err_set_show_flag(false);
+		Util_err_clear_error_message();
+		vid_miniptv_return_requested =
+			(vid_player.state != PLAYER_STATE_IDLE);
+		miniiptv_live_stream_request_stop();
+		Draw_set_refresh_needed(true);
+	}
 	if(vid_embedded_test_mode
 	&& (vid_player.state != PLAYER_STATE_IDLE
 		|| miniiptv_live_stream_is_active()
@@ -1943,6 +1967,11 @@ void Vid_set_idle_hooks(Vid_idle_hid_hook hid_hook, Vid_idle_draw_hook draw_hook
 void Vid_set_live_error_hook(Vid_live_error_hook error_hook)
 {
 	vid_live_error_hook = error_hook;
+}
+
+void Vid_set_live_channel_hook(Vid_live_channel_hook channel_hook)
+{
+	vid_live_channel_hook = channel_hook;
 }
 
 bool Vid_prepare_file(const char* directory, const char* name)

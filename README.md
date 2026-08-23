@@ -13,7 +13,7 @@ It has only been tested on that model; other 3DS-family systems are unverified.
 - Live, continuous HLS playback—segments are streamed into a bounded memory
   ring rather than downloading an entire program first.
 - Hardware-accelerated H.264 decoding on the tested New Nintendo 3DS.
-- Up to 10 channels from a user-provided `channels.m3u` file.
+- Up to 32 channels from a user-provided `channels.m3u` file, shown in pages.
 - Automatic selection of the lowest advertised HLS rendition.
 - Retro dual-screen channel deck, buffering state, and stream diagnostics.
 - Full teardown of the stream and decoder when leaving a channel.
@@ -40,6 +40,7 @@ playlist and are responsible for having permission to access its streams.
 | D-pad Up/Down | Choose a channel |
 | A | Tune the selected channel |
 | B | Stop playback and return to the channel deck |
+| L / R | Switch to the previous or next channel during playback |
 | Select | Toggle playback details |
 | Start | Exit |
 
@@ -53,7 +54,7 @@ RetroTuner3DS supports a deliberately small subset of extended M3U:
 https://example.test/live/index.m3u8
 ```
 
-The parser accepts up to 10 channels. `user-agent` and `referrer` attributes
+The parser accepts up to 32 channels. `user-agent` and `referrer` attributes
 are supported for streams that legitimately require them. If
 `sd:/3ds/retrotuner3ds/channels.m3u` is missing or invalid, the app displays its
 expected location instead of loading bundled stations.
@@ -92,7 +93,7 @@ Citro3D video output
 ```
 
 The producer keeps downloading new HLS segments while the player consumes the
-ring. Low- and high-water marks provide basic rebuffering without allowing the
+ring. A bounded refill after a true underrun provides basic rebuffering without allowing the
 stream to consume memory indefinitely.
 
 For a deeper tour, see [Architecture](docs/ARCHITECTURE.md).
