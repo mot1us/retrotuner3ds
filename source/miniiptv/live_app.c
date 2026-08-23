@@ -870,10 +870,18 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
                          DEF_DRAW_RED, DRAW_X_ALIGN_CENTER,
                          DRAW_Y_ALIGN_CENTER, 400, 20);
             if (tune.phase == MINIIPTV_TUNE_PHASE_FAILED) {
-                snprintf(line, sizeof(line), "FAILED @ %s // T+%u.%us",
-                         miniiptv_live_tune_phase_label(tune.failure_phase),
-                         tune.total_elapsed_milliseconds / 1000u,
-                         (tune.total_elapsed_milliseconds % 1000u) / 100u);
+                if (has_player_error_diagnostics)
+                    snprintf(line, sizeof(line),
+                             "FAILED @ %s // T+%u.%us // ERR:%08lX",
+                             miniiptv_live_tune_phase_label(tune.failure_phase),
+                             tune.total_elapsed_milliseconds / 1000u,
+                             (tune.total_elapsed_milliseconds % 1000u) / 100u,
+                             (unsigned long)player_error_code);
+                else
+                    snprintf(line, sizeof(line), "FAILED @ %s // T+%u.%us",
+                             miniiptv_live_tune_phase_label(tune.failure_phase),
+                             tune.total_elapsed_milliseconds / 1000u,
+                             (tune.total_elapsed_milliseconds % 1000u) / 100u);
                 Draw_align_c(line, 0, 195, 8.5f, UI_ORANGE,
                              DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER,
                              400, 12);
@@ -953,28 +961,23 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
     }
 
     if (state == LIVE_APP_ERROR && has_player_error_diagnostics) {
-        Draw_texture(&pixel, UI_PANEL, 8, 177, 304, 34);
-        snprintf(line, sizeof(line),
-                 "DIAG %s // ERR %08lX",
-                 RETROTUNER_VERSION, (unsigned long)player_error_code);
-        Draw_align_c(line, 12, 178, 8.0f, DEF_DRAW_RED,
-                     DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 296, 10);
-        snprintf(line, sizeof(line), "VIDEO P:%lu D:%lu T:%lu X:%u",
+        Draw_texture(&pixel, UI_PANEL, 8, 181, 304, 29);
+        snprintf(line, sizeof(line), "V PKT:%lu DEC:%lu TEX:%lu SHOW:%u",
                  (unsigned long)player_error_diagnostics.video_packets,
                  (unsigned long)player_error_diagnostics.decoded_frames,
                  (unsigned long)player_error_diagnostics.textures,
                  player_error_diagnostics.presented ? 1u : 0u);
-        Draw_align_c(line, 12, 188, 8.0f, UI_CYAN,
-                     DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 296, 10);
-        snprintf(line, sizeof(line), "AUDIO %u %s P:%lu D:%lu Q:%lu E:%08lX",
+        Draw_align_c(line, 12, 182, 8.5f, UI_CYAN,
+                     DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 296, 12);
+        snprintf(line, sizeof(line), "A %u %s RX:%lu DEC:%lu Q:%lu AE:%lX",
                  player_error_diagnostics.audio_tracks,
                  audio_diagnostic_state(player_error_diagnostics.audio_state),
                  (unsigned long)player_error_diagnostics.audio_demux_packets,
                  (unsigned long)player_error_diagnostics.audio_frames,
                  (unsigned long)player_error_diagnostics.audio_buffers,
                  (unsigned long)player_error_diagnostics.audio_last_error);
-        Draw_align_c(line, 12, 198, 7.0f, UI_MINT,
-                     DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 296, 10);
+        Draw_align_c(line, 12, 196, 8.0f, UI_MINT,
+                     DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 296, 12);
     } else {
         Draw_texture(&pixel, UI_PANEL, 8, 183, 304, 28);
         if (state == LIVE_APP_LOADING)

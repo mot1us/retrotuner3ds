@@ -7674,17 +7674,31 @@ void Vid_convert_thread(void* arg)
 		else if(vid_player.state == PLAYER_STATE_BUFFERING)
 		{
 			uint16_t restart_threshold = Vid_get_effective_restart_threshold();
+			bool live_first_texture_ready = miniiptv_live_stream_is_active()
+				&& !__atomic_load_n(&vid_miniptv_return_requested,
+					__ATOMIC_ACQUIRE)
+				&& !__atomic_load_n(&vid_player.has_presented_frame,
+					__ATOMIC_ACQUIRE)
+				&& vid_player.total_rendered_frames > 0;
 
 			Util_sync_lock(&vid_player.delay_update_lock, UINT64_MAX);
 			Vid_init_desync_data();
 			Util_sync_unlock(&vid_player.delay_update_lock);
 
-			if(restart_threshold == 0 || num_of_cached_raw_images >= restart_threshold
+			/* The two-slot texture queue can safely hold one pending frame. During
+			 * live startup, waiting for the ordinary two-frame MVD refill threshold
+			 * after that texture is published creates a circular wait: BUFFERING
+			 * prevents the draw index from consuming the texture, while the full
+			 * queue prevents conversion from publishing another one. Resume through
+			 * the existing notification path once that first validated texture exists.
+			 * After it is drawn, has_presented_frame restores the normal threshold. */
+			if(live_first_texture_ready || restart_threshold == 0
+			|| num_of_cached_raw_images >= restart_threshold
 			|| (Util_speaker_get_available_buffer_num(DEF_VID_SPEAKER_SESSION_ID) + 1) >= DEF_SPEAKER_MAX_BUFFERS)
 			{
 				//Notify we've finished buffering.
 				DEF_LOG_RESULT_SMART(result, Util_queue_add(&vid_player.decode_thread_notification_queue, CONVERT_THREAD_FINISHED_BUFFERING_NOTIFICATION,
-				NULL, QUEUE_OP_TIMEOUT_US, QUEUE_OPTION_NONE), (result == DEF_SUCCESS), result);
+				NULL, QUEUE_OP_TIMEOUT_US, QUEUE_OPTION_DO_NOT_ADD_IF_EXIST), (result == DEF_SUCCESS), result);
 			}
 		}
 		else

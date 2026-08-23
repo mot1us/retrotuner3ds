@@ -5,6 +5,10 @@ versioning while the player remains experimental.
 
 ## [Unreleased]
 
+- Break the live first-frame circular wait once one validated texture is
+  already queued: resume through the existing buffering-complete notification,
+  present it, then restore the ordinary MVD refill threshold.
+- Enlarge the player-failure snapshot to two dedicated video/audio rows.
 - Render player-failure diagnostics on dedicated video and audio rows instead
   of clipping the counters after a long single-line error message.
 - Preserve the first live texture through the draw-stage A/V wait gate as well

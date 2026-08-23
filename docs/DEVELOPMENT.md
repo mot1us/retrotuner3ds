@@ -64,6 +64,13 @@ Player failures return to a dedicated error panel that preserves the final
 video and audio snapshot on separate readable rows. This snapshot is cleared
 when a new tune begins, so it cannot be mistaken for the next station.
 
+Live startup may leave one validated texture queued while the inherited player
+is in `BUFFERING`. Because the two-slot texture ring has one usable pending
+slot, waiting for the normal two-frame refill threshold at that point would
+deadlock presentation. The live-only startup path therefore uses the existing
+buffering-complete notification when that first texture is ready. Drawing it
+restores the normal refill policy; no decoder or memory limits are changed.
+
 ## Working with Codex
 
 A productive request usually names the outcome and supplies the latest hardware
