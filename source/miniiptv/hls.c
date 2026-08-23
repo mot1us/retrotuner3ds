@@ -2,6 +2,7 @@
 
 #include <ctype.h>
 #include <limits.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -26,6 +27,7 @@ int hls_resolve_url(const char *base_url, const char *reference, char *output, s
     const char *scheme;
     const char *authority_end;
     const char *path_end;
+    const char *suffix;
     size_t prefix_length;
 
     if (!base_url || !reference || !output || output_size == 0) return -1;
@@ -37,7 +39,27 @@ int hls_resolve_url(const char *base_url, const char *reference, char *output, s
 
     scheme = strstr(base_url, "://");
     if (!scheme) return -3;
-    authority_end = strchr(scheme + 3, '/');
+
+    if (reference[0] == '?') {
+        suffix = strpbrk(scheme + 3, "?#");
+        if (!suffix) suffix = base_url + strlen(base_url);
+        prefix_length = (size_t)(suffix - base_url);
+        if (prefix_length + strlen(reference) >= output_size) return -2;
+        copy_bounded(output, output_size, base_url, prefix_length);
+        strcat(output, reference);
+        return 0;
+    }
+    if (reference[0] == '#') {
+        suffix = strchr(scheme + 3, '#');
+        if (!suffix) suffix = base_url + strlen(base_url);
+        prefix_length = (size_t)(suffix - base_url);
+        if (prefix_length + strlen(reference) >= output_size) return -2;
+        copy_bounded(output, output_size, base_url, prefix_length);
+        strcat(output, reference);
+        return 0;
+    }
+
+    authority_end = strpbrk(scheme + 3, "/?#");
     if (!authority_end) authority_end = base_url + strlen(base_url);
 
     if (strncmp(reference, "//", 2) == 0) {
@@ -56,37 +78,69 @@ int hls_resolve_url(const char *base_url, const char *reference, char *output, s
         return 0;
     }
 
-    path_end = strrchr(base_url, '/');
-    if (!path_end || path_end < authority_end) path_end = authority_end;
-    prefix_length = (size_t)(path_end - base_url + 1);
+    if (*authority_end != '/') {
+        prefix_length = (size_t)(authority_end - base_url);
+        if (prefix_length + 1 + strlen(reference) >= output_size) return -2;
+        copy_bounded(output, output_size, base_url, prefix_length);
+        strcat(output, "/");
+        strcat(output, reference);
+        return 0;
+    }
+
+    path_end = strpbrk(authority_end, "?#");
+    if (!path_end) path_end = base_url + strlen(base_url);
+    while (path_end > authority_end && path_end[-1] != '/') path_end--;
+    prefix_length = (size_t)(path_end - base_url);
     if (prefix_length + strlen(reference) >= output_size) return -2;
     copy_bounded(output, output_size, base_url, prefix_length);
     strcat(output, reference);
     return 0;
 }
 
+static const char *find_attribute(const char *line, const char *key) {
+    const char *value = strchr(line, ':');
+    size_t key_length = strlen(key);
+    int quoted;
+
+    if (value) value++;
+    else value = line;
+    while (*value) {
+        while (*value == ',' || isspace((unsigned char)*value)) value++;
+        if (strncmp(value, key, key_length) == 0)
+            return value + key_length;
+
+        quoted = 0;
+        while (*value) {
+            if (*value == '"') quoted = !quoted;
+            else if (*value == ',' && !quoted) {
+                value++;
+                break;
+            }
+            value++;
+        }
+    }
+    return NULL;
+}
+
 static unsigned long parse_bandwidth(const char *line) {
-    const char *value = strstr(line, "BANDWIDTH=");
+    const char *value = find_attribute(line, "BANDWIDTH=");
     char *end;
     unsigned long bandwidth;
     if (!value) return ULONG_MAX;
-    value += 10;
     bandwidth = strtoul(value, &end, 10);
     return end == value ? ULONG_MAX : bandwidth;
 }
 
 static void parse_resolution(const char *line, unsigned int *width, unsigned int *height) {
-    const char *value = strstr(line, "RESOLUTION=");
+    const char *value = find_attribute(line, "RESOLUTION=");
     if (!value) return;
-    value += 11;
     (void)sscanf(value, "%ux%u", width, height);
 }
 
 static void parse_codecs(const char *line, char *output, size_t output_size) {
-    const char *value = strstr(line, "CODECS=\"");
+    const char *value = find_attribute(line, "CODECS=\"");
     const char *end;
     if (!value) return;
-    value += 8;
     end = strchr(value, '"');
     if (!end) return;
     copy_bounded(output, output_size, value, (size_t)(end - value));
@@ -104,6 +158,20 @@ static int codecs_are_compatible(const char *codecs) {
         strstr(codecs, "opus"))
         return 0;
     return has_video;
+}
+
+static int key_method_is_none(const char *line) {
+    const char *method = find_attribute(line, "METHOD=");
+    if (!method || strncmp(method, "NONE", 4) != 0) return 0;
+    return method[4] == '\0' || method[4] == ',' ||
+           isspace((unsigned char)method[4]);
+}
+
+static double parse_duration(const char *line) {
+    char *end;
+    double duration = strtod(line + 8, &end);
+    if (end == line + 8 || !isfinite(duration) || duration < 0.0) return -1.0;
+    return duration;
 }
 
 int hls_select_stream(const char *manifest, const char *manifest_url, HlsSelection *selection) {
@@ -219,8 +287,8 @@ int hls_parse_media_playlist(const char *manifest, const char *manifest_url, Hls
         else if (strncmp(line, "#EXT-X-MEDIA-SEQUENCE:", 22) == 0)
             playlist->media_sequence = strtoul(line + 22, NULL, 10);
         else if (strncmp(line, "#EXTINF:", 8) == 0)
-            pending_duration = strtod(line + 8, NULL);
-        else if (strncmp(line, "#EXT-X-KEY:", 11) == 0 && strstr(line, "METHOD=NONE") == NULL)
+            pending_duration = parse_duration(line);
+        else if (strncmp(line, "#EXT-X-KEY:", 11) == 0 && !key_method_is_none(line))
             playlist->encrypted = 1;
         else if (strncmp(line, "#EXT-X-BYTERANGE:", 17) == 0)
             playlist->uses_byte_ranges = 1;
