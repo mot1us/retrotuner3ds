@@ -97,6 +97,18 @@ recent segments or the shadow controller's desired reserve, capped at 3 MiB.
 If the deeper target is not available, readable complete data is released
 after the target duration plus two seconds, bounded to 2.5--8 seconds.
 
+### rc9.16: cold reserve and boundary recovery
+
+- Cold or previously marginal tunes stage two complete segments; a proven
+  healthy warm profile with no underruns may retain the one-segment startup.
+- Transient manifest and initial-segment requests receive two bounded retries
+  inside the existing tune deadline.
+- Explicit discontinuities and detected format changes still stop the active
+  decoder. The app then permits at most two full teardown-and-relock attempts
+  in a 30-second window.
+- At most two consecutive oversized live segments may be skipped. Atomic
+  staging remains capped at 4 MiB and repeated oversize is terminal.
+
 ## Session profiles
 
 A fixed 32-entry table retains measurements and a recommended lag for each

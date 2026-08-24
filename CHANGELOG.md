@@ -5,6 +5,18 @@ versioning while the player remains experimental.
 
 ## [Unreleased]
 
+- Add bounded clean relocking after explicit HLS discontinuities, playlist
+  regressions, or player-detected format boundaries. Every relock fully tears
+  down FFmpeg/MVD before opening the fresh signal.
+- Skip at most two consecutive oversized producer segments without growing the
+  4 MiB atomic staging limit; repeated oversize remains a terminal safety
+  failure and every skip is logged.
+- Retry transient manifest and initial-segment network failures inside the
+  existing 30-second tune deadline.
+- Stage two complete segments on cold/marginal tunes while retaining the
+  one-segment path for proven healthy warm profiles.
+- Rotate the prior hardware run to `telemetry-prev.csv` instead of immediately
+  overwriting it on app launch.
 - Qualify a revised private TVS hardware-test deck around seven feeds proven on
   New 3DS and six replacement feeds preflighted at 360p-class H.264/AAC with
   comfortably sub-limit MPEG-TS segments. Public packages remain playlist-free.

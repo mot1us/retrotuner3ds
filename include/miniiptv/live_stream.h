@@ -53,6 +53,7 @@ typedef struct {
     unsigned long measured_bandwidth;
     unsigned long network_bandwidth;
     unsigned long sequence_resyncs;
+    unsigned long oversized_segment_skips;
     size_t last_segment_bytes;
     size_t attempted_segment_bytes;
     size_t reported_segment_bytes;

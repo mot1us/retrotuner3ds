@@ -20,7 +20,11 @@
 
 #define USER_PLAYLIST "sdmc:/3ds/retrotuner3ds/channels.m3u"
 #define TELEMETRY_LOG "sdmc:/3ds/retrotuner3ds/telemetry.csv"
+#define PREVIOUS_TELEMETRY_LOG \
+    "sdmc:/3ds/retrotuner3ds/telemetry-prev.csv"
 #define CHANNELS_PER_PAGE 10u
+#define AUTO_RELOCK_MAX_ATTEMPTS 2u
+#define AUTO_RELOCK_WINDOW_MS 30000ULL
 
 /* Retro broadcast palette (ABGR8888). */
 #define UI_INK 0xFF21160Fu
@@ -73,6 +77,8 @@ typedef struct {
     uint32_t player_error_code;
     Vid_live_diagnostics player_error_diagnostics;
     bool has_player_error_diagnostics;
+    unsigned int auto_relock_attempts;
+    uint64_t auto_relock_window_started_ms;
     bool exit_requested;
 } LiveApp;
 
@@ -244,6 +250,16 @@ static int tune_should_cancel(void *unused) {
     return cancel;
 }
 
+static bool recoverable_stream_boundary_error(int result) {
+    return result == MINIIPTV_STAGE_DISCONTINUITY ||
+           result == MINIIPTV_STAGE_TOO_LARGE;
+}
+
+static void reset_auto_relock_locked(void) {
+    app.auto_relock_attempts = 0;
+    app.auto_relock_window_started_ms = 0;
+}
+
 static void player_error(uint32_t error_code) {
     Vid_live_diagnostics diagnostics = {0};
     Vid_query_live_diagnostics(&diagnostics);
@@ -305,6 +321,7 @@ static void player_channel_request(int direction) {
         return;
     }
     app.cancel_to_deck = false;
+    reset_auto_relock_locked();
     app.pending_channel_step = direction < 0 ? -1 : 1;
     app.switching_from_player = app.playlist.count > 0;
     app.switch_from_index = app.selected;
@@ -486,9 +503,10 @@ static bool prepare_selected_tune_locked(void) {
     app.pending_channel = app.playlist.channels[app.selected];
     app.cancel_to_deck = false;
     app.queued_tune = false;
+    reset_auto_relock_locked();
     app.tuning_started_ms = osGetTime();
     set_status_locked(LIVE_APP_LOADING,
-                      "TUNING > LOCK > 1 SEGMENT > PLAY...");
+                      "TUNING > LOCK > RESERVE > PLAY...");
     return true;
 }
 
@@ -559,7 +577,7 @@ static void reap_worker_if_finished(void) {
             app.pending_channel = app.playlist.channels[app.selected];
             app.tuning_started_ms = osGetTime();
             set_status_locked(LIVE_APP_LOADING,
-                              "SWITCHING > LOCK > 1 SEGMENT > PLAY...");
+                              "SWITCHING > LOCK > RESERVE > PLAY...");
             launch_queued = true;
         } else if (!app.exit_requested && app.cancel_to_deck) {
             app.cancel_to_deck = false;
@@ -596,13 +614,14 @@ static PlayerReturnAction update_player_return_locked(void) {
                                              : app.selected - 1;
         else
             app.selected = (app.selected + 1) % app.playlist.count;
+        reset_auto_relock_locked();
         app.pending_channel_step = 0;
         app.pending_channel = app.playlist.channels[app.selected];
         app.cancel_to_deck = false;
         app.queued_tune = false;
         app.tuning_started_ms = osGetTime();
         set_status_locked(LIVE_APP_LOADING,
-                          "SWITCHING > LOCK > 1 SEGMENT > PLAY...");
+                          "SWITCHING > LOCK > RESERVE > PLAY...");
         /* If the playback-return event wins the race with reaping the worker
          * that opened this player, remember the tune now. The reaper will own
          * exactly one launch after freeing that old handle. */
@@ -629,7 +648,9 @@ static PlayerReturnAction update_player_return_locked(void) {
 
 static void process_player_return_action(PlayerReturnAction action) {
     bool launch_queued = false;
+    bool auto_relock = false;
     bool preserve_stream_error = false;
+    bool recoverable_player_boundary = false;
     int stream_error = 0;
     Vid_live_diagnostics stream_error_diagnostics = {0};
 
@@ -637,9 +658,16 @@ static void process_player_return_action(PlayerReturnAction action) {
     if (action == PLAYER_RETURN_STOP) {
         miniiptv_live_stream_get_stats(NULL, NULL, NULL, NULL,
                                        &stream_error);
+        LightLock_Lock(&app.lock);
+        recoverable_player_boundary =
+            app.player_error_code == DEF_ERR_UNSAFE_VIDEO_STREAM;
+        LightLock_Unlock(&app.lock);
         if (stream_error != 0) {
             Vid_query_live_diagnostics(&stream_error_diagnostics);
             miniiptv_live_tune_fail(stream_error);
+            preserve_stream_error = true;
+        } else if (recoverable_player_boundary) {
+            Vid_query_live_diagnostics(&stream_error_diagnostics);
             preserve_stream_error = true;
         }
     }
@@ -655,6 +683,34 @@ static void process_player_return_action(PlayerReturnAction action) {
         LightLock_Lock(&app.lock);
         app.stream_cleanup_pending = false;
         if (preserve_stream_error && !app.exit_requested &&
+            (recoverable_stream_boundary_error(stream_error) ||
+             recoverable_player_boundary) &&
+            !app.cancel_to_deck && !app.queued_tune &&
+            app.playlist.count > 0) {
+            uint64_t now = osGetTime();
+            if (app.auto_relock_window_started_ms == 0 ||
+                now < app.auto_relock_window_started_ms ||
+                now - app.auto_relock_window_started_ms >
+                    AUTO_RELOCK_WINDOW_MS) {
+                app.auto_relock_attempts = 0;
+                app.auto_relock_window_started_ms = now;
+            }
+            if (app.auto_relock_attempts < AUTO_RELOCK_MAX_ATTEMPTS) {
+                app.auto_relock_attempts++;
+                app.pending_channel = app.playlist.channels[app.selected];
+                app.tuning_started_ms = now;
+                set_status_locked(
+                    LIVE_APP_LOADING,
+                    app.auto_relock_attempts == 1u
+                        ? "SIGNAL SHIFT // CLEAN RELOCK 1/2..."
+                        : "SIGNAL SHIFT // CLEAN RELOCK 2/2...");
+                auto_relock = true;
+                if (app.worker || app.worker_reaping)
+                    app.launch_after_reap = true;
+            }
+        }
+        if (!auto_relock &&
+            preserve_stream_error && !app.exit_requested &&
             app.state != LIVE_APP_ERROR) {
             app.state = LIVE_APP_ERROR;
             app.player_error_code = (uint32_t)stream_error;
@@ -666,18 +722,19 @@ static void process_player_return_action(PlayerReturnAction action) {
         /* HID and draw run independently. If L/R arrived while the old stream
          * was being joined, consume that queued choice as soon as cleanup has
          * released the single stream/decoder owner. */
-        if (!app.exit_requested && app.queued_tune && !app.cancel_to_deck &&
+        if (!auto_relock && !app.exit_requested && app.queued_tune &&
+            !app.cancel_to_deck &&
             !app.worker && !app.worker_reaping && app.playlist.count > 0) {
             app.queued_tune = false;
             app.pending_channel = app.playlist.channels[app.selected];
             app.tuning_started_ms = osGetTime();
             set_status_locked(LIVE_APP_LOADING,
-                              "SWITCHING > LOCK > 1 SEGMENT > PLAY...");
+                              "SWITCHING > LOCK > RESERVE > PLAY...");
             launch_queued = true;
         }
         LightLock_Unlock(&app.lock);
         Draw_set_refresh_needed(true);
-        if (launch_queued) launch_tune_worker();
+        if (auto_relock || launch_queued) launch_tune_worker();
     }
 }
 
@@ -772,6 +829,7 @@ static bool live_hid(const Hid_info *key) {
             app.selected = loading_step < 0
                 ? (app.selected == 0 ? count - 1 : app.selected - 1)
                 : (app.selected + 1) % count;
+            reset_auto_relock_locked();
             if (!app.switching_from_player) app.switch_from_index = previous;
             app.switching_from_player = true;
             app.switch_to_index = app.selected;
@@ -811,6 +869,7 @@ static bool live_hid(const Hid_info *key) {
         app.selected = direction < 0
             ? (app.selected == 0 ? count - 1 : app.selected - 1)
             : (app.selected + 1) % count;
+        reset_auto_relock_locked();
         app.pending_channel_step = 0;
         app.cancel_to_deck = false;
         app.switching_from_player = true;
@@ -826,7 +885,7 @@ static bool live_hid(const Hid_info *key) {
             app.pending_channel = app.playlist.channels[app.selected];
             app.tuning_started_ms = osGetTime();
             set_status_locked(LIVE_APP_LOADING,
-                              "SWITCHING > LOCK > 1 SEGMENT > PLAY...");
+                              "SWITCHING > LOCK > RESERVE > PLAY...");
             launch_error_tune = true;
         }
         LightLock_Unlock(&app.lock);
@@ -1126,6 +1185,8 @@ void MiniIptv_live_app_init(void) {
     memset(&app, 0, sizeof(app));
     LightLock_Init(&app.lock);
     miniiptv_live_tune_telemetry_init();
+    (void)miniiptv_telemetry_log_rotate(TELEMETRY_LOG,
+                                        PREVIOUS_TELEMETRY_LOG);
     telemetry_result = miniiptv_telemetry_log_open(
         TELEMETRY_LOG, RETROTUNER_VERSION, osGetTime());
 

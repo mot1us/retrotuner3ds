@@ -41,9 +41,10 @@ rc9.7; its state is discarded with the existing stream teardown.
 The app/draw owner samples that snapshot, never the network or decoder hot
 paths. A small CSV logger buffers 8 KiB in ordinary RAM, uses dense startup and
 sparse steady-state sampling, flushes every ten seconds and on important
-events, and stops at 512 KiB. The replace-on-launch file contains channel names
-and measurements but no URLs or media payloads. Logging failure is non-fatal
-and cannot alter stream state.
+events, and stops at 512 KiB. The current file contains channel names and
+measurements but no URLs or media payloads; the previous launch is rotated to
+`telemetry-prev.csv`. Logging failure is non-fatal and cannot alter stream
+state.
 
 ## Playback path
 
@@ -76,12 +77,17 @@ resolution, profile, frame rate, and bitrate.
 - Invalid physical buffers and fatal MVD results trigger serialized teardown.
   Render waits are bounded, and MVD-registered output surfaces remain allocated
   until the decoder service exits.
-- The producer pauses at a high-water mark. Playback only enters its bounded
-  three-second refill after the network ring actually runs empty.
+- The producer pauses at a high-water mark. Cold tunes stage two complete
+  segments; proven healthy warm profiles may stage one. Playback only enters
+  its bounded refill after the network ring actually runs empty.
 - Encrypted, byte-range, and fMP4 playlists are rejected before handoff.
-  Explicit discontinuities and playlist regressions stop the producer before
-  changed media reaches the decoder. An ordinary forward media-sequence gap is
-  treated as a recoverable live-window resynchronization and logged.
+  Explicit discontinuities, playlist regressions, and detected format changes
+  stop the producer/player before changed media reaches the decoder. The app
+  may perform two bounded clean relocks after full FFmpeg/MVD teardown. An
+  ordinary forward media-sequence gap is treated as a recoverable live-window
+  resynchronization and logged.
+- An established stream may skip at most two consecutive segments above the
+  4 MiB atomic ceiling. A third remains terminal; the ceiling never grows.
 - Stop and channel-change paths request producer cancellation, join the thread,
   close FFmpeg/MVD resources, and reset the ring.
 

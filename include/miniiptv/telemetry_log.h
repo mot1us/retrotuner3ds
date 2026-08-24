@@ -15,6 +15,7 @@ typedef struct {
     uint64_t ring_bytes;
     uint64_t downloaded_segments;
     uint64_t sequence_resyncs;
+    uint64_t oversized_segment_skips;
     uint64_t global_underruns;
     uint32_t width;
     uint32_t height;
@@ -64,6 +65,8 @@ typedef struct {
  * the app/draw owner, never the network or decoder hot paths. */
 int miniiptv_telemetry_log_open(const char *path, const char *version,
                                 uint64_t now_ms);
+int miniiptv_telemetry_log_rotate(const char *current_path,
+                                  const char *previous_path);
 void miniiptv_telemetry_log_record(
     uint64_t now_ms, const MiniIptvTelemetrySample *sample);
 void miniiptv_telemetry_log_close(void);

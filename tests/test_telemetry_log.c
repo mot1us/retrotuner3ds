@@ -133,9 +133,37 @@ static void test_file_cap(void) {
     assert(remove(path) == 0);
 }
 
+static void test_rotation(void) {
+    const char *current = "tests/bin/test_telemetry_current.csv";
+    const char *previous = "tests/bin/test_telemetry_previous.csv";
+    FILE *file;
+    char *data;
+
+    (void)remove(current);
+    (void)remove(previous);
+    file = fopen(current, "wb");
+    assert(file);
+    assert(fwrite("current-run\n", 1, 12, file) == 12);
+    assert(fclose(file) == 0);
+    file = fopen(previous, "wb");
+    assert(file);
+    assert(fwrite("old-run\n", 1, 8, file) == 8);
+    assert(fclose(file) == 0);
+
+    assert(miniiptv_telemetry_log_rotate(current, previous) == 0);
+    assert(fopen(current, "rb") == NULL);
+    data = read_file(previous, NULL);
+    assert(strcmp(data, "current-run\n") == 0);
+    free(data);
+    assert(remove(previous) == 0);
+    assert(miniiptv_telemetry_log_rotate(current, previous) == 0);
+    assert(miniiptv_telemetry_log_rotate(current, current) != 0);
+}
+
 int main(void) {
     test_rows_and_events();
     test_file_cap();
+    test_rotation();
     assert(miniiptv_telemetry_log_open(
                "tests/bin/missing/directory/telemetry.csv", "x", 0) != 0);
     miniiptv_telemetry_log_close();

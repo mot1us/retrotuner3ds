@@ -14,7 +14,11 @@
 #include "system/util/util.h"
 
 #define STREAM_RING_SIZE MINIIPTV_STREAM_RING_CAPACITY_BYTES
-#define STREAM_INITIAL_SEGMENTS 1
+#define STREAM_COLD_INITIAL_SEGMENTS 2u
+#define STREAM_WARM_INITIAL_SEGMENTS 1u
+#define STREAM_MAX_CONSECUTIVE_OVERSIZE_SKIPS 2u
+#define STREAM_NETWORK_RETRY_COUNT 2u
+#define STREAM_NETWORK_RETRY_PAUSE_US 250000ULL
 #define STREAM_REBUFFER_TARGET_MS 3000u
 #define STREAM_REBUFFER_MIN_BYTES (128u * 1024u)
 #define STREAM_REBUFFER_MAX_BYTES (768u * 1024u)
@@ -85,6 +89,7 @@ typedef struct {
     unsigned long network_bandwidth;
     unsigned long downloaded_segments;
     unsigned long sequence_resyncs;
+    unsigned long oversized_segment_skips;
     unsigned long underruns;
     size_t attempted_segment_bytes;
     size_t reported_segment_bytes;
@@ -484,6 +489,23 @@ static int cancellation_result(void) {
     return result;
 }
 
+static bool retryable_network_stage_error(int result) {
+    return result == MINIIPTV_STAGE_MANIFEST_FETCH_FAILED ||
+           result == MINIIPTV_STAGE_MEDIA_FETCH_FAILED ||
+           result == MINIIPTV_STAGE_SEGMENT_FETCH_FAILED;
+}
+
+static int wait_before_network_retry(void) {
+    unsigned int elapsed_us = 0;
+    while (elapsed_us < STREAM_NETWORK_RETRY_PAUSE_US) {
+        int result = cancellation_result();
+        if (result != MINIIPTV_STAGE_OK) return result;
+        Util_sleep(50000);
+        elapsed_us += 50000u;
+    }
+    return cancellation_result();
+}
+
 static bool is_complete_mpeg_ts(const unsigned char *data, size_t size) {
     if (!data || size < TS_PACKET_SIZE || size % TS_PACKET_SIZE != 0)
         return false;
@@ -696,9 +718,9 @@ static int stream_segment(const HlsSegment *segment,
     } else {
         if (too_large) {
             stream.last_error = MINIIPTV_STAGE_TOO_LARGE;
-            /* Retrying the same oversized live segment can never succeed and
-             * would repeatedly consume bandwidth and staging time. */
-            stream.stop_requested = true;
+            /* The producer decides whether this can be skipped. Initial tune
+             * still fails safely, while an established live stream may move
+             * past a bounded number of isolated oversized ad segments. */
         } else if (mux_failed) {
             stream.last_error = MINIIPTV_STAGE_TS_MUX_FAILED;
             stream.stop_requested = true;
@@ -1051,6 +1073,7 @@ static bool take_producer_seed(HlsMediaPlaylist *media,
 }
 
 static void producer_main(void *unused) {
+    unsigned int consecutive_oversize_skips = 0;
     (void)unused;
     while (!stop_was_requested()) {
         HlsMediaPlaylist media;
@@ -1172,6 +1195,32 @@ static void producer_main(void *unused) {
             LightLock_Unlock(&stream.lock);
             result = stream_segment(&media.segments[i], audio_segment,
                                     &ignored_size);
+            if (result == MINIIPTV_STAGE_TOO_LARGE) {
+                bool terminal;
+                consecutive_oversize_skips++;
+                terminal = consecutive_oversize_skips >
+                    STREAM_MAX_CONSECUTIVE_OVERSIZE_SKIPS;
+                LightLock_Lock(&stream.lock);
+                stream.oversized_segment_skips++;
+                stream.last_sequence = media.segments[i].sequence;
+                if (audio_segment)
+                    stream.last_audio_sequence = audio_segment->sequence;
+                if (terminal) {
+                    stream.last_error = MINIIPTV_STAGE_TOO_LARGE;
+                    stream.stop_requested = true;
+                    stream.producer_state = MINIIPTV_PRODUCER_ERROR;
+                } else {
+                    stream.last_error = 0;
+                    stream.producer_state = MINIIPTV_PRODUCER_PLAYLIST;
+                }
+                LightLock_Unlock(&stream.lock);
+                if (terminal) break;
+                /* Advancing the sequence prevents a permanent retry loop,
+                 * but no bytes were committed so this is not an added
+                 * segment. Continue scanning this playlist for the next
+                 * independently decodable boundary. */
+                continue;
+            }
             if (result != MINIIPTV_STAGE_OK) {
                 LightLock_Lock(&stream.lock);
                 stream.producer_state = MINIIPTV_PRODUCER_ERROR;
@@ -1180,6 +1229,7 @@ static void producer_main(void *unused) {
                     Util_sleep(100000);
                 break;
             }
+            consecutive_oversize_skips = 0;
             if (sequence_gap) {
                 LightLock_Lock(&stream.lock);
                 stream.sequence_resyncs++;
@@ -1265,11 +1315,25 @@ int miniiptv_live_stream_start(const MiniIptvChannel *channel,
     memset(initial_info, 0, sizeof(*initial_info));
     initial_info->segment_limit_bytes = MINIIPTV_SEGMENT_LIMIT;
 
-    result = resolve_initial_playlist(channel, &media);
+    for (unsigned int retry = 0;; retry++) {
+        result = resolve_initial_playlist(channel, &media);
+        if (!retryable_network_stage_error(result) ||
+            retry >= STREAM_NETWORK_RETRY_COUNT)
+            break;
+        result = wait_before_network_retry();
+        if (result != MINIIPTV_STAGE_OK) break;
+    }
     if (result != MINIIPTV_STAGE_OK) goto failure;
     memset(&audio_media, 0, sizeof(audio_media));
     if (stream.separate_audio) {
-        result = fetch_audio_playlist(&audio_media);
+        for (unsigned int retry = 0;; retry++) {
+            result = fetch_audio_playlist(&audio_media);
+            if (!retryable_network_stage_error(result) ||
+                retry >= STREAM_NETWORK_RETRY_COUNT)
+                break;
+            result = wait_before_network_retry();
+            if (result != MINIIPTV_STAGE_OK) break;
+        }
         if (result != MINIIPTV_STAGE_OK && stream.rendition_cache_hit &&
             result != MINIIPTV_STAGE_CANCELLED &&
             result != MINIIPTV_STAGE_TUNE_TIMEOUT) {
@@ -1290,11 +1354,16 @@ int miniiptv_live_stream_start(const MiniIptvChannel *channel,
      * SPS/PPS, and keyframe before the player opens. Hardware testing showed
      * that handing off a partially downloaded segment caused a long white
      * screen and intermittent failure to produce a first frame. */
-    initial_segment_target = STREAM_INITIAL_SEGMENTS;
-    /* Keep the blocking tune at one complete segment, but choose how far
-     * behind the newest published segment it begins. The producer can fetch
-     * the already-published gap while FFmpeg and MVD initialize, adding
-     * broadcast latency rather than download work to the critical path. */
+    /* Cold tunes stage two complete segments so FFmpeg/MVD startup does not
+     * consume the entire reserve before the producer can refill it. A proven
+     * warm profile with healthy headroom and no underruns keeps the faster
+     * one-segment path. Both paths remain bounded by the existing ring and
+     * atomic segment ceilings. */
+    initial_segment_target = adaptive_profile &&
+        adaptive_profile->headroom_permille >= 1500u &&
+        adaptive_profile->total_underruns == 0u
+            ? STREAM_WARM_INITIAL_SEGMENTS
+            : STREAM_COLD_INITIAL_SEGMENTS;
     {
         size_t newest = media.count > 0 ? media.count - 1u : 0u;
         size_t lag = requested_lag;
@@ -1303,18 +1372,27 @@ int miniiptv_live_stream_start(const MiniIptvChannel *channel,
         else if (lag > newest) lag = newest;
         first = newest - lag;
         previous_safe = newest > 0 ? newest - 1u : 0u;
-        /* A deeper start must not reach backward across a discontinuity that
-         * the old one-segment policy would have avoided. Fall back to the
-         * proven previous segment; the producer retains its strict forward
-         * discontinuity check. */
-        for (size_t i = first; i < previous_safe; i++) {
+        /* A deeper start must not span a discontinuity. The first selected
+         * segment may itself carry the marker: this is a fresh decoder and
+         * that marker describes the boundary before the segment. */
+        for (size_t i = first + 1u; i < previous_safe; i++) {
             if (media.segments[i].discontinuity) {
                 first = previous_safe;
                 lag = newest - first;
                 break;
             }
         }
-        selected = media.count > 0 ? initial_segment_target : 0u;
+        selected = media.count > first ? media.count - first : 0u;
+        if (selected > initial_segment_target)
+            selected = initial_segment_target;
+        /* Never combine segments across a format/timestamp boundary during
+         * initial staging. Leave the boundary for a future clean relock. */
+        for (size_t i = first + 1u; i < first + selected; i++) {
+            if (media.segments[i].discontinuity) {
+                selected = i - first;
+                break;
+            }
+        }
         stream.startup_lag_segments = (uint8_t)lag;
     }
     if (selected == 0) {
@@ -1326,19 +1404,23 @@ int miniiptv_live_stream_start(const MiniIptvChannel *channel,
     for (size_t i = first; i < first + selected; i++) {
         size_t bytes = 0;
         const HlsSegment *audio_segment = NULL;
-        if (media.segments[i].discontinuity) {
-            result = MINIIPTV_STAGE_DISCONTINUITY;
-            goto failure;
-        }
         if (stream.separate_audio) {
             audio_segment = matching_audio_segment(&media, i, &audio_media);
-            if (!audio_segment || audio_segment->discontinuity) {
-                result = audio_segment ? MINIIPTV_STAGE_DISCONTINUITY
-                                       : MINIIPTV_STAGE_TS_MUX_FAILED;
+            if (!audio_segment) {
+                result = MINIIPTV_STAGE_TS_MUX_FAILED;
                 goto failure;
             }
+            if (i > first && audio_segment->discontinuity) break;
         }
-        result = stream_segment(&media.segments[i], audio_segment, &bytes);
+        for (unsigned int retry = 0;; retry++) {
+            result = stream_segment(&media.segments[i], audio_segment,
+                                    &bytes);
+            if (!retryable_network_stage_error(result) ||
+                retry >= STREAM_NETWORK_RETRY_COUNT)
+                break;
+            result = wait_before_network_retry();
+            if (result != MINIIPTV_STAGE_OK) break;
+        }
         LightLock_Lock(&stream.lock);
         initial_info->attempted_segment_bytes =
             stream.attempted_segment_bytes;
@@ -1537,6 +1619,7 @@ void miniiptv_live_stream_get_info(MiniIptvLiveInfo *info) {
     info->measured_bandwidth = measured_bandwidth_locked();
     info->network_bandwidth = stream.network_bandwidth;
     info->sequence_resyncs = stream.sequence_resyncs;
+    info->oversized_segment_skips = stream.oversized_segment_skips;
     info->last_segment_bytes = stream.last_segment_bytes;
     info->attempted_segment_bytes = stream.attempted_segment_bytes;
     info->reported_segment_bytes = stream.reported_segment_bytes;

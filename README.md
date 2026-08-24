@@ -50,15 +50,19 @@ channel deck, or `L`/`R` to try the adjacent signal.
 
 ## Hardware telemetry
 
-Each app launch replaces:
+Each app launch writes:
 
     sd:/3ds/retrotuner3ds/telemetry.csv
+
+The prior launch is retained as `telemetry-prev.csv`, so an accidental relaunch
+does not immediately erase the hardware run we need to inspect.
 
 During tuning and playback, the file records monotonic elapsed time, channel
 name, pipeline state, compressed-ring depth, segment delivery timing, shadow
 buffer recommendations, applied startup lag, warm/cold profile state,
 live-window sequence resynchronizations, underruns, and errors. Normal
-channel-switch cancellation is not recorded as an error. It never records
+channel-switch cancellation is not recorded as an error. Isolated oversized
+segment skips are counted separately. It never records
 stream URLs, video, or audio. Rows are buffered in
 ordinary RAM and sampled every two seconds for the first minute after launch
 or a channel change, then every ten seconds. State changes, errors, underruns,
@@ -70,9 +74,10 @@ During one app session, channels with at least three validated segment samples
 receive a small in-memory buffering profile. A cold channel begins two segments
 behind the live edge; later tunes use one segment for healthy delivery, two for
 marginal delivery, or three for unsustainable/repeatedly underrunning delivery.
-Only one initial segment is downloaded before player handoff, so this changes
-live latency without adding blocking startup downloads or increasing the 6 MiB
-ring.
+Cold tunes stage two complete initial segments to protect decoder startup from
+draining the reserve. A proven warm profile with healthy delivery and no
+underruns uses the faster one-segment path. Neither path increases the 6 MiB
+ring or 4 MiB atomic segment limit.
 
 ## Playlist format
 
@@ -96,14 +101,16 @@ RetroTuner3DS currently targets:
 - live HLS using MPEG-TS segments;
 - H.264/AVC video and AAC audio, either multiplexed together or published as
   aligned MPEG-TS HLS audio/video renditions;
-- unencrypted streams without byte ranges, discontinuities, or fMP4 init maps;
+- unencrypted streams without byte ranges or fMP4 init maps;
 - New 3DS hardware decoding;
 - low-resolution, low-bitrate variants.
 
 For console safety, the current live path also rejects video above 640x480,
-known frame rates above 30.5 fps, partial segments, and mid-stream HLS
-discontinuities. A rejected channel returns to the deck instead of falling back
-to software decoding.
+known frame rates above 30.5 fps and partial segments. A mid-stream HLS
+discontinuity or detected format boundary first tears down the decoder, then
+attempts a bounded clean relock; changed media is never fed into the active MVD
+session. A rejected channel returns to the deck instead of falling back to
+software decoding.
 
 At tuning time, the player selects the lowest rendition advertised by the
 channel and rejects unsupported HLS layouts. Initial tuning has a 30-second

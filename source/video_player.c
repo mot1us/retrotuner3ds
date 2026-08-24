@@ -894,6 +894,7 @@ static void Vid_draw_miniiptv_live_overlay(void)
 	log_sample.ring_bytes = buffered;
 	log_sample.downloaded_segments = downloaded;
 	log_sample.sequence_resyncs = live_info.sequence_resyncs;
+	log_sample.oversized_segment_skips = live_info.oversized_segment_skips;
 	log_sample.global_underruns = underruns;
 	log_sample.width = live_info.width;
 	log_sample.height = live_info.height;
