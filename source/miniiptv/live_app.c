@@ -79,6 +79,35 @@ static LiveApp app;
 
 static void launch_tune_worker(void);
 
+void MiniIptv_live_app_draw_boot_screen(void) {
+    Draw_image_data pixel = Draw_get_empty_image();
+    uint32_t y;
+
+    Draw_frame_ready();
+    Draw_screen_ready(DRAW_SCREEN_TOP_LEFT, UI_INK);
+    for (y = 4; y < 238; y += 8u)
+        Draw_texture(&pixel, UI_SHADOW, 0, (float)y, 400, 1);
+    Draw_texture(&pixel, UI_PINK, 0, 13, 400, 2);
+    Draw_texture(&pixel, UI_CYAN, 0, 13, 126, 2);
+    Draw_texture(&pixel, UI_ORANGE, 24, 48, 352, 3);
+    Draw_align_c("RETRO TUNER 3DS", 0, 72, 20.0f, UI_CREAM,
+                 DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 400, 30);
+    Draw_align_c("POCKET BROADCAST SYSTEM // 199X", 0, 111, 11.0f,
+                 UI_CYAN, DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 400, 18);
+    Draw_align_c("WARMING SIGNAL DECK...", 0, 163, 11.0f, UI_MINT,
+                 DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 400, 18);
+
+    Draw_screen_ready(DRAW_SCREEN_BOTTOM, UI_INK);
+    for (y = 4; y < 238; y += 8u)
+        Draw_texture(&pixel, UI_SHADOW, 0, (float)y, 320, 1);
+    Draw_texture(&pixel, UI_ORANGE, 10, 20, 300, 3);
+    Draw_align_c("INITIALIZING VIDEO / AUDIO / NETWORK", 0, 92, 9.5f,
+                 UI_CREAM, DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 320, 18);
+    Draw_texture(&pixel, UI_PANEL, 30, 125, 260, 12);
+    Draw_texture(&pixel, UI_CYAN, 32, 127, 92, 8);
+    Draw_apply_draw();
+}
+
 static const char *live_app_state_label(LiveAppState state) {
     switch (state) {
         case LIVE_APP_NO_PLAYLIST: return "NO_PLAYLIST";
@@ -989,11 +1018,11 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
 
     if (state == LIVE_APP_ERROR && has_player_error_diagnostics) {
         Draw_texture(&pixel, UI_PANEL, 8, 181, 304, 29);
-        snprintf(line, sizeof(line), "V PKT:%lu DEC:%lu TEX:%lu SHOW:%u",
+        snprintf(line, sizeof(line), "V PKT:%lu DEC:%lu TEX:%lu SHOW:%lu",
                  (unsigned long)player_error_diagnostics.video_packets,
                  (unsigned long)player_error_diagnostics.decoded_frames,
                  (unsigned long)player_error_diagnostics.textures,
-                 player_error_diagnostics.presented ? 1u : 0u);
+                 (unsigned long)player_error_diagnostics.presented_frames);
         Draw_align_c(line, 12, 182, 8.5f, UI_CYAN,
                      DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 296, 12);
         snprintf(line, sizeof(line), "A %u %s RX:%lu DEC:%lu Q:%lu AE:%lX",

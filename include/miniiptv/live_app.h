@@ -3,5 +3,6 @@
 
 void MiniIptv_live_app_init(void);
 void MiniIptv_live_app_exit(void);
+void MiniIptv_live_app_draw_boot_screen(void);
 
 #endif

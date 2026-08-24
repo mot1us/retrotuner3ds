@@ -59,6 +59,7 @@ typedef struct {
     unsigned int last_download_milliseconds;
     unsigned int last_segment_milliseconds;
     size_t rebuffer_target_bytes;
+    unsigned int rebuffer_wait_limit_milliseconds;
     unsigned int buffered_milliseconds;
     unsigned int width;
     unsigned int height;

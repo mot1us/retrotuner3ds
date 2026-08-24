@@ -48,11 +48,23 @@ static void test_rows_and_events(void) {
     sample.periodic = true;
     sample.ring_bytes = 512u;
     sample.headroom_permille = 1800u;
+    sample.rebuffer_target_bytes = 524288u;
+    sample.rebuffer_wait_limit_ms = 6000u;
     sample.app_region_total_bytes = 130023424u;
     sample.heap_total_bytes = 5242880u;
     sample.heap_used_bytes = 1048576u;
     sample.linear_total_bytes = 104857600u;
     sample.linear_free_bytes = 73400320u;
+    sample.video_packets = 101u;
+    sample.video_decoded_frames = 99u;
+    sample.video_textures = 98u;
+    sample.video_presented_frames = 97u;
+    sample.audio_tracks = 1u;
+    sample.audio_state = 3u;
+    sample.audio_demux_packets = 202u;
+    sample.audio_frames = 199u;
+    sample.audio_buffers = 198u;
+    sample.audio_last_error = 0x1234u;
     miniiptv_telemetry_log_record(1000, &sample);
     miniiptv_telemetry_log_record(1500, &sample);
     miniiptv_telemetry_log_record(2000, &sample);
@@ -68,11 +80,17 @@ static void test_rows_and_events(void) {
 
     data = read_file(path, NULL);
     assert(strstr(data, "version,elapsed_ms,event,channel") != NULL);
+    assert(strstr(data, "want_ms,rebuffer_target_bytes,"
+                        "rebuffer_wait_limit_ms,lag_segments") != NULL);
     assert(strstr(data, "app_region_total_bytes,heap_total_bytes,"
                         "heap_used_bytes,linear_total_bytes,"
-                        "linear_free_bytes,last_error") != NULL);
+                        "linear_free_bytes,video_packets,") != NULL);
+    assert(strstr(data, "video_presented_frames,audio_tracks,audio_state,"
+                        "audio_demux_packets,audio_frames,audio_buffers,"
+                        "audio_last_error,last_error") != NULL);
     assert(strstr(data, ",130023424,5242880,1048576,104857600,"
-                        "73400320,0\n") != NULL);
+                        "73400320,101,99,98,97,1,3,202,199,198,4660,0\n")
+           != NULL);
     assert(strstr(data, ",START,") != NULL);
     assert(strstr(data, ",SAMPLE,") != NULL);
     assert(strstr(data, ",UNDERRUN,") != NULL);

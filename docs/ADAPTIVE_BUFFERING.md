@@ -79,7 +79,7 @@ also gives the producer already-published segments to fetch while FFmpeg and
 MVD initialize, which is the best available way to build reserve entirely on
 the New 3DS.
 
-### rc9.10: adaptive recovery
+### rc9.11: adaptive recovery
 
 - Resume after one complete segment for an isolated underrun.
 - After another underrun within 90 seconds, try to collect two segments.
@@ -89,6 +89,13 @@ the New 3DS.
 The desired reserve will be derived from segment duration, commit-gap jitter,
 download headroom, and recent underruns, then clamped to 2.5--12 seconds and
 128 KiB--3 MiB.
+
+Implemented in rc9.11. The reader still enters recovery only after the
+compressed ring reaches a real zero-byte underrun. An isolated underrun waits
+for one complete segment; another within 90 seconds requests the larger of two
+recent segments or the shadow controller's desired reserve, capped at 3 MiB.
+If the deeper target is not available, readable complete data is released
+after the target duration plus two seconds, bounded to 2.5--8 seconds.
 
 ## Session profiles
 

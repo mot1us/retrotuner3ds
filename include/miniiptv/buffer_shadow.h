@@ -82,6 +82,11 @@ typedef struct {
     uint8_t recommended_lag_segments;
 } MiniIptvBufferShadowSnapshot;
 
+typedef struct {
+    uint32_t target_bytes;
+    uint32_t maximum_wait_ms;
+} MiniIptvRecoveryPlan;
+
 void miniiptv_buffer_shadow_reset(MiniIptvBufferShadow *shadow,
                                   uint32_t target_duration_ms);
 void miniiptv_buffer_shadow_set_target(MiniIptvBufferShadow *shadow,
@@ -111,6 +116,11 @@ void miniiptv_buffer_shadow_snapshot(const MiniIptvBufferShadow *shadow,
                                      uint64_t now_ms,
                                      bool rebuffering,
                                      MiniIptvBufferShadowSnapshot *snapshot);
+void miniiptv_buffer_shadow_recovery_plan(
+    const MiniIptvBufferShadowSnapshot *snapshot,
+    uint32_t last_segment_bytes,
+    uint32_t target_duration_ms,
+    MiniIptvRecoveryPlan *plan);
 const char *miniiptv_buffer_shadow_state_label(
     MiniIptvBufferShadowState state);
 

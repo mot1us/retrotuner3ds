@@ -35,6 +35,7 @@ typedef struct {
 	uint32_t video_packets;
 	uint32_t decoded_frames;
 	uint32_t textures;
+	uint32_t presented_frames;
 	uint32_t audio_demux_packets;
 	uint32_t audio_frames;
 	uint32_t audio_buffers;

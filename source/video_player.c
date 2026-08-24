@@ -596,6 +596,7 @@ typedef struct
 	volatile uint32_t live_video_packets;			//Live packets accepted by the video decoder.
 	volatile uint32_t live_decoded_frames;			//Live raw frames emitted by MVD.
 	volatile uint32_t live_textures;					//Live frames published as textures.
+	volatile uint32_t live_presented_frames;		//Live textures selected by the draw owner.
 	volatile uint32_t live_audio_demux_packets;		//Live audio packets identified by FFmpeg.
 	volatile uint32_t live_audio_frames;			//Live audio frames decoded successfully.
 	volatile uint32_t live_audio_buffers;			//Live audio buffers queued to DSP.
@@ -900,6 +901,10 @@ static void Vid_draw_miniiptv_live_overlay(void)
 	log_sample.valid_samples = live_info.shadow.valid_samples;
 	log_sample.headroom_permille = live_info.shadow.headroom_permille;
 	log_sample.desired_reserve_ms = live_info.shadow.desired_reserve_ms;
+	log_sample.rebuffer_target_bytes =
+		(uint32_t)live_info.rebuffer_target_bytes;
+	log_sample.rebuffer_wait_limit_ms =
+		live_info.rebuffer_wait_limit_milliseconds;
 	log_sample.recommended_lag_segments =
 		live_info.shadow.recommended_lag_segments;
 	log_sample.applied_lag_segments = live_info.startup_lag_segments;
@@ -923,6 +928,16 @@ static void Vid_draw_miniiptv_live_overlay(void)
 	log_sample.heap_used_bytes = vid_miniptv_memory_stats.heap_used_bytes;
 	log_sample.linear_total_bytes = vid_miniptv_memory_stats.linear_total_bytes;
 	log_sample.linear_free_bytes = vid_miniptv_memory_stats.linear_free_bytes;
+	log_sample.video_packets = diagnostics.video_packets;
+	log_sample.video_decoded_frames = diagnostics.decoded_frames;
+	log_sample.video_textures = diagnostics.textures;
+	log_sample.video_presented_frames = diagnostics.presented_frames;
+	log_sample.audio_tracks = diagnostics.audio_tracks;
+	log_sample.audio_state = diagnostics.audio_state;
+	log_sample.audio_demux_packets = diagnostics.audio_demux_packets;
+	log_sample.audio_frames = diagnostics.audio_frames;
+	log_sample.audio_buffers = diagnostics.audio_buffers;
+	log_sample.audio_last_error = diagnostics.audio_last_error;
 	log_sample.last_error = live_error;
 	log_sample.rebuffering = live_info.rebuffering != 0;
 	log_sample.periodic = true;
@@ -1051,11 +1066,11 @@ static void Vid_draw_miniiptv_live_overlay(void)
 				DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 304, 16);
 			if(!has_presented_frame)
 				snprintf(line, sizeof(line),
-					"V:%lu>%lu>%lu>%u A%u:%s %lu>%lu>%lu E:%08lX",
+				"V:%lu>%lu>%lu>%lu A%u:%s %lu>%lu>%lu E:%08lX",
 					(unsigned long)diagnostics.video_packets,
 					(unsigned long)diagnostics.decoded_frames,
 					(unsigned long)diagnostics.textures,
-					diagnostics.presented ? 1u : 0u,
+					(unsigned long)diagnostics.presented_frames,
 					diagnostics.audio_tracks,
 					Vid_live_audio_state_label(diagnostics.audio_state),
 					(unsigned long)diagnostics.audio_demux_packets,
@@ -2267,6 +2282,7 @@ static void Vid_reset_live_diagnostics(void)
 	__atomic_store_n(&vid_player.live_video_packets, 0, __ATOMIC_RELEASE);
 	__atomic_store_n(&vid_player.live_decoded_frames, 0, __ATOMIC_RELEASE);
 	__atomic_store_n(&vid_player.live_textures, 0, __ATOMIC_RELEASE);
+	__atomic_store_n(&vid_player.live_presented_frames, 0, __ATOMIC_RELEASE);
 	__atomic_store_n(&vid_player.live_audio_demux_packets, 0, __ATOMIC_RELEASE);
 	__atomic_store_n(&vid_player.live_audio_frames, 0, __ATOMIC_RELEASE);
 	__atomic_store_n(&vid_player.live_audio_buffers, 0, __ATOMIC_RELEASE);
@@ -2290,6 +2306,8 @@ void Vid_query_live_diagnostics(Vid_live_diagnostics* diagnostics)
 		&vid_player.live_decoded_frames, __ATOMIC_ACQUIRE);
 	diagnostics->textures = __atomic_load_n(
 		&vid_player.live_textures, __ATOMIC_ACQUIRE);
+	diagnostics->presented_frames = __atomic_load_n(
+		&vid_player.live_presented_frames, __ATOMIC_ACQUIRE);
 	diagnostics->audio_demux_packets = __atomic_load_n(
 		&vid_player.live_audio_demux_packets, __ATOMIC_ACQUIRE);
 	diagnostics->audio_frames = __atomic_load_n(
@@ -2558,6 +2576,9 @@ void Vid_main(void)
 							}
 
 							Draw_set_refresh_needed(true);
+							if(miniiptv_live_stream_is_active())
+								__atomic_add_fetch(&vid_player.live_presented_frames, 1,
+									__ATOMIC_ACQ_REL);
 							vid_player.vps_cache[i]++;
 							vid_player.last_video_frame_updated_ts[i] = current_ts;
 						}

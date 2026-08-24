@@ -111,13 +111,17 @@ int miniiptv_telemetry_log_open(const char *path, const char *version,
     static const char header[] =
         "version,elapsed_ms,event,channel,app_state,tune_phase,shadow_state,"
         "producer_state,width,height,ring_bytes,buffered_ms,network_bps,"
-        "content_bps,samples,headroom_permille,want_ms,lag_segments,"
+        "content_bps,samples,headroom_permille,want_ms,rebuffer_target_bytes,"
+        "rebuffer_wait_limit_ms,lag_segments,"
         "applied_lag_segments,profile_hit,segment_ms,download_ms,gap_ms,"
         "jitter_ms,rebuffering,recent_underruns,"
         "total_underruns,global_underruns,downloaded_segments,no_new_streak,"
         "ring_min_bytes,ring_max_bytes,last_refill_ms,last_refill_commits,"
         "app_region_total_bytes,heap_total_bytes,heap_used_bytes,"
         "linear_total_bytes,linear_free_bytes,"
+        "video_packets,video_decoded_frames,video_textures,"
+        "video_presented_frames,audio_tracks,audio_state,"
+        "audio_demux_packets,audio_frames,audio_buffers,audio_last_error,"
         "last_error\n";
     if (!path || !version) return -1;
     miniiptv_telemetry_log_close();
@@ -210,8 +214,11 @@ void miniiptv_telemetry_log_record(
         ",%" PRIu64 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32
         ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32
         ",%" PRIu32 ",%" PRIu32
+        ",%" PRIu32 ",%" PRIu32
         ",%" PRIu32 ",%" PRIu32 ",%u,%" PRIu32 ",%" PRIu32 ",%" PRIu64
         ",%" PRIu64 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32
+        ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32
+        ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32
         ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32
         ",%" PRIu32 ",%" PRId64 "\n",
         version, elapsed_ms, event, channel, app_state, tune_phase,
@@ -219,6 +226,7 @@ void miniiptv_telemetry_log_record(
         sample->ring_bytes, sample->buffered_ms, sample->network_bps,
         sample->content_bps, sample->valid_samples,
         sample->headroom_permille, sample->desired_reserve_ms,
+        sample->rebuffer_target_bytes, sample->rebuffer_wait_limit_ms,
         sample->recommended_lag_segments, sample->applied_lag_segments,
         sample->adaptive_profile_hit, sample->segment_ms,
         sample->download_ms, sample->commit_gap_ms,
@@ -230,6 +238,11 @@ void miniiptv_telemetry_log_record(
         sample->last_refill_commits, sample->app_region_total_bytes,
         sample->heap_total_bytes, sample->heap_used_bytes,
         sample->linear_total_bytes, sample->linear_free_bytes,
+        sample->video_packets, sample->video_decoded_frames,
+        sample->video_textures, sample->video_presented_frames,
+        sample->audio_tracks, sample->audio_state,
+        sample->audio_demux_packets, sample->audio_frames,
+        sample->audio_buffers, sample->audio_last_error,
         recorded_error);
     if (length <= 0 || (size_t)length >= sizeof(line) ||
         !append_line(line, (size_t)length))

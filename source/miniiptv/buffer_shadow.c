@@ -17,6 +17,12 @@
 #define SHADOW_DESIRED_MAX_BYTES (3u * 1024u * 1024u)
 #define SHADOW_DESIRED_MIN_MS 2500u
 #define SHADOW_DESIRED_MAX_MS 12000u
+#define RECOVERY_MIN_BYTES (128u * 1024u)
+#define RECOVERY_MAX_BYTES (3u * 1024u * 1024u)
+#define RECOVERY_DEFAULT_TARGET_MS 6000u
+#define RECOVERY_WAIT_GUARD_MS 2000u
+#define RECOVERY_WAIT_MIN_MS 2500u
+#define RECOVERY_WAIT_MAX_MS 8000u
 
 static uint32_t saturating_add_u32(uint32_t left, uint32_t right) {
     return right > UINT32_MAX - left ? UINT32_MAX : left + right;
@@ -373,6 +379,37 @@ void miniiptv_buffer_shadow_snapshot(const MiniIptvBufferShadow *shadow,
     snapshot->last_refill_ms = shadow->last_refill_ms;
     snapshot->total_refill_ms = shadow->total_refill_ms;
     snapshot->last_refill_commits = shadow->last_refill_commits;
+}
+
+void miniiptv_buffer_shadow_recovery_plan(
+    const MiniIptvBufferShadowSnapshot *snapshot,
+    uint32_t last_segment_bytes,
+    uint32_t target_duration_ms,
+    MiniIptvRecoveryPlan *plan) {
+    uint64_t target;
+    uint64_t wait;
+    if (!plan) return;
+    memset(plan, 0, sizeof(*plan));
+
+    target = last_segment_bytes > 0
+        ? last_segment_bytes
+        : (snapshot && snapshot->desired_reserve_bytes > 0
+            ? snapshot->desired_reserve_bytes : RECOVERY_MIN_BYTES);
+    if (snapshot && snapshot->recent_underruns >= 2u) {
+        target *= 2u;
+        if (target < snapshot->desired_reserve_bytes)
+            target = snapshot->desired_reserve_bytes;
+    }
+    if (target < RECOVERY_MIN_BYTES) target = RECOVERY_MIN_BYTES;
+    if (target > RECOVERY_MAX_BYTES) target = RECOVERY_MAX_BYTES;
+    plan->target_bytes = (uint32_t)target;
+
+    wait = (uint64_t)(target_duration_ms > 0
+        ? target_duration_ms : RECOVERY_DEFAULT_TARGET_MS)
+        + RECOVERY_WAIT_GUARD_MS;
+    if (wait < RECOVERY_WAIT_MIN_MS) wait = RECOVERY_WAIT_MIN_MS;
+    if (wait > RECOVERY_WAIT_MAX_MS) wait = RECOVERY_WAIT_MAX_MS;
+    plan->maximum_wait_ms = (uint32_t)wait;
 }
 
 const char *miniiptv_buffer_shadow_state_label(

@@ -43,6 +43,9 @@ typedef struct {
     bool stop_requested;
     bool producer_running;
     bool rebuffering;
+    size_t rebuffer_target_bytes;
+    uint64_t rebuffer_deadline_ms;
+    uint32_t rebuffer_wait_limit_ms;
     bool reader_started;
     bool rendition_cache_hit;
     bool adaptive_profile_hit;
@@ -392,6 +395,8 @@ static unsigned long effective_bandwidth_locked(void) {
 static size_t rebuffer_target_bytes_locked(void) {
     unsigned long bandwidth = effective_bandwidth_locked();
     uint64_t target;
+    if (stream.rebuffering && stream.rebuffer_target_bytes > 0)
+        return stream.rebuffer_target_bytes;
     if (bandwidth == 0) return STREAM_REBUFFER_MAX_BYTES;
     target = ((uint64_t)bandwidth * STREAM_REBUFFER_TARGET_MS) / 8000u;
     if (target < STREAM_REBUFFER_MIN_BYTES) target = STREAM_REBUFFER_MIN_BYTES;
@@ -1225,14 +1230,32 @@ int miniiptv_live_stream_read(unsigned char *buffer, int buffer_size) {
         if (stream.bytes_read > 0 && available == 0 &&
             !stream.rebuffering && !finished) {
             uint64_t now = osGetTime();
+            uint32_t target_duration_ms;
+            MiniIptvBufferShadowSnapshot snapshot;
+            MiniIptvRecoveryPlan recovery;
             stream.rebuffering = true;
             stream.underruns++;
             miniiptv_buffer_shadow_note_ring(&stream.buffer_shadow, 0, true);
             miniiptv_buffer_shadow_begin_refill(&stream.buffer_shadow, now);
+            miniiptv_buffer_shadow_snapshot(&stream.buffer_shadow, now, true,
+                                            &snapshot);
+            target_duration_ms = stream.target_duration > UINT32_MAX / 1000u
+                ? UINT32_MAX : stream.target_duration * 1000u;
+            miniiptv_buffer_shadow_recovery_plan(
+                &snapshot, (uint32_t)stream.last_segment_bytes,
+                target_duration_ms, &recovery);
+            stream.rebuffer_target_bytes = recovery.target_bytes;
+            stream.rebuffer_wait_limit_ms = recovery.maximum_wait_ms;
+            stream.rebuffer_deadline_ms = now + recovery.maximum_wait_ms;
+            rebuffer_target = stream.rebuffer_target_bytes;
         }
-        if (stream.rebuffering && available >= rebuffer_target) {
+        if (stream.rebuffering &&
+            (available >= rebuffer_target ||
+             (available > 0 && stream.rebuffer_deadline_ms > 0 &&
+              osGetTime() >= stream.rebuffer_deadline_ms))) {
             uint64_t now = osGetTime();
             stream.rebuffering = false;
+            stream.rebuffer_deadline_ms = 0;
             miniiptv_buffer_shadow_end_refill(&stream.buffer_shadow, now);
             miniiptv_buffer_shadow_note_ring(&stream.buffer_shadow,
                 (uint32_t)available, true);
@@ -1303,6 +1326,7 @@ void miniiptv_live_stream_get_info(MiniIptvLiveInfo *info) {
     info->last_download_milliseconds = stream.last_download_milliseconds;
     info->last_segment_milliseconds = stream.last_segment_milliseconds;
     info->rebuffer_target_bytes = rebuffer_target_bytes_locked();
+    info->rebuffer_wait_limit_milliseconds = stream.rebuffer_wait_limit_ms;
     info->buffered_milliseconds = buffered_milliseconds_locked();
     info->width = stream.variant_width;
     info->height = stream.variant_height;

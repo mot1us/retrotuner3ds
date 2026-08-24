@@ -240,10 +240,10 @@ void Menu_init(void)
 
 	//Init screen.
 	Draw_frame_ready();
-	Draw_screen_ready(DRAW_SCREEN_TOP_LEFT, DEF_DRAW_WHITE);
-	Draw_top_ui(false, false, DEF_SEM_WIFI_SIGNAL_DISABLED, 0, NULL);
-	Draw_screen_ready(DRAW_SCREEN_BOTTOM, DEF_DRAW_WHITE);
-	Draw_bot_ui();
+	/* RetroTuner is standalone. Keep the first drawable frame dark and free of
+	 * the inherited clock/battery/Wi-Fi chrome while the player initializes. */
+	Draw_screen_ready(DRAW_SCREEN_TOP_LEFT, 0xFF21160F);
+	Draw_screen_ready(DRAW_SCREEN_BOTTOM, 0xFF21160F);
 	Draw_apply_draw();
 	Sem_draw_init();
 

@@ -24,7 +24,10 @@
 int main(void)
 {
 	Menu_init();
-	Vid_init(true);
+	MiniIptv_live_app_draw_boot_screen();
+	/* Keep the RetroTuner splash visible while the synchronous player init
+	 * runs; the inherited init renderer would otherwise repaint both screens. */
+	Vid_init(false);
 	Vid_enable_standalone_mode();
 	MiniIptv_live_app_init();
 

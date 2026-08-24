@@ -23,6 +23,8 @@ typedef struct {
     uint32_t valid_samples;
     uint32_t headroom_permille;
     uint32_t desired_reserve_ms;
+    uint32_t rebuffer_target_bytes;
+    uint32_t rebuffer_wait_limit_ms;
     uint32_t recommended_lag_segments;
     uint32_t applied_lag_segments;
     uint32_t adaptive_profile_hit;
@@ -42,6 +44,16 @@ typedef struct {
     uint32_t heap_used_bytes;
     uint32_t linear_total_bytes;
     uint32_t linear_free_bytes;
+    uint32_t video_packets;
+    uint32_t video_decoded_frames;
+    uint32_t video_textures;
+    uint32_t video_presented_frames;
+    uint32_t audio_tracks;
+    uint32_t audio_state;
+    uint32_t audio_demux_packets;
+    uint32_t audio_frames;
+    uint32_t audio_buffers;
+    uint32_t audio_last_error;
     int64_t last_error;
     bool rebuffering;
     bool periodic;

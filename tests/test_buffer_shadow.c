@@ -263,6 +263,36 @@ static void test_exact_thresholds_and_caps(void) {
     assert(value.desired_reserve_bytes == KIB(1984));
 }
 
+static void test_adaptive_recovery_plan(void) {
+    MiniIptvBufferShadow shadow;
+    MiniIptvBufferShadowSnapshot value;
+    MiniIptvRecoveryPlan plan;
+
+    miniiptv_buffer_shadow_reset(&shadow, 4000u);
+    miniiptv_buffer_shadow_begin_refill(&shadow, 1000u);
+    value = snapshot_at(&shadow, 1000u, 1);
+    miniiptv_buffer_shadow_recovery_plan(&value, KIB(256), 4000u, &plan);
+    assert(plan.target_bytes == KIB(256));
+    assert(plan.maximum_wait_ms == 6000u);
+    miniiptv_buffer_shadow_end_refill(&shadow, 1500u);
+
+    miniiptv_buffer_shadow_begin_refill(&shadow, 2000u);
+    value = snapshot_at(&shadow, 2000u, 1);
+    miniiptv_buffer_shadow_recovery_plan(&value, KIB(256), 9000u, &plan);
+    assert(plan.target_bytes >= KIB(512));
+    assert(plan.target_bytes <= KIB(3072));
+    assert(plan.maximum_wait_ms == 8000u);
+
+    value.recent_underruns = 4u;
+    value.desired_reserve_bytes = UINT32_MAX;
+    miniiptv_buffer_shadow_recovery_plan(&value, UINT32_MAX, 1u, &plan);
+    assert(plan.target_bytes == KIB(3072));
+    assert(plan.maximum_wait_ms == 2500u);
+
+    miniiptv_buffer_shadow_recovery_plan(&value, KIB(256), UINT32_MAX, &plan);
+    assert(plan.maximum_wait_ms == 8000u);
+}
+
 int main(void) {
     test_cold_and_known_sample();
     test_states_and_risk_hysteresis();
@@ -271,6 +301,7 @@ int main(void) {
     test_bounds_invalid_samples_and_polls();
     test_zero_download_and_rate_extremes();
     test_exact_thresholds_and_caps();
+    test_adaptive_recovery_plan();
     puts("buffer shadow tests passed");
     return 0;
 }

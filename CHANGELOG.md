@@ -5,6 +5,13 @@ versioning while the player remains experimental.
 
 ## [Unreleased]
 
+- Replace the inherited white startup/status-bar frame with a RetroTuner boot
+  screen, and log FFmpeg, MVD, texture, presentation, and audio counters for
+  diagnosing full-network-ring stalls.
+- Apply bounded adaptive underrun recovery: one segment after an isolated
+  underrun, a larger two-segment/desired-reserve target after a repeat within
+  90 seconds, and a 2.5--8 second fallback when the deeper reserve is not yet
+  published.
 - Add low-frequency, allocation-free memory telemetry for the application
   region, ordinary heap, and linear heap; also preserve signed player errors in
   the CSV diagnostics.

@@ -67,6 +67,12 @@ by video, FFmpeg, and larger wrapped allocations; `app_region_total_bytes`
 identifies the process memory layout. The sampler reads allocator counters and
 never allocates test blocks.
 
+The CSV's `video_packets`, `video_decoded_frames`, `video_textures`, and
+`video_presented_frames` columns locate a downstream video stall. Audio uses
+`audio_tracks`, `audio_state`, `audio_demux_packets`, `audio_frames`,
+`audio_buffers`, and `audio_last_error`. These are existing atomic counters;
+logging them adds no decoder-thread work.
+
 The rc9.7 `SHADOW` page reports what a future adaptive-buffer controller would
 choose while leaving the actual player unchanged:
 
@@ -133,7 +139,7 @@ temporary directory, tests and builds that clean snapshot, and refuses to
 include playlists:
 
 ```sh
-./scripts/package-release.sh 0.5.1-rc9.10
+./scripts/package-release.sh 0.5.1-rc9.11
 ```
 
 The argument must exactly match `RETROTUNER_VERSION` in
