@@ -59,8 +59,10 @@ name, pipeline state, compressed-ring depth, segment delivery timing, shadow
 buffer recommendations, applied startup lag, warm/cold profile state,
 underruns, and errors. Normal channel-switch cancellation is not recorded as
 an error. It never records stream URLs, video, or audio. Rows are buffered in
-ordinary RAM, flushed every ten seconds
-and on important events, and capped at 512 KiB. If logging cannot be opened,
+ordinary RAM and sampled every two seconds for the first minute after launch
+or a channel change, then every ten seconds. State changes, errors, underruns,
+and channel changes are recorded immediately. Data is flushed every ten
+seconds and on important events, and capped at 512 KiB. If logging cannot be opened,
 playback continues normally and the channel deck reports LOG OFF.
 
 During one app session, channels with at least three validated segment samples
@@ -91,7 +93,8 @@ expected location instead of loading bundled stations.
 RetroTuner3DS currently targets:
 
 - live HLS using MPEG-TS segments;
-- H.264/AVC video and AAC audio;
+- H.264/AVC video and AAC audio, either multiplexed together or published as
+  aligned MPEG-TS HLS audio/video renditions;
 - unencrypted streams without byte ranges, discontinuities, or fMP4 init maps;
 - New 3DS hardware decoding;
 - low-resolution, low-bitrate variants.

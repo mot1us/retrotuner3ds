@@ -40,6 +40,24 @@ static void test_incompatible_low_variant_is_skipped(void) {
     assert(strcmp(selection.url, "https://example.test/safe/h264.m3u8") == 0);
 }
 
+static void test_separate_audio_rendition_is_resolved(void) {
+    static const char manifest[] =
+        "#EXTM3U\n"
+        "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"stereo\",NAME=\"English\","
+        "DEFAULT=YES,URI=\"audio/live.m3u8?token=1\"\n"
+        "#EXT-X-STREAM-INF:BANDWIDTH=400000,RESOLUTION=640x360,"
+        "CODECS=\"avc1.64001e,mp4a.40.2\",AUDIO=\"stereo\"\n"
+        "video/360.m3u8\n";
+    HlsSelection selection;
+
+    assert(hls_select_stream(manifest,
+        "https://example.test/root/master.m3u8", &selection) == 0);
+    assert(selection.has_separate_audio == 1);
+    assert(strcmp(selection.audio_group, "stereo") == 0);
+    assert(strcmp(selection.audio_url,
+        "https://example.test/root/audio/live.m3u8?token=1") == 0);
+}
+
 static void test_media_playlist_flags_and_window(void) {
     static const char manifest[] =
         "#EXTM3U\n"
@@ -76,6 +94,27 @@ static void test_media_playlist_flags_and_window(void) {
     assert(playlist.segments[7].sequence == 48);
     assert(strcmp(playlist.segments[7].url,
                   "https://example.test/path/s8.ts") == 0);
+}
+
+static void test_program_date_time_is_attached_to_next_segment(void) {
+    static const char manifest[] =
+        "#EXTM3U\n"
+        "#EXT-X-MEDIA-SEQUENCE:7\n"
+        "#EXTINF:4.0,\n"
+        "#EXT-X-PROGRAM-DATE-TIME:2026-08-24T18:34:10.086Z\n"
+        "s0.ts\n"
+        "#EXTINF:4.0,\n"
+        "#EXT-X-PROGRAM-DATE-TIME:2026-08-24T10:34:14.086-08:00\n"
+        "s1.ts\n";
+    HlsMediaPlaylist playlist;
+
+    assert(hls_parse_media_playlist(manifest,
+        "https://example.test/live/index.m3u8", &playlist) == 0);
+    assert(playlist.count == 2u);
+    assert(playlist.segments[0].has_program_date_time == 1);
+    assert(playlist.segments[1].has_program_date_time == 1);
+    assert(playlist.segments[1].program_date_time_ms -
+           playlist.segments[0].program_date_time_ms == 4000);
 }
 
 static void test_key_method_is_parsed_as_an_attribute(void) {
@@ -140,7 +179,9 @@ static void test_url_resolution(void) {
 int main(void) {
     test_peak_bandwidth_is_not_average_bandwidth();
     test_incompatible_low_variant_is_skipped();
+    test_separate_audio_rendition_is_resolved();
     test_media_playlist_flags_and_window();
+    test_program_date_time_is_attached_to_next_segment();
     test_key_method_is_parsed_as_an_attribute();
     test_invalid_duration_is_not_a_segment();
     test_url_resolution();

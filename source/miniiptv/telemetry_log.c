@@ -7,7 +7,9 @@
 #include "miniiptv/hls_prefetch.h"
 
 #define LOG_BUFFER_BYTES 8192u
-#define LOG_SAMPLE_INTERVAL_MS 1000u
+#define LOG_FAST_SAMPLE_INTERVAL_MS 2000u
+#define LOG_STEADY_SAMPLE_INTERVAL_MS 10000u
+#define LOG_FAST_WINDOW_MS 60000u
 #define LOG_FLUSH_INTERVAL_MS 10000u
 #define LOG_VERSION_BYTES 32u
 #define LOG_CHANNEL_BYTES 128u
@@ -26,6 +28,7 @@ typedef struct {
     size_t bytes_written;
     uint64_t session_started_ms;
     uint64_t last_sample_ms;
+    uint64_t fast_sampling_until_ms;
     uint64_t last_flush_ms;
     uint64_t last_global_underruns;
     int64_t last_error;
@@ -131,6 +134,7 @@ int miniiptv_telemetry_log_open(const char *path, const char *version,
     (void)setvbuf(telemetry_log.file, NULL, _IONBF, 0);
     copy_text(telemetry_log.version, sizeof(telemetry_log.version), version);
     telemetry_log.session_started_ms = now_ms;
+    telemetry_log.fast_sampling_until_ms = now_ms + LOG_FAST_WINDOW_MS;
     telemetry_log.last_flush_ms = now_ms;
     if (!append_line(header, sizeof(header) - 1u) || !flush_buffer()) {
         miniiptv_telemetry_log_close();
@@ -157,6 +161,7 @@ void miniiptv_telemetry_log_record(
     bool error_changed;
     bool sample_due;
     bool urgent;
+    uint64_t sample_interval_ms;
     int64_t recorded_error;
     int length;
 
@@ -182,11 +187,15 @@ void miniiptv_telemetry_log_record(
     error_changed = recorded_error != 0 &&
         (!telemetry_log.has_last ||
          recorded_error != telemetry_log.last_error);
+    if (channel_changed)
+        telemetry_log.fast_sampling_until_ms = now_ms + LOG_FAST_WINDOW_MS;
+    sample_interval_ms = now_ms <= telemetry_log.fast_sampling_until_ms
+        ? LOG_FAST_SAMPLE_INTERVAL_MS : LOG_STEADY_SAMPLE_INTERVAL_MS;
     sample_due = !telemetry_log.has_last ||
         (sample->periodic &&
          (now_ms < telemetry_log.last_sample_ms ||
           now_ms - telemetry_log.last_sample_ms >=
-              LOG_SAMPLE_INTERVAL_MS));
+              sample_interval_ms));
 
     if (!telemetry_log.has_last)
         event = "START";

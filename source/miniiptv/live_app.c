@@ -205,6 +205,8 @@ static const char *stage_error_text(int result) {
             return "SEGMENT TOO LARGE // TRY ANOTHER SIGNAL";
         case MINIIPTV_STAGE_DISCONTINUITY:
             return "SIGNAL CHANGED // PRESS A TO RETRY";
+        case MINIIPTV_STAGE_TS_MUX_FAILED:
+            return "SEPARATE AUDIO UNSUPPORTED // TRY ANOTHER SIGNAL";
         default:
             return "TUNING FAILED // PRESS A TO RETRY";
     }
@@ -271,6 +273,9 @@ static void player_error(uint32_t error_code) {
     else if ((int32_t)error_code == MINIIPTV_STAGE_UNSUPPORTED_HLS)
         snprintf(app.status, sizeof(app.status),
                  "SIGNAL REJECTED // H264 YUV420 REQUIRED");
+    else if ((int32_t)error_code == MINIIPTV_STAGE_TS_MUX_FAILED)
+        snprintf(app.status, sizeof(app.status),
+                 "SEPARATE AUDIO COULD NOT SYNC");
     else if (error_code == DEF_ERR_UNSAFE_VIDEO_STREAM)
         snprintf(app.status, sizeof(app.status),
                  "SIGNAL FORMAT CHANGED // STOPPED FOR SAFETY");

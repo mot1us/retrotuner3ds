@@ -67,15 +67,15 @@ static void test_rows_and_events(void) {
     sample.audio_last_error = 0x1234u;
     miniiptv_telemetry_log_record(1000, &sample);
     miniiptv_telemetry_log_record(1500, &sample);
-    miniiptv_telemetry_log_record(2000, &sample);
+    miniiptv_telemetry_log_record(3000, &sample);
     sample.shadow_state = "FILL";
     sample.global_underruns = 1u;
     sample.total_underruns = 1u;
-    miniiptv_telemetry_log_record(2100, &sample);
+    miniiptv_telemetry_log_record(3100, &sample);
     sample.last_error = -7;
-    miniiptv_telemetry_log_record(2200, &sample);
+    miniiptv_telemetry_log_record(3200, &sample);
     sample.last_error = -12;
-    miniiptv_telemetry_log_record(3000, &sample);
+    miniiptv_telemetry_log_record(4000, &sample);
     miniiptv_telemetry_log_close();
 
     data = read_file(path, NULL);

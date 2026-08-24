@@ -9,6 +9,7 @@
 
 #include "miniiptv/hls.h"
 #include "miniiptv/network.h"
+#include "miniiptv/ts_mux.h"
 #include "system/util/thread_types.h"
 #include "system/util/util.h"
 
@@ -24,6 +25,7 @@
 #define STREAM_RENDITION_CACHE_ENTRIES 4u
 #define STREAM_RENDITION_CACHE_TTL_MS 60000ULL
 #define STREAM_ADAPTIVE_PROFILE_ENTRIES 32u
+#define STREAM_AUDIO_SEGMENT_LIMIT (1u * 1024u * 1024u)
 #define TS_PACKET_SIZE 188u
 
 #if MINIIPTV_SEGMENT_LIMIT >= STREAM_RING_SIZE
@@ -38,6 +40,7 @@ typedef struct {
     LightLock lock;
     MiniIptvChannel channel;
     char media_url[MINIIPTV_HLS_URL_MAX];
+    char audio_media_url[MINIIPTV_HLS_URL_MAX];
     Thread producer;
     bool initialized;
     bool stop_requested;
@@ -64,8 +67,11 @@ typedef struct {
      * playlist.  Keep one bounded, owned snapshot so the producer can stage
      * its still-new segments before issuing another manifest request. */
     HlsMediaPlaylist producer_seed;
+    HlsMediaPlaylist audio_producer_seed;
     bool producer_seed_available;
+    bool separate_audio;
     unsigned long last_sequence;
+    unsigned long last_audio_sequence;
     size_t ring_read;
     size_t ring_write;
     size_t ring_count;
@@ -94,6 +100,7 @@ typedef struct {
     char user_agent[MINIIPTV_HEADER_MAX];
     char referrer[MINIIPTV_HEADER_MAX];
     char media_url[MINIIPTV_HLS_URL_MAX];
+    char audio_media_url[MINIIPTV_HLS_URL_MAX];
     unsigned long bandwidth;
     unsigned int width;
     unsigned int height;
@@ -111,6 +118,8 @@ typedef struct {
 } AdaptiveProfileEntry;
 
 typedef struct {
+    unsigned char *destination;
+    size_t capacity;
     size_t total_size;
     bool report_tune_progress;
 } SegmentWriter;
@@ -130,6 +139,8 @@ static unsigned char stream_ring[STREAM_RING_SIZE];
 /* Commit complete segments atomically. A failed/truncated HTTP transfer must
  * never leave a partial access unit in the ring where FFmpeg/MVD can see it. */
 static unsigned char segment_staging[MINIIPTV_SEGMENT_LIMIT];
+static unsigned char audio_segment_staging[STREAM_AUDIO_SEGMENT_LIMIT];
+static unsigned char mux_segment_staging[MINIIPTV_SEGMENT_LIMIT];
 static LiveStream stream;
 static TuneTimeline tune_timeline;
 /* Repeat tunes can bypass one unchanged master-manifest request. This cache is
@@ -530,18 +541,23 @@ static bool ring_commit_segment(const unsigned char *data, size_t size) {
 static size_t segment_write_callback(const unsigned char *data, size_t size,
                                      void *userdata) {
     SegmentWriter *writer = userdata;
-    if (!writer || (!data && size)) return 0;
-    if (size > MINIIPTV_SEGMENT_LIMIT - writer->total_size) return 0;
-    memcpy(segment_staging + writer->total_size, data, size);
+    if (!writer || !writer->destination || (!data && size)) return 0;
+    if (writer->total_size > writer->capacity) return 0;
+    if (size > writer->capacity - writer->total_size) return 0;
+    memcpy(writer->destination + writer->total_size, data, size);
     writer->total_size += size;
     if (writer->report_tune_progress)
         miniiptv_live_tune_segment_progress(writer->total_size, 0);
     return size;
 }
 
-static int stream_segment(const HlsSegment *segment, size_t *downloaded_size) {
-    SegmentWriter writer;
+static int stream_segment(const HlsSegment *segment,
+                          const HlsSegment *audio_segment,
+                          size_t *downloaded_size) {
+    SegmentWriter writer = {0};
+    SegmentWriter audio_writer = {0};
     NetworkStreamMetrics metrics = {0};
+    NetworkStreamMetrics audio_metrics = {0};
     uint64_t download_started;
     uint64_t download_finished;
     uint64_t download_elapsed;
@@ -553,11 +569,14 @@ static int stream_segment(const HlsSegment *segment, size_t *downloaded_size) {
     bool too_large = false;
     bool valid_ts = false;
     bool committed = false;
+    bool mux_failed = false;
+    size_t committed_size = 0;
     int result;
     if (!segment) return MINIIPTV_STAGE_INVALID_ARGUMENT;
     result = cancellation_result();
     if (result != MINIIPTV_STAGE_OK) return result;
-    memset(&writer, 0, sizeof(writer));
+    writer.destination = segment_staging;
+    writer.capacity = sizeof(segment_staging);
     LightLock_Lock(&stream.lock);
     writer.report_tune_progress = stream.initial_tune_active;
     LightLock_Unlock(&stream.lock);
@@ -579,15 +598,63 @@ static int stream_segment(const HlsSegment *segment, size_t *downloaded_size) {
     too_large = result == MINIIPTV_NETWORK_TOO_LARGE;
     if (result == 0 && metrics.received_size == writer.total_size)
         valid_ts = is_complete_mpeg_ts(segment_staging, writer.total_size);
-    if (result == 0 && valid_ts) {
+    if (result == 0 && valid_ts && stream.separate_audio) {
+        size_t mux_size = 0;
+        if (!audio_segment) {
+            result = MINIIPTV_STAGE_MEDIA_INVALID;
+        } else {
+            audio_writer.destination = audio_segment_staging;
+            audio_writer.capacity = sizeof(audio_segment_staging);
+            result = network_stream_data(
+                audio_segment->url, stream.channel.user_agent,
+                stream.channel.referrer, STREAM_AUDIO_SEGMENT_LIMIT,
+                segment_write_callback, &audio_writer, curl_should_cancel,
+                NULL, &audio_metrics);
+            if (result == -5) {
+                int cancelled = cancellation_result();
+                if (cancelled != MINIIPTV_STAGE_OK) result = cancelled;
+            }
+            if (result == MINIIPTV_NETWORK_TOO_LARGE)
+                too_large = true;
+            if (result == 0 &&
+                audio_metrics.received_size == audio_writer.total_size &&
+                is_complete_mpeg_ts(audio_segment_staging,
+                                    audio_writer.total_size)) {
+                if (miniiptv_ts_mux_av(
+                        segment_staging, writer.total_size,
+                        audio_segment_staging, audio_writer.total_size,
+                        mux_segment_staging, sizeof(mux_segment_staging),
+                        &mux_size) == 0) {
+                    committed = ring_commit_segment(mux_segment_staging,
+                                                    mux_size);
+                    committed_size = committed ? mux_size : 0u;
+                } else {
+                    mux_failed = true;
+                }
+            } else if (result == 0) {
+                result = MINIIPTV_STAGE_NOT_MPEG_TS;
+            }
+        }
+    } else if (result == 0 && valid_ts) {
         committed = ring_commit_segment(segment_staging, writer.total_size);
-        if (committed) commit_ms = osGetTime();
+        committed_size = committed ? writer.total_size : 0u;
     }
-    if (downloaded_size) *downloaded_size = committed ? writer.total_size : 0;
+    if (stream.separate_audio) {
+        download_finished = osGetTime();
+        download_clock_valid = download_finished >= download_started;
+        download_elapsed = download_clock_valid
+            ? download_finished - download_started : 0;
+        if (download_clock_valid && download_elapsed == 0)
+            download_elapsed = 1;
+    }
+    if (committed) commit_ms = osGetTime();
+    if (downloaded_size) *downloaded_size = committed_size;
 
     LightLock_Lock(&stream.lock);
-    stream.attempted_segment_bytes = metrics.received_size;
-    stream.reported_segment_bytes = metrics.reported_size;
+    stream.attempted_segment_bytes = metrics.received_size +
+        audio_metrics.received_size;
+    stream.reported_segment_bytes = metrics.reported_size +
+        audio_metrics.reported_size;
     stream.last_network_result = result;
     if (result == 0 && valid_ts && committed) {
         if (segment->duration > 0.0) {
@@ -602,12 +669,12 @@ static int stream_segment(const HlsSegment *segment, size_t *downloaded_size) {
         && download_elapsed <= STREAM_SHADOW_SAMPLE_MAX_DOWNLOAD_MS)
             shadow_download_ms = download_ms;
         stream.downloaded_segments++;
-        stream.last_segment_bytes = writer.total_size;
+        stream.last_segment_bytes = committed_size;
         stream.last_download_milliseconds = download_ms;
         stream.last_segment_milliseconds = duration_ms;
         if (download_ms > 0) {
             uint64_t network_bps =
-                ((uint64_t)writer.total_size * 8000u) / download_ms;
+                ((uint64_t)committed_size * 8000u) / download_ms;
             stream.network_bandwidth = network_bps > 0xffffffffu
                 ? 0xffffffffu : (unsigned long)network_bps;
         }
@@ -615,19 +682,24 @@ static int stream_segment(const HlsSegment *segment, size_t *downloaded_size) {
             stream.network_bandwidth = 0;
         }
         if (duration_ms > 0) {
-            stream.measured_segment_bytes += writer.total_size;
+            stream.measured_segment_bytes += committed_size;
             stream.measured_segment_milliseconds += duration_ms;
         }
         miniiptv_buffer_shadow_note_segment(&stream.buffer_shadow,
-            (uint32_t)writer.total_size, duration_ms, shadow_download_ms,
+            (uint32_t)committed_size, duration_ms, shadow_download_ms,
             commit_ms);
         stream.last_sequence = segment->sequence;
+        if (audio_segment)
+            stream.last_audio_sequence = audio_segment->sequence;
         stream.last_error = 0;
     } else {
         if (too_large) {
             stream.last_error = MINIIPTV_STAGE_TOO_LARGE;
             /* Retrying the same oversized live segment can never succeed and
              * would repeatedly consume bandwidth and staging time. */
+            stream.stop_requested = true;
+        } else if (mux_failed) {
+            stream.last_error = MINIIPTV_STAGE_TS_MUX_FAILED;
             stream.stop_requested = true;
         } else if (result == 0 && !valid_ts) {
             stream.last_error = MINIIPTV_STAGE_NOT_MPEG_TS;
@@ -637,6 +709,9 @@ static int stream_segment(const HlsSegment *segment, size_t *downloaded_size) {
         } else if (result == MINIIPTV_STAGE_CANCELLED ||
                    result == MINIIPTV_STAGE_TUNE_TIMEOUT) {
             stream.last_error = result;
+        } else if (result == MINIIPTV_STAGE_NOT_MPEG_TS) {
+            stream.last_error = MINIIPTV_STAGE_NOT_MPEG_TS;
+            stream.stop_requested = true;
         } else if (result != 0 || !committed) {
             stream.last_error = MINIIPTV_STAGE_SEGMENT_FETCH_FAILED;
         } else {
@@ -647,8 +722,9 @@ static int stream_segment(const HlsSegment *segment, size_t *downloaded_size) {
                                                     : stream.last_error;
     LightLock_Unlock(&stream.lock);
     if (writer.report_tune_progress)
-        miniiptv_live_tune_segment_progress(metrics.received_size,
-                                             metrics.reported_size);
+        miniiptv_live_tune_segment_progress(
+            metrics.received_size + audio_metrics.received_size,
+            metrics.reported_size + audio_metrics.reported_size);
     return result;
 }
 
@@ -734,6 +810,9 @@ static void rendition_cache_store(const MiniIptvChannel *channel,
              channel->referrer);
     snprintf(rendition_cache[slot].media_url,
              sizeof(rendition_cache[slot].media_url), "%s", media_url);
+    snprintf(rendition_cache[slot].audio_media_url,
+             sizeof(rendition_cache[slot].audio_media_url), "%s",
+             selection->audio_url);
     rendition_cache[slot].bandwidth = selection->bandwidth;
     rendition_cache[slot].width = selection->width;
     rendition_cache[slot].height = selection->height;
@@ -741,14 +820,15 @@ static void rendition_cache_store(const MiniIptvChannel *channel,
              sizeof(rendition_cache[slot].codecs), "%s", selection->codecs);
 }
 
-static int fetch_media_playlist(HlsMediaPlaylist *media) {
+static int fetch_playlist_url(char *playlist_url, size_t playlist_url_size,
+                              HlsMediaPlaylist *media) {
     NetworkTextResponse response = {0};
     const char *effective_url;
     int result;
     result = cancellation_result();
     if (result != MINIIPTV_STAGE_OK) return result;
     result = network_get_data_cancelable(
-        stream.media_url, stream.channel.user_agent, stream.channel.referrer,
+        playlist_url, stream.channel.user_agent, stream.channel.referrer,
         MINIIPTV_MANIFEST_LIMIT, curl_should_cancel, NULL, &response);
     if (result == -5) {
         result = cancellation_result();
@@ -761,17 +841,64 @@ static int fetch_media_playlist(HlsMediaPlaylist *media) {
         network_response_free(&response);
         return result;
     }
-    effective_url = response.final_url[0] ? response.final_url : stream.media_url;
+    effective_url = response.final_url[0] ? response.final_url : playlist_url;
     result = hls_parse_media_playlist(response.data, effective_url, media);
     if (result == 0 && response.final_url[0])
-        snprintf(stream.media_url, sizeof(stream.media_url), "%s",
-                 response.final_url);
+        snprintf(playlist_url, playlist_url_size, "%s", response.final_url);
     network_response_free(&response);
     if (result != 0) return MINIIPTV_STAGE_MEDIA_INVALID;
     if (!media->is_live || media->encrypted || media->uses_byte_ranges ||
         media->uses_init_map)
         return MINIIPTV_STAGE_UNSUPPORTED_HLS;
     return MINIIPTV_STAGE_OK;
+}
+
+static int fetch_media_playlist(HlsMediaPlaylist *media) {
+    return fetch_playlist_url(stream.media_url, sizeof(stream.media_url),
+                              media);
+}
+
+static int fetch_audio_playlist(HlsMediaPlaylist *media) {
+    if (!stream.separate_audio || !stream.audio_media_url[0])
+        return MINIIPTV_STAGE_INVALID_ARGUMENT;
+    return fetch_playlist_url(stream.audio_media_url,
+                              sizeof(stream.audio_media_url), media);
+}
+
+static const HlsSegment *matching_audio_segment(
+    const HlsMediaPlaylist *video, size_t video_index,
+    const HlsMediaPlaylist *audio) {
+    const HlsSegment *video_segment;
+    const HlsSegment *closest = NULL;
+    uint64_t closest_delta = UINT64_MAX;
+    size_t distance_from_edge;
+    if (!video || !audio || video_index >= video->count || audio->count == 0u)
+        return NULL;
+    video_segment = &video->segments[video_index];
+    if (video_segment->has_program_date_time) {
+        for (size_t i = 0; i < audio->count; i++) {
+            const HlsSegment *candidate = &audio->segments[i];
+            uint64_t delta;
+            if (!candidate->has_program_date_time) continue;
+            delta = video_segment->program_date_time_ms >=
+                    candidate->program_date_time_ms
+                ? (uint64_t)(video_segment->program_date_time_ms -
+                             candidate->program_date_time_ms)
+                : (uint64_t)(candidate->program_date_time_ms -
+                             video_segment->program_date_time_ms);
+            if (delta < closest_delta) {
+                closest = candidate;
+                closest_delta = delta;
+            }
+        }
+        /* Rendition packagers normally align these within a few milliseconds.
+         * Two seconds tolerates rounding without pairing different segments. */
+        if (closest && closest_delta <= 2000u) return closest;
+        return NULL;
+    }
+    distance_from_edge = video->count - 1u - video_index;
+    if (distance_from_edge >= audio->count) return NULL;
+    return &audio->segments[audio->count - 1u - distance_from_edge];
 }
 
 static int resolve_initial_playlist_uncached(const MiniIptvChannel *channel,
@@ -812,6 +939,9 @@ static int resolve_initial_playlist_uncached(const MiniIptvChannel *channel,
     stream.variant_height = selection.height;
     snprintf(stream.variant_codecs, sizeof(stream.variant_codecs), "%s",
              selection.codecs);
+    stream.separate_audio = selection.has_separate_audio != 0;
+    snprintf(stream.audio_media_url, sizeof(stream.audio_media_url), "%s",
+             selection.audio_url);
     miniiptv_live_tune_phase_complete(MINIIPTV_TUNE_PHASE_ROOT_MANIFEST);
     miniiptv_live_tune_phase_begin(MINIIPTV_TUNE_PHASE_MEDIA_MANIFEST);
     if (selection.type == HLS_MASTER_PLAYLIST) {
@@ -875,6 +1005,9 @@ static int resolve_initial_playlist(const MiniIptvChannel *channel,
                  cached.codecs);
         snprintf(stream.media_url, sizeof(stream.media_url), "%s",
                  cached.media_url);
+        snprintf(stream.audio_media_url, sizeof(stream.audio_media_url), "%s",
+                 cached.audio_media_url);
+        stream.separate_audio = cached.audio_media_url[0] != '\0';
         miniiptv_live_tune_phase_begin(MINIIPTV_TUNE_PHASE_MEDIA_MANIFEST);
         result = fetch_media_playlist(media);
         if (result == MINIIPTV_STAGE_OK) {
@@ -898,13 +1031,18 @@ static int resolve_initial_playlist(const MiniIptvChannel *channel,
     return resolve_initial_playlist_uncached(channel, media);
 }
 
-static bool take_producer_seed(HlsMediaPlaylist *media) {
+static bool take_producer_seed(HlsMediaPlaylist *media,
+                               HlsMediaPlaylist *audio_media) {
     bool available;
-    if (!media) return false;
+    if (!media || !audio_media) return false;
     LightLock_Lock(&stream.lock);
     available = stream.producer_seed_available;
     if (available) {
         *media = stream.producer_seed;
+        if (stream.separate_audio)
+            *audio_media = stream.audio_producer_seed;
+        else
+            memset(audio_media, 0, sizeof(*audio_media));
         stream.producer_seed_available = false;
     }
     LightLock_Unlock(&stream.lock);
@@ -915,6 +1053,7 @@ static void producer_main(void *unused) {
     (void)unused;
     while (!stop_was_requested()) {
         HlsMediaPlaylist media;
+        HlsMediaPlaylist audio_media;
         size_t buffered;
         bool added = false;
         bool found_new_segment = false;
@@ -933,7 +1072,7 @@ static void producer_main(void *unused) {
             continue;
         }
 
-        used_seed = take_producer_seed(&media);
+        used_seed = take_producer_seed(&media, &audio_media);
         if (!used_seed) {
             LightLock_Lock(&stream.lock);
             stream.producer_state = MINIIPTV_PRODUCER_PLAYLIST;
@@ -948,6 +1087,19 @@ static void producer_main(void *unused) {
                      retry < 10 && !stop_was_requested(); retry++)
                     Util_sleep(100000);
                 continue;
+            }
+            if (stream.separate_audio) {
+                result = fetch_audio_playlist(&audio_media);
+                if (result != MINIIPTV_STAGE_OK) {
+                    LightLock_Lock(&stream.lock);
+                    stream.last_error = result;
+                    stream.producer_state = MINIIPTV_PRODUCER_ERROR;
+                    LightLock_Unlock(&stream.lock);
+                    for (int retry = 0;
+                         retry < 10 && !stop_was_requested(); retry++)
+                        Util_sleep(100000);
+                    continue;
+                }
             }
         }
         if (media.target_duration) {
@@ -969,8 +1121,30 @@ static void producer_main(void *unused) {
         }
         for (size_t i = 0; i < media.count && !stop_was_requested(); i++) {
             size_t ignored_size = 0;
+            const HlsSegment *audio_segment = NULL;
             if (media.segments[i].sequence <= stream.last_sequence) continue;
             found_new_segment = true;
+            if (stream.separate_audio) {
+                audio_segment = matching_audio_segment(&media, i,
+                                                       &audio_media);
+                if (!audio_segment) {
+                    found_new_segment = false;
+                    continue;
+                }
+                if (audio_segment->sequence <= stream.last_audio_sequence)
+                    continue;
+                if (audio_segment->discontinuity ||
+                    (stream.last_audio_sequence > 0 &&
+                     audio_segment->sequence !=
+                         stream.last_audio_sequence + 1u)) {
+                    LightLock_Lock(&stream.lock);
+                    stream.last_error = MINIIPTV_STAGE_DISCONTINUITY;
+                    stream.stop_requested = true;
+                    stream.producer_state = MINIIPTV_PRODUCER_ERROR;
+                    LightLock_Unlock(&stream.lock);
+                    break;
+                }
+            }
             if (media.segments[i].discontinuity ||
                 (stream.last_sequence > 0 &&
                  media.segments[i].sequence != stream.last_sequence + 1)) {
@@ -984,7 +1158,8 @@ static void producer_main(void *unused) {
             LightLock_Lock(&stream.lock);
             stream.producer_state = MINIIPTV_PRODUCER_SEGMENT;
             LightLock_Unlock(&stream.lock);
-            result = stream_segment(&media.segments[i], &ignored_size);
+            result = stream_segment(&media.segments[i], audio_segment,
+                                    &ignored_size);
             if (result != MINIIPTV_STAGE_OK) {
                 LightLock_Lock(&stream.lock);
                 stream.producer_state = MINIIPTV_PRODUCER_ERROR;
@@ -1027,6 +1202,7 @@ int miniiptv_live_stream_start(const MiniIptvChannel *channel,
                                MiniIptvCancelFunction should_cancel,
                                void *cancel_userdata) {
     HlsMediaPlaylist media;
+    HlsMediaPlaylist audio_media;
     size_t selected;
     size_t first;
     size_t initial_segment_target;
@@ -1074,6 +1250,20 @@ int miniiptv_live_stream_start(const MiniIptvChannel *channel,
 
     result = resolve_initial_playlist(channel, &media);
     if (result != MINIIPTV_STAGE_OK) goto failure;
+    memset(&audio_media, 0, sizeof(audio_media));
+    if (stream.separate_audio) {
+        result = fetch_audio_playlist(&audio_media);
+        if (result != MINIIPTV_STAGE_OK && stream.rendition_cache_hit &&
+            result != MINIIPTV_STAGE_CANCELLED &&
+            result != MINIIPTV_STAGE_TUNE_TIMEOUT) {
+            rendition_cache_invalidate(channel);
+            stream.rendition_cache_hit = false;
+            result = resolve_initial_playlist_uncached(channel, &media);
+            if (result == MINIIPTV_STAGE_OK && stream.separate_audio)
+                result = fetch_audio_playlist(&audio_media);
+        }
+        if (result != MINIIPTV_STAGE_OK) goto failure;
+    }
     stream.target_duration = media.target_duration ? media.target_duration : 6;
     miniiptv_buffer_shadow_set_target(&stream.buffer_shadow,
         stream.target_duration > UINT32_MAX / 1000u
@@ -1118,11 +1308,20 @@ int miniiptv_live_stream_start(const MiniIptvChannel *channel,
     miniiptv_live_tune_segment_progress(0, 0);
     for (size_t i = first; i < first + selected; i++) {
         size_t bytes = 0;
+        const HlsSegment *audio_segment = NULL;
         if (media.segments[i].discontinuity) {
             result = MINIIPTV_STAGE_DISCONTINUITY;
             goto failure;
         }
-        result = stream_segment(&media.segments[i], &bytes);
+        if (stream.separate_audio) {
+            audio_segment = matching_audio_segment(&media, i, &audio_media);
+            if (!audio_segment || audio_segment->discontinuity) {
+                result = audio_segment ? MINIIPTV_STAGE_DISCONTINUITY
+                                       : MINIIPTV_STAGE_TS_MUX_FAILED;
+                goto failure;
+            }
+        }
+        result = stream_segment(&media.segments[i], audio_segment, &bytes);
         LightLock_Lock(&stream.lock);
         initial_info->attempted_segment_bytes =
             stream.attempted_segment_bytes;
@@ -1148,6 +1347,7 @@ int miniiptv_live_stream_start(const MiniIptvChannel *channel,
      * copy rather than a pointer into resolve_initial_playlist()'s responses
      * or this function's stack.  The producer is the only consumer. */
     stream.producer_seed = media;
+    stream.audio_producer_seed = audio_media;
     stream.producer_seed_available = true;
     stream.initial_tune_active = false;
     stream.initial_tune_should_cancel = NULL;

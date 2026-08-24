@@ -5,6 +5,14 @@ versioning while the player remains experimental.
 
 ## [Unreleased]
 
+- Detect HLS `EXT-X-MEDIA` audio groups and, when video and AAC arrive as
+  separate aligned MPEG-TS renditions, combine them into one bounded transport
+  stream before the existing FFmpeg/MVD pipeline. Unsafe or unalignable tables
+  fail closed instead of changing decoder state.
+- Extend useful telemetry duration without increasing its 512 KiB ceiling:
+  sample every two seconds for the first minute after launch/channel changes,
+  then every ten seconds, while retaining immediate state, error, underrun,
+  and channel events.
 - Render lightweight animated television snow on the top screen while a
   signal is tuning or switching.
 - Preserve producer-side HLS failures on the error deck after playback exits,
@@ -26,7 +34,7 @@ versioning while the player remains experimental.
   three-segment lag without increasing the one-segment blocking download.
 - Record the applied startup lag and warm/cold profile state in telemetry, and
   stop classifying normal user-initiated cancellation as an error.
-- Add a replace-on-launch telemetry.csv with one-second playback samples and
+- Add a replace-on-launch telemetry.csv with periodic playback samples and
   immediate channel, underrun, and error events. The logger buffers 8 KiB in
   ordinary RAM, flushes at bounded intervals, contains no stream URLs, and
   stops at 512 KiB without affecting playback behavior.

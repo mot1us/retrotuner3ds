@@ -2,6 +2,7 @@
 #define MINIIPTV_HLS_H
 
 #include <stddef.h>
+#include <stdint.h>
 
 #define MINIIPTV_HLS_URL_MAX 1024
 #define MINIIPTV_HLS_MAX_SEGMENTS 8
@@ -18,12 +19,17 @@ typedef struct {
     unsigned int height;
     char codecs[96];
     char url[MINIIPTV_HLS_URL_MAX];
+    char audio_group[64];
+    char audio_url[MINIIPTV_HLS_URL_MAX];
+    int has_separate_audio;
 } HlsSelection;
 
 typedef struct {
     char url[MINIIPTV_HLS_URL_MAX];
     double duration;
     unsigned long sequence;
+    int64_t program_date_time_ms;
+    int has_program_date_time;
     int discontinuity;
 } HlsSegment;
 

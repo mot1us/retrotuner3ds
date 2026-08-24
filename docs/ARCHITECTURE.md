@@ -23,9 +23,14 @@ return and tears down the live session before another channel is selected.
    playlist before staging playback data.
 5. Each segment is first capped and staged in a 4 MiB ordinary-RAM buffer. Only
    a complete, validated MPEG-TS response is committed to playback.
-6. A static 6 MiB BSS ring separates network timing from playback while
+6. If the selected master declares a separate audio rendition, matching
+   video/audio segments are aligned by `EXT-X-PROGRAM-DATE-TIME`. A bounded TS
+   combiner adds the AAC elementary stream to the video program map and
+   interleaves remapped audio packets. Layouts that cannot be combined safely
+   are rejected before FFmpeg sees them.
+7. A static 6 MiB BSS ring separates network timing from playback while
    avoiding scarce linear memory.
-7. A custom FFmpeg input bridge exposes the ring as a streaming media source.
+8. A custom FFmpeg input bridge exposes the ring as a streaming media source.
 
 An observation-only shadow controller samples complete segment delivery and
 actual ring underruns. It derives integer EWMAs for content rate, network
@@ -33,12 +38,12 @@ headroom, delivery gaps, and gap deviation, then reports a desired reserve and
 live-edge lag. The controller owns no pointers and cannot change playback in
 rc9.7; its state is discarded with the existing stream teardown.
 
-rc9.8 samples that existing snapshot from the app/draw owner, never from the
-network or decoder hot paths. A small CSV logger buffers 8 KiB in ordinary RAM,
-flushes every ten seconds and on channel/underrun/error events, and stops at
-512 KiB. The replace-on-launch file contains channel names and measurements but
-no URLs or media payloads. Logging failure is non-fatal and cannot alter stream
-state.
+The app/draw owner samples that snapshot, never the network or decoder hot
+paths. A small CSV logger buffers 8 KiB in ordinary RAM, uses dense startup and
+sparse steady-state sampling, flushes every ten seconds and on important
+events, and stops at 512 KiB. The replace-on-launch file contains channel names
+and measurements but no URLs or media payloads. Logging failure is non-fatal
+and cannot alter stream state.
 
 ## Playback path
 
@@ -60,8 +65,9 @@ resolution, profile, frame rate, and bitrate.
 ## Memory and failure boundaries
 
 - Stream ring: 6 MiB in ordinary application BSS.
-- Manifest and segment requests have fixed maximum sizes. The shared 4 MiB
-  segment ceiling applies to both prefetch and live playback, and failures
+- Manifest and segment requests have fixed maximum sizes. Video and combined
+  segments use a 4 MiB ceiling; a separate audio segment uses a 1 MiB staging
+  ceiling plus a bounded 4 MiB combine scratch area in ordinary BSS. Failures
   report received size, server length when known, and the cap without logging
   the channel URL.
 - Live MVD input is restricted to one H.264/YUV420P track at no more than
@@ -100,8 +106,9 @@ releases, not active settings.
 
 ## Tests
 
-Host tests exercise HLS parsing/staging, H.264 Annex B normalization, the
-integer shadow-buffer controller, and the bounded CSV logger under
-AddressSanitizer and UndefinedBehaviorSanitizer. Console integration still
-requires a real New 3DS-family device because MVD behavior cannot be faithfully
-validated by ordinary desktop tests or current emulators.
+Host tests exercise HLS parsing/staging, bounded MPEG-TS audio/video program
+combining, H.264 Annex B normalization, the integer shadow-buffer controller,
+and the bounded CSV logger under AddressSanitizer and UndefinedBehaviorSanitizer.
+Console integration still requires a real New 3DS-family device because MVD
+behavior cannot be faithfully validated by ordinary desktop tests or current
+emulators.
