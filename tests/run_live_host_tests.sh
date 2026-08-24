@@ -57,3 +57,12 @@ cc -std=c11 -Wall -Wextra -Werror -pedantic \
   -o tests/bin/test_buffer_shadow_san
 
 ASAN_OPTIONS=detect_leaks=0 tests/bin/test_buffer_shadow_san
+
+cc -std=c11 -Wall -Wextra -Werror -pedantic \
+  -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer \
+  -Iinclude \
+  source/miniiptv/telemetry_log.c \
+  tests/test_telemetry_log.c \
+  -o tests/bin/test_telemetry_log_san
+
+ASAN_OPTIONS=detect_leaks=0 tests/bin/test_telemetry_log_san

@@ -9,6 +9,7 @@
 #include "miniiptv/live_session.h"
 #include "miniiptv/live_stream.h"
 #include "miniiptv/playlist.h"
+#include "miniiptv/telemetry_log.h"
 #include "miniiptv/version.h"
 #include "system/draw/draw.h"
 #include "system/util/err_types.h"
@@ -18,6 +19,7 @@
 #include "video_player.h"
 
 #define USER_PLAYLIST "sdmc:/3ds/retrotuner3ds/channels.m3u"
+#define TELEMETRY_LOG "sdmc:/3ds/retrotuner3ds/telemetry.csv"
 #define CHANNELS_PER_PAGE 10u
 
 /* Retro broadcast palette (ABGR8888). */
@@ -76,6 +78,17 @@ typedef struct {
 static LiveApp app;
 
 static void launch_tune_worker(void);
+
+static const char *live_app_state_label(LiveAppState state) {
+    switch (state) {
+        case LIVE_APP_NO_PLAYLIST: return "NO_PLAYLIST";
+        case LIVE_APP_IDLE: return "DECK";
+        case LIVE_APP_LOADING: return "TUNING";
+        case LIVE_APP_READY: return "READY";
+        case LIVE_APP_ERROR: return "ERROR";
+        default: return "UNKNOWN";
+    }
+}
 
 static void draw_key_hint(Draw_image_data *pixel, const char *key,
                           const char *action, float x, float y,
@@ -821,6 +834,20 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
     snprintf(status, sizeof(status), "%s", app.status);
     LightLock_Unlock(&app.lock);
     miniiptv_live_tune_get_telemetry(&tune);
+    if (top_screen) {
+        MiniIptvTelemetrySample log_sample = {0};
+        log_sample.channel_name = count ? channel_names[selected] : "";
+        log_sample.app_state = live_app_state_label(state);
+        log_sample.tune_phase =
+            miniiptv_live_tune_phase_label(tune.phase);
+        log_sample.shadow_state = "";
+        log_sample.producer_state = "";
+        log_sample.last_error = player_error_code
+            ? (int64_t)(uint64_t)player_error_code
+            : (int64_t)tune.result;
+        log_sample.periodic = state == LIVE_APP_LOADING;
+        miniiptv_telemetry_log_record(osGetTime(), &log_sample);
+    }
     process_player_return_action(return_action);
 
     page_start = count ? (selected / CHANNELS_PER_PAGE) * CHANNELS_PER_PAGE : 0;
@@ -1003,15 +1030,21 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
 }
 
 void MiniIptv_live_app_init(void) {
+    int telemetry_result;
     memset(&app, 0, sizeof(app));
     LightLock_Init(&app.lock);
     miniiptv_live_tune_telemetry_init();
+    telemetry_result = miniiptv_telemetry_log_open(
+        TELEMETRY_LOG, RETROTUNER_VERSION, osGetTime());
 
 	if (playlist_load_file(USER_PLAYLIST, &app.playlist) != 0) {
 		set_status_locked(LIVE_APP_NO_PLAYLIST,
 						  "ADD /3ds/retrotuner3ds/channels.m3u");
     } else {
-        set_status_locked(LIVE_APP_IDLE, "READY // press A to tune this signal");
+        set_status_locked(LIVE_APP_IDLE,
+            telemetry_result == 0
+                ? "READY // TELEMETRY LOG ON // press A to tune"
+                : "READY // LOG OFF (SD WRITE FAILED) // press A to tune");
     }
 
     Vid_set_idle_hooks(live_hid, live_draw);
@@ -1051,4 +1084,5 @@ void MiniIptv_live_app_exit(void) {
     app.network_ready = false;
     LightLock_Unlock(&app.lock);
     if (network_ready) miniiptv_live_session_exit();
+    miniiptv_telemetry_log_close();
 }

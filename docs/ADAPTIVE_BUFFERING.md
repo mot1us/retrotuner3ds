@@ -50,7 +50,17 @@ view. A shadow recommendation is telemetry only in rc9.7: it does not alter the
 one-segment initial tune, three-second refill, 5 MiB high-water mark, 6 MiB
 ring, or 4 MiB atomic segment cap.
 
-### rc9.8: adaptive start depth
+### rc9.8: bounded hardware telemetry
+
+- Write the shadow and pipeline snapshots to a replace-on-launch CSV once per
+  second.
+- Flush on channel changes, underruns, errors, and a ten-second fallback
+  interval so a failure loses little context.
+- Cap the file at 512 KiB and keep all URLs and media payloads out of it.
+- Use real multi-channel sessions to validate the shadow recommendations
+  before they control playback.
+
+### rc9.9: adaptive start depth
 
 - Keep downloading exactly one complete initial segment.
 - Start one published segment behind the newest for healthy channels, two for
@@ -62,7 +72,7 @@ also gives the producer already-published segments to fetch while FFmpeg and
 MVD initialize, which is the best available way to build reserve entirely on
 the New 3DS.
 
-### rc9.9: adaptive recovery
+### rc9.10: adaptive recovery
 
 - Resume after one complete segment for an isolated underrun.
 - After another underrun within 90 seconds, try to collect two segments.

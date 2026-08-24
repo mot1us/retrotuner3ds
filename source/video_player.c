@@ -8,6 +8,7 @@
 #include <stdlib.h>
 
 #include "miniiptv/live_stream.h"
+#include "miniiptv/telemetry_log.h"
 #include "system/menu.h"
 #include "system/sem.h"
 #include "system/draw/draw.h"
@@ -845,6 +846,7 @@ static void Vid_draw_miniiptv_live_overlay(void)
 	Draw_image_data pixel = Draw_get_empty_image();
 	MiniIptvLiveInfo live_info = { 0, };
 	MiniIptvTuneTelemetry tune = { 0, };
+	MiniIptvTelemetrySample log_sample = { 0, };
 	Vid_live_diagnostics diagnostics = { 0, };
 	bool has_presented_frame = __atomic_load_n(&vid_player.has_presented_frame,
 		__ATOMIC_ACQUIRE);
@@ -867,6 +869,43 @@ static void Vid_draw_miniiptv_live_overlay(void)
 	miniiptv_live_tune_get_telemetry(&tune);
 	Vid_query_live_diagnostics(&diagnostics);
 	(void)read_kib;
+	log_sample.channel_name = live_info.channel_name;
+	log_sample.app_state = "PLAYBACK";
+	log_sample.tune_phase = miniiptv_live_tune_phase_label(tune.phase);
+	log_sample.shadow_state =
+		miniiptv_buffer_shadow_state_label(live_info.shadow.state);
+	log_sample.producer_state =
+		miniiptv_live_producer_state_label(live_info.producer_state);
+	log_sample.ring_bytes = buffered;
+	log_sample.downloaded_segments = downloaded;
+	log_sample.global_underruns = underruns;
+	log_sample.width = live_info.width;
+	log_sample.height = live_info.height;
+	log_sample.buffered_ms = live_info.shadow.buffered_ms;
+	log_sample.network_bps = live_info.shadow.network_bps;
+	log_sample.content_bps = live_info.shadow.content_bps;
+	log_sample.valid_samples = live_info.shadow.valid_samples;
+	log_sample.headroom_permille = live_info.shadow.headroom_permille;
+	log_sample.desired_reserve_ms = live_info.shadow.desired_reserve_ms;
+	log_sample.recommended_lag_segments =
+		live_info.shadow.recommended_lag_segments;
+	log_sample.segment_ms = live_info.shadow.segment_ms;
+	log_sample.download_ms = live_info.shadow.download_ms;
+	log_sample.commit_gap_ms = live_info.shadow.commit_gap_ms;
+	log_sample.commit_gap_deviation_ms =
+		live_info.shadow.commit_gap_deviation_ms;
+	log_sample.ring_min_bytes = live_info.shadow.ring_min_bytes;
+	log_sample.ring_max_bytes = live_info.shadow.ring_max_bytes;
+	log_sample.recent_underruns = live_info.shadow.recent_underruns;
+	log_sample.total_underruns = live_info.shadow.total_underruns;
+	log_sample.no_new_poll_streak = live_info.shadow.no_new_poll_streak;
+	log_sample.last_refill_ms = live_info.shadow.last_refill_ms;
+	log_sample.last_refill_commits =
+		live_info.shadow.last_refill_commits;
+	log_sample.last_error = live_error;
+	log_sample.rebuffering = live_info.rebuffering != 0;
+	log_sample.periodic = true;
+	miniiptv_telemetry_log_record(osGetTime(), &log_sample);
 
 	/* PLAYER_STATE_BUFFERING also covers the decoder's very short raw-frame
 	 * refills.  Those refills can pulse every few frames while the compressed

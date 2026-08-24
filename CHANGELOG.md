@@ -5,6 +5,10 @@ versioning while the player remains experimental.
 
 ## [Unreleased]
 
+- Add a replace-on-launch telemetry.csv with one-second playback samples and
+  immediate channel, underrun, and error events. The logger buffers 8 KiB in
+  ordinary RAM, flushes at bounded intervals, contains no stream URLs, and
+  stops at 512 KiB without affecting playback behavior.
 - Add an observation-only adaptive-buffer controller that measures segment
   delivery headroom, delivery-gap jitter, reserve pressure, and real refill
   stalls without changing startup, playback, or recovery behavior.

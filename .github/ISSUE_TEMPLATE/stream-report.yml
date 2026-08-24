@@ -36,7 +36,7 @@ body:
     id: notes
     attributes:
       label: Hardware and playback notes
-      description: Include console model, duration tested, diagnostics, and whether the stream works in VLC.
+      description: Include console model, duration tested, diagnostics, and whether the stream works in VLC. Attach telemetry.csv when available, after checking that its channel names are safe to share.
   - type: checkboxes
     id: public
     attributes:

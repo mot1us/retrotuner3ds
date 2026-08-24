@@ -16,6 +16,7 @@ It has only been tested on that model; other 3DS-family systems are unverified.
 - Up to 32 channels from a user-provided `channels.m3u` file, shown in pages.
 - Automatic selection of the lowest advertised HLS rendition.
 - Retro dual-screen channel deck, buffering state, and stream diagnostics.
+- A bounded diagnostics log for hardware buffer testing.
 - Full teardown of the stream and decoder when leaving a channel.
 
 The most reliable hardware-tested signals are **360p-class H.264/AAC streams
@@ -46,6 +47,19 @@ playlist and are responsible for having permission to access its streams.
 
 After a no-signal or player error, use `A` to retry, `B` to return to the
 channel deck, or `L`/`R` to try the adjacent signal.
+
+## Hardware telemetry
+
+Each app launch replaces:
+
+    sd:/3ds/retrotuner3ds/telemetry.csv
+
+During tuning and playback, the file records monotonic elapsed time, channel
+name, pipeline state, compressed-ring depth, segment delivery timing, shadow
+buffer recommendations, underruns, and errors. It never records stream URLs,
+video, or audio. Rows are buffered in ordinary RAM, flushed every ten seconds
+and on important events, and capped at 512 KiB. If logging cannot be opened,
+playback continues normally and the channel deck reports LOG OFF.
 
 ## Playlist format
 

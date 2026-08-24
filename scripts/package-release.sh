@@ -93,6 +93,9 @@ printf '%s\n' \
     "Then add your own playlist at:" \
     "  sd:/3ds/retrotuner3ds/channels.m3u" \
     "" \
+    "The latest hardware telemetry is written to:" \
+    "  sd:/3ds/retrotuner3ds/telemetry.csv" \
+    "" \
     "No playlist or channel URLs are included." \
     "This release has only been tested on New Nintendo 3DS-family hardware." \
     > "$release_stage/README.txt"

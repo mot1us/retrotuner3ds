@@ -33,6 +33,13 @@ headroom, delivery gaps, and gap deviation, then reports a desired reserve and
 live-edge lag. The controller owns no pointers and cannot change playback in
 rc9.7; its state is discarded with the existing stream teardown.
 
+rc9.8 samples that existing snapshot from the app/draw owner, never from the
+network or decoder hot paths. A small CSV logger buffers 8 KiB in ordinary RAM,
+flushes every ten seconds and on channel/underrun/error events, and stops at
+512 KiB. The replace-on-launch file contains channel names and measurements but
+no URLs or media payloads. Logging failure is non-fatal and cannot alter stream
+state.
+
 ## Playback path
 
 FFmpeg demuxes MPEG-TS and AAC. Compatible H.264 packets are normalized by
@@ -93,8 +100,8 @@ releases, not active settings.
 
 ## Tests
 
-Host tests exercise HLS parsing/staging, H.264 Annex B normalization, and the
-integer shadow-buffer controller under AddressSanitizer and
-UndefinedBehaviorSanitizer. Console integration still requires a real New
-3DS-family device because MVD behavior cannot be faithfully validated by
-ordinary desktop tests or current emulators.
+Host tests exercise HLS parsing/staging, H.264 Annex B normalization, the
+integer shadow-buffer controller, and the bounded CSV logger under
+AddressSanitizer and UndefinedBehaviorSanitizer. Console integration still
+requires a real New 3DS-family device because MVD behavior cannot be faithfully
+validated by ordinary desktop tests or current emulators.
