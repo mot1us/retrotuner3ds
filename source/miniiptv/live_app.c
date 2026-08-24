@@ -43,6 +43,7 @@ typedef enum {
 typedef enum {
     PLAYER_RETURN_NONE = 0,
     PLAYER_RETURN_STOP,
+    PLAYER_RETURN_STOP_TO_DECK,
     PLAYER_RETURN_RETUNE
 } PlayerReturnAction;
 
@@ -126,6 +127,37 @@ static void draw_key_hint(Draw_image_data *pixel, const char *key,
     Draw_align_c(key, x, y, 9.5f, UI_INK, DRAW_X_ALIGN_CENTER,
                  DRAW_Y_ALIGN_CENTER, key_width, 13);
     Draw_c(action, x + key_width + 5, y + 1, 9.5f, UI_CREAM);
+}
+
+static uint32_t tuning_static_next(uint32_t *seed) {
+    *seed = *seed * 1664525u + 1013904223u;
+    return *seed;
+}
+
+static void draw_tuning_static(Draw_image_data *pixel, uint64_t now) {
+    static const uint32_t snow[] = {
+        0xFF242424u, 0xFF484848u, 0xFF747474u, 0xFFA8A8A8u,
+        0xFFD8D8D8u
+    };
+    uint32_t seed = (uint32_t)(now / 80u) ^ 0x52543344u;
+    size_t i;
+
+    Draw_texture(pixel, 0xFF181818u, 0, 15, 400, 225);
+    for (i = 0; i < 34; i++) {
+        uint32_t value = tuning_static_next(&seed);
+        float x = (float)(value % 400u);
+        float y = 15.0f + (float)((value >> 9) % 222u);
+        float width = 10.0f + (float)((value >> 18) % 92u);
+        float height = 1.0f + (float)((value >> 27) % 4u);
+        if (x + width > 400.0f) width = 400.0f - x;
+        Draw_texture(pixel,
+                     snow[(value >> 24) %
+                          (sizeof(snow) / sizeof(snow[0]))],
+                     x, y, width, height);
+    }
+    for (i = 19; i < 238; i += 7)
+        Draw_texture(pixel, (i & 1u) ? 0xFF303030u : 0xFF0D0D0Du,
+                     0, (float)i, 400, 1);
 }
 
 static void format_tune_status(char *line, size_t line_size,
@@ -586,13 +618,26 @@ static PlayerReturnAction update_player_return_locked(void) {
         set_status_locked(LIVE_APP_IDLE,
                           "READY // press A to tune this signal");
     }
-    return PLAYER_RETURN_STOP;
+    return deck_requested ? PLAYER_RETURN_STOP_TO_DECK
+                          : PLAYER_RETURN_STOP;
 }
 
 static void process_player_return_action(PlayerReturnAction action) {
     bool launch_queued = false;
+    bool preserve_stream_error = false;
+    int stream_error = 0;
+    Vid_live_diagnostics stream_error_diagnostics = {0};
 
     if (action == PLAYER_RETURN_NONE) return;
+    if (action == PLAYER_RETURN_STOP) {
+        miniiptv_live_stream_get_stats(NULL, NULL, NULL, NULL,
+                                       &stream_error);
+        if (stream_error != 0) {
+            Vid_query_live_diagnostics(&stream_error_diagnostics);
+            miniiptv_live_tune_fail(stream_error);
+            preserve_stream_error = true;
+        }
+    }
     miniiptv_live_stream_request_stop();
     if (action == PLAYER_RETURN_RETUNE) {
         /* The tuning worker owns the full producer join. Keeping that wait off
@@ -604,6 +649,15 @@ static void process_player_return_action(PlayerReturnAction action) {
         miniiptv_live_stream_stop();
         LightLock_Lock(&app.lock);
         app.stream_cleanup_pending = false;
+        if (preserve_stream_error && !app.exit_requested &&
+            app.state != LIVE_APP_ERROR) {
+            app.state = LIVE_APP_ERROR;
+            app.player_error_code = (uint32_t)stream_error;
+            app.player_error_diagnostics = stream_error_diagnostics;
+            app.has_player_error_diagnostics = true;
+            snprintf(app.status, sizeof(app.status), "%s (%d)",
+                     stage_error_text(stream_error), stream_error);
+        }
         /* HID and draw run independently. If L/R arrived while the old stream
          * was being joined, consume that queued choice as soon as cleanup has
          * released the single stream/decoder owner. */
@@ -884,9 +938,13 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
     if (page_end > count) page_end = count;
 
     if (top_screen) {
-        Draw_texture(&pixel, UI_INK, 0, 15, 400, 225);
-        for (i = 19; i < 238; i += 8)
-            Draw_texture(&pixel, UI_SHADOW, 0, (float)i, 400, 1);
+        if (state == LIVE_APP_LOADING)
+            draw_tuning_static(&pixel, osGetTime());
+        else {
+            Draw_texture(&pixel, UI_INK, 0, 15, 400, 225);
+            for (i = 19; i < 238; i += 8)
+                Draw_texture(&pixel, UI_SHADOW, 0, (float)i, 400, 1);
+        }
 
         Draw_texture(&pixel, UI_ORANGE, 12, 25, 376, 3);
         Draw_texture(&pixel, UI_CYAN, 24, 43, 82, 2);

@@ -5,6 +5,12 @@ versioning while the player remains experimental.
 
 ## [Unreleased]
 
+- Render lightweight animated television snow on the top screen while a
+  signal is tuning or switching.
+- Preserve producer-side HLS failures on the error deck after playback exits,
+  instead of silently replacing them with the ordinary off-air status.
+- Keep decoder recovery conservative: downstream texture stalls remain a
+  logged compatibility failure rather than forcing unsafe decoder reuse.
 - Replace the inherited white startup/status-bar frame with a RetroTuner boot
   screen, and log FFmpeg, MVD, texture, presentation, and audio counters for
   diagnosing full-network-ring stalls.
