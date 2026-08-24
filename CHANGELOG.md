@@ -5,6 +5,9 @@ versioning while the player remains experimental.
 
 ## [Unreleased]
 
+- Qualify a revised private TVS hardware-test deck around seven feeds proven on
+  New 3DS and six replacement feeds preflighted at 360p-class H.264/AAC with
+  comfortably sub-limit MPEG-TS segments. Public packages remain playlist-free.
 - Recover from ordinary forward HLS media-sequence gaps when a slow client
   falls behind a sliding live window. Explicit `EXT-X-DISCONTINUITY` markers
   and playlist regressions still fail closed before changed media reaches the
