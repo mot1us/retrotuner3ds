@@ -889,6 +889,8 @@ static void Vid_draw_miniiptv_live_overlay(void)
 	log_sample.desired_reserve_ms = live_info.shadow.desired_reserve_ms;
 	log_sample.recommended_lag_segments =
 		live_info.shadow.recommended_lag_segments;
+	log_sample.applied_lag_segments = live_info.startup_lag_segments;
+	log_sample.adaptive_profile_hit = live_info.adaptive_profile_hit != 0;
 	log_sample.segment_ms = live_info.shadow.segment_ms;
 	log_sample.download_ms = live_info.shadow.download_ms;
 	log_sample.commit_gap_ms = live_info.shadow.commit_gap_ms;
@@ -1083,9 +1085,8 @@ static void Vid_draw_miniiptv_live_overlay(void)
 			|| live_info.shadow.state == MINIIPTV_BUFFER_SHADOW_UNSUSTAINABLE)
 				shadow_color = DEF_DRAW_RED;
 			snprintf(line, sizeof(line),
-				"SHADOW %s N:%lu H:%lu.%02lux WANT:%lu.%lus L:%u",
+				"%s H%lu.%02lux WANT%lu.%lus R%u",
 				miniiptv_buffer_shadow_state_label(live_info.shadow.state),
-				(unsigned long)live_info.shadow.valid_samples,
 				(unsigned long)(live_info.shadow.headroom_permille / 1000u),
 				(unsigned long)((live_info.shadow.headroom_permille % 1000u) / 10u),
 				(unsigned long)(live_info.shadow.desired_reserve_ms / 1000u),
@@ -1094,7 +1095,10 @@ static void Vid_draw_miniiptv_live_overlay(void)
 			Draw_align_c(line, 8, 154, 9.0f, shadow_color,
 				DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 304, 16);
 			snprintf(line, sizeof(line),
-				"SEG:%lu.%lus GAP:%lu.%lus JIT:%lu.%lus U90:%lu",
+				"USE%u %s N%lu SEG%lu.%lu GAP%lu.%lu J%lu.%lu U%lu",
+				live_info.startup_lag_segments,
+				live_info.adaptive_profile_hit ? "WARM" : "COLD",
+				(unsigned long)live_info.shadow.valid_samples,
 				(unsigned long)(live_info.shadow.segment_ms / 1000u),
 				(unsigned long)((live_info.shadow.segment_ms % 1000u) / 100u),
 				(unsigned long)(live_info.shadow.commit_gap_ms / 1000u),
@@ -1102,7 +1106,7 @@ static void Vid_draw_miniiptv_live_overlay(void)
 				(unsigned long)(live_info.shadow.commit_gap_deviation_ms / 1000u),
 				(unsigned long)((live_info.shadow.commit_gap_deviation_ms % 1000u) / 100u),
 				(unsigned long)live_info.shadow.recent_underruns);
-			Draw_align_c(line, 8, 166, 9.0f, MINIIPTV_COLOR_CYAN,
+			Draw_align_c(line, 8, 166, 7.5f, MINIIPTV_COLOR_CYAN,
 				DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 304, 12);
 		}
 	}

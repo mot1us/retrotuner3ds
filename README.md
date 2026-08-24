@@ -56,10 +56,20 @@ Each app launch replaces:
 
 During tuning and playback, the file records monotonic elapsed time, channel
 name, pipeline state, compressed-ring depth, segment delivery timing, shadow
-buffer recommendations, underruns, and errors. It never records stream URLs,
-video, or audio. Rows are buffered in ordinary RAM, flushed every ten seconds
+buffer recommendations, applied startup lag, warm/cold profile state,
+underruns, and errors. Normal channel-switch cancellation is not recorded as
+an error. It never records stream URLs, video, or audio. Rows are buffered in
+ordinary RAM, flushed every ten seconds
 and on important events, and capped at 512 KiB. If logging cannot be opened,
 playback continues normally and the channel deck reports LOG OFF.
+
+During one app session, channels with at least three validated segment samples
+receive a small in-memory buffering profile. A cold channel begins two segments
+behind the live edge; later tunes use one segment for healthy delivery, two for
+marginal delivery, or three for unsustainable/repeatedly underrunning delivery.
+Only one initial segment is downloaded before player handoff, so this changes
+live latency without adding blocking startup downloads or increasing the 6 MiB
+ring.
 
 ## Playlist format
 

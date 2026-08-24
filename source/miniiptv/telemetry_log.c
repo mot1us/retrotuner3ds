@@ -4,6 +4,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "miniiptv/hls_prefetch.h"
+
 #define LOG_BUFFER_BYTES 8192u
 #define LOG_SAMPLE_INTERVAL_MS 1000u
 #define LOG_FLUSH_INTERVAL_MS 10000u
@@ -110,7 +112,8 @@ int miniiptv_telemetry_log_open(const char *path, const char *version,
         "version,elapsed_ms,event,channel,app_state,tune_phase,shadow_state,"
         "producer_state,width,height,ring_bytes,buffered_ms,network_bps,"
         "content_bps,samples,headroom_permille,want_ms,lag_segments,"
-        "segment_ms,download_ms,gap_ms,jitter_ms,rebuffering,recent_underruns,"
+        "applied_lag_segments,profile_hit,segment_ms,download_ms,gap_ms,"
+        "jitter_ms,rebuffering,recent_underruns,"
         "total_underruns,global_underruns,downloaded_segments,no_new_streak,"
         "ring_min_bytes,ring_max_bytes,last_refill_ms,last_refill_commits,"
         "last_error\n";
@@ -148,9 +151,15 @@ void miniiptv_telemetry_log_record(
     bool error_changed;
     bool sample_due;
     bool urgent;
+    int64_t recorded_error;
     int length;
 
     if (!sample || !miniiptv_telemetry_log_is_enabled()) return;
+    /* Cancellation is the expected result of B, L/R, START, and serialized
+     * channel teardown. Keep it out of both the ERROR event stream and the
+     * last_error column so normal user actions are not diagnosed as faults. */
+    recorded_error = sample->last_error == MINIIPTV_STAGE_CANCELLED
+        ? 0 : sample->last_error;
     elapsed_ms = now_ms >= telemetry_log.session_started_ms
         ? now_ms - telemetry_log.session_started_ms : 0;
     channel_changed = telemetry_log.has_last &&
@@ -164,9 +173,9 @@ void miniiptv_telemetry_log_record(
                safe_text(sample->shadow_state)) != 0;
     underrun_changed = telemetry_log.has_last && !channel_changed &&
         sample->global_underruns > telemetry_log.last_global_underruns;
-    error_changed = sample->last_error != 0 &&
+    error_changed = recorded_error != 0 &&
         (!telemetry_log.has_last ||
-         sample->last_error != telemetry_log.last_error);
+         recorded_error != telemetry_log.last_error);
     sample_due = !telemetry_log.has_last ||
         (sample->periodic &&
          (now_ms < telemetry_log.last_sample_ms ||
@@ -198,6 +207,7 @@ void miniiptv_telemetry_log_record(
         "%s,%" PRIu64 ",%s,%s,%s,%s,%s,%s,%" PRIu32 ",%" PRIu32
         ",%" PRIu64 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32
         ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32
+        ",%" PRIu32 ",%" PRIu32
         ",%" PRIu32 ",%" PRIu32 ",%u,%" PRIu32 ",%" PRIu32 ",%" PRIu64
         ",%" PRIu64 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32
         ",%" PRIu32 ",%" PRId64 "\n",
@@ -206,14 +216,15 @@ void miniiptv_telemetry_log_record(
         sample->ring_bytes, sample->buffered_ms, sample->network_bps,
         sample->content_bps, sample->valid_samples,
         sample->headroom_permille, sample->desired_reserve_ms,
-        sample->recommended_lag_segments, sample->segment_ms,
+        sample->recommended_lag_segments, sample->applied_lag_segments,
+        sample->adaptive_profile_hit, sample->segment_ms,
         sample->download_ms, sample->commit_gap_ms,
         sample->commit_gap_deviation_ms, sample->rebuffering ? 1u : 0u,
         sample->recent_underruns, sample->total_underruns,
         sample->global_underruns, sample->downloaded_segments,
         sample->no_new_poll_streak, sample->ring_min_bytes,
         sample->ring_max_bytes, sample->last_refill_ms,
-        sample->last_refill_commits, sample->last_error);
+        sample->last_refill_commits, recorded_error);
     if (length <= 0 || (size_t)length >= sizeof(line) ||
         !append_line(line, (size_t)length))
         return;
@@ -225,7 +236,7 @@ void miniiptv_telemetry_log_record(
     copy_text(telemetry_log.last_shadow_state,
               sizeof(telemetry_log.last_shadow_state), sample->shadow_state);
     telemetry_log.last_global_underruns = sample->global_underruns;
-    telemetry_log.last_error = sample->last_error;
+    telemetry_log.last_error = recorded_error;
     telemetry_log.last_sample_ms = now_ms;
     telemetry_log.has_last = true;
 

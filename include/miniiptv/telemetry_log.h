@@ -24,6 +24,8 @@ typedef struct {
     uint32_t headroom_permille;
     uint32_t desired_reserve_ms;
     uint32_t recommended_lag_segments;
+    uint32_t applied_lag_segments;
+    uint32_t adaptive_profile_hit;
     uint32_t segment_ms;
     uint32_t download_ms;
     uint32_t commit_gap_ms;

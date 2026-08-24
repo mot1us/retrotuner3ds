@@ -23,6 +23,16 @@ static char *read_file(const char *path, long *size_out) {
     return data;
 }
 
+static unsigned int count_text(const char *haystack, const char *needle) {
+    unsigned int count = 0;
+    size_t length = strlen(needle);
+    while (length > 0 && (haystack = strstr(haystack, needle)) != NULL) {
+        count++;
+        haystack += length;
+    }
+    return count;
+}
+
 static void test_rows_and_events(void) {
     const char *path = "tests/bin/test_telemetry_log.csv";
     MiniIptvTelemetrySample sample = {0};
@@ -47,6 +57,8 @@ static void test_rows_and_events(void) {
     miniiptv_telemetry_log_record(2100, &sample);
     sample.last_error = -7;
     miniiptv_telemetry_log_record(2200, &sample);
+    sample.last_error = -12;
+    miniiptv_telemetry_log_record(3000, &sample);
     miniiptv_telemetry_log_close();
 
     data = read_file(path, NULL);
@@ -54,7 +66,9 @@ static void test_rows_and_events(void) {
     assert(strstr(data, ",START,") != NULL);
     assert(strstr(data, ",SAMPLE,") != NULL);
     assert(strstr(data, ",UNDERRUN,") != NULL);
-    assert(strstr(data, ",ERROR,") != NULL);
+    assert(count_text(data, ",ERROR,") == 1u);
+    assert(strstr(data, ",-12\n") == NULL);
+    assert(strstr(data, ",0\n") != NULL);
     assert(strstr(data, "\"Retro, \"\"One\"\" \"") != NULL);
     free(data);
     assert(remove(path) == 0);

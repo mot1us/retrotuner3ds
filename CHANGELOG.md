@@ -5,6 +5,11 @@ versioning while the player remains experimental.
 
 ## [Unreleased]
 
+- Add session-only adaptive startup depth: cold channels begin two published
+  segments behind live, while measured repeat tunes apply a one-, two-, or
+  three-segment lag without increasing the one-segment blocking download.
+- Record the applied startup lag and warm/cold profile state in telemetry, and
+  stop classifying normal user-initiated cancellation as an error.
 - Add a replace-on-launch telemetry.csv with one-second playback samples and
   immediate channel, underrun, and error events. The logger buffers 8 KiB in
   ordinary RAM, flushes at bounded intervals, contains no stream URLs, and

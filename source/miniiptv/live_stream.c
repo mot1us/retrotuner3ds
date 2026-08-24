@@ -23,6 +23,7 @@
 #define STREAM_SHADOW_SAMPLE_MAX_DOWNLOAD_MS 300000ULL
 #define STREAM_RENDITION_CACHE_ENTRIES 4u
 #define STREAM_RENDITION_CACHE_TTL_MS 60000ULL
+#define STREAM_ADAPTIVE_PROFILE_ENTRIES 32u
 #define TS_PACKET_SIZE 188u
 
 #if MINIIPTV_SEGMENT_LIMIT >= STREAM_RING_SIZE
@@ -44,12 +45,14 @@ typedef struct {
     bool rebuffering;
     bool reader_started;
     bool rendition_cache_hit;
+    bool adaptive_profile_hit;
     bool initial_tune_active;
     bool initial_tune_timed_out;
     uint64_t initial_tune_deadline_ms;
     MiniIptvCancelFunction initial_tune_should_cancel;
     void *initial_tune_cancel_userdata;
     unsigned int target_duration;
+    uint8_t startup_lag_segments;
     unsigned long variant_bandwidth;
     unsigned int variant_width;
     unsigned int variant_height;
@@ -95,6 +98,16 @@ typedef struct {
 } RenditionCacheEntry;
 
 typedef struct {
+    bool valid;
+    uint64_t channel_key;
+    uint64_t updated_ms;
+    uint32_t headroom_permille;
+    uint32_t desired_reserve_ms;
+    uint32_t total_underruns;
+    uint8_t recommended_lag_segments;
+} AdaptiveProfileEntry;
+
+typedef struct {
     size_t total_size;
     bool report_tune_progress;
 } SegmentWriter;
@@ -123,6 +136,81 @@ static TuneTimeline tune_timeline;
  * serialized tune worker accesses this table. */
 static RenditionCacheEntry
     rendition_cache[STREAM_RENDITION_CACHE_ENTRIES];
+/* Session-only measurements survive LiveStream teardown without retaining
+ * playlist URLs. A 64-bit hash identifies the channel; a collision can only
+ * choose a conservative 1--3 segment lag and cannot cross memory bounds. */
+static AdaptiveProfileEntry
+    adaptive_profiles[STREAM_ADAPTIVE_PROFILE_ENTRIES];
+static uint8_t adaptive_profile_next;
+
+static uint64_t adaptive_hash_bytes(uint64_t hash, const char *text) {
+    const unsigned char *bytes = (const unsigned char *)(text ? text : "");
+    while (*bytes) {
+        hash ^= *bytes++;
+        hash *= UINT64_C(1099511628211);
+    }
+    /* Separate fields so concatenated header values cannot alias trivially. */
+    hash ^= 0xffu;
+    hash *= UINT64_C(1099511628211);
+    return hash;
+}
+
+static uint64_t adaptive_channel_key(const MiniIptvChannel *channel) {
+    uint64_t hash = UINT64_C(14695981039346656037);
+    if (!channel) return 0;
+    hash = adaptive_hash_bytes(hash, channel->url);
+    hash = adaptive_hash_bytes(hash, channel->user_agent);
+    return adaptive_hash_bytes(hash, channel->referrer);
+}
+
+static const AdaptiveProfileEntry *adaptive_profile_lookup(
+    const MiniIptvChannel *channel) {
+    uint64_t key = adaptive_channel_key(channel);
+    if (key == 0) return NULL;
+    for (size_t i = 0; i < STREAM_ADAPTIVE_PROFILE_ENTRIES; i++) {
+        if (adaptive_profiles[i].valid &&
+            adaptive_profiles[i].channel_key == key)
+            return &adaptive_profiles[i];
+    }
+    return NULL;
+}
+
+static void adaptive_profile_store(
+    const MiniIptvChannel *channel,
+    const MiniIptvBufferShadowSnapshot *snapshot,
+    uint64_t now_ms) {
+    size_t slot = STREAM_ADAPTIVE_PROFILE_ENTRIES;
+    uint64_t key;
+    if (!channel || !snapshot || snapshot->valid_samples < 3u) return;
+    key = adaptive_channel_key(channel);
+    if (key == 0) return;
+    for (size_t i = 0; i < STREAM_ADAPTIVE_PROFILE_ENTRIES; i++) {
+        if (adaptive_profiles[i].valid &&
+            adaptive_profiles[i].channel_key == key) {
+            slot = i;
+            break;
+        }
+        if (!adaptive_profiles[i].valid &&
+            slot == STREAM_ADAPTIVE_PROFILE_ENTRIES)
+            slot = i;
+    }
+    if (slot == STREAM_ADAPTIVE_PROFILE_ENTRIES) {
+        slot = adaptive_profile_next;
+        adaptive_profile_next = (uint8_t)((adaptive_profile_next + 1u) %
+            STREAM_ADAPTIVE_PROFILE_ENTRIES);
+    }
+    adaptive_profiles[slot].valid = true;
+    adaptive_profiles[slot].channel_key = key;
+    adaptive_profiles[slot].updated_ms = now_ms;
+    adaptive_profiles[slot].headroom_permille = snapshot->headroom_permille;
+    adaptive_profiles[slot].desired_reserve_ms =
+        snapshot->desired_reserve_ms;
+    adaptive_profiles[slot].total_underruns = snapshot->total_underruns;
+    adaptive_profiles[slot].recommended_lag_segments =
+        snapshot->recommended_lag_segments < 1u ? 1u :
+        (snapshot->recommended_lag_segments > 3u ? 3u :
+         snapshot->recommended_lag_segments);
+}
 
 static unsigned int tune_elapsed_milliseconds(uint64_t end, uint64_t start) {
     uint64_t elapsed = end >= start ? end - start : 0;
@@ -937,6 +1025,8 @@ int miniiptv_live_stream_start(const MiniIptvChannel *channel,
     size_t selected;
     size_t first;
     size_t initial_segment_target;
+    const AdaptiveProfileEntry *adaptive_profile;
+    uint8_t requested_lag;
     uint64_t initial_tune_deadline_ms;
     int result;
     if (!channel || !channel->url[0] || !initial_info)
@@ -962,6 +1052,13 @@ int miniiptv_live_stream_start(const MiniIptvChannel *channel,
     stream.initialized = true;
     miniiptv_buffer_shadow_reset(&stream.buffer_shadow, 6000u);
     stream.channel = *channel;
+    adaptive_profile = adaptive_profile_lookup(channel);
+    requested_lag = adaptive_profile
+        ? adaptive_profile->recommended_lag_segments : 2u;
+    if (requested_lag < 1u) requested_lag = 1u;
+    if (requested_lag > 3u) requested_lag = 3u;
+    stream.adaptive_profile_hit = adaptive_profile != NULL;
+    stream.startup_lag_segments = requested_lag;
     stream.producer_state = MINIIPTV_PRODUCER_STARTING;
     stream.initial_tune_active = true;
     stream.initial_tune_deadline_ms = initial_tune_deadline_ms;
@@ -982,14 +1079,31 @@ int miniiptv_live_stream_start(const MiniIptvChannel *channel,
      * that handing off a partially downloaded segment caused a long white
      * screen and intermittent failure to produce a first frame. */
     initial_segment_target = STREAM_INITIAL_SEGMENTS;
-    /* Avoid the newest live-edge entry: some CDNs advertise it before every
-     * edge node can serve it. The producer will fetch it immediately after
-     * the player opens. */
+    /* Keep the blocking tune at one complete segment, but choose how far
+     * behind the newest published segment it begins. The producer can fetch
+     * the already-published gap while FFmpeg and MVD initialize, adding
+     * broadcast latency rather than download work to the critical path. */
     {
-        size_t end = media.count;
-        if (media.is_live && end > 1) end--;
-        selected = end < initial_segment_target ? end : initial_segment_target;
-        first = end - selected;
+        size_t newest = media.count > 0 ? media.count - 1u : 0u;
+        size_t lag = requested_lag;
+        size_t previous_safe;
+        if (media.count <= 1u) lag = 0u;
+        else if (lag > newest) lag = newest;
+        first = newest - lag;
+        previous_safe = newest > 0 ? newest - 1u : 0u;
+        /* A deeper start must not reach backward across a discontinuity that
+         * the old one-segment policy would have avoided. Fall back to the
+         * proven previous segment; the producer retains its strict forward
+         * discontinuity check. */
+        for (size_t i = first; i < previous_safe; i++) {
+            if (media.segments[i].discontinuity) {
+                first = previous_safe;
+                lag = newest - first;
+                break;
+            }
+        }
+        selected = media.count > 0 ? initial_segment_target : 0u;
+        stream.startup_lag_segments = (uint8_t)lag;
     }
     if (selected == 0) {
         result = MINIIPTV_STAGE_MEDIA_INVALID;
@@ -1064,12 +1178,26 @@ void miniiptv_live_stream_request_stop(void) {
 }
 
 void miniiptv_live_stream_stop(void) {
+    MiniIptvBufferShadow shadow_copy;
+    MiniIptvBufferShadowSnapshot snapshot;
+    MiniIptvChannel channel_copy;
+    bool save_profile;
     if (!stream.initialized) return;
     miniiptv_live_stream_request_stop();
     if (stream.producer) {
         threadJoin(stream.producer, UINT64_MAX);
         threadFree(stream.producer);
         stream.producer = NULL;
+    }
+    LightLock_Lock(&stream.lock);
+    shadow_copy = stream.buffer_shadow;
+    channel_copy = stream.channel;
+    save_profile = shadow_copy.valid_samples >= 3u;
+    LightLock_Unlock(&stream.lock);
+    if (save_profile) {
+        uint64_t now = osGetTime();
+        miniiptv_buffer_shadow_snapshot(&shadow_copy, now, false, &snapshot);
+        adaptive_profile_store(&channel_copy, &snapshot, now);
     }
     memset(&stream, 0, sizeof(stream));
 }
@@ -1181,6 +1309,8 @@ void miniiptv_live_stream_get_info(MiniIptvLiveInfo *info) {
     info->last_network_result = stream.last_network_result;
     info->rebuffering = stream.rebuffering;
     info->rendition_cache_hit = stream.rendition_cache_hit;
+    info->adaptive_profile_hit = stream.adaptive_profile_hit;
+    info->startup_lag_segments = stream.startup_lag_segments;
     info->producer_state = stream.producer_state;
     shadow_copy = stream.buffer_shadow;
     LightLock_Unlock(&stream.lock);

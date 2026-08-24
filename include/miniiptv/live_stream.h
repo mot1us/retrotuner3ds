@@ -65,6 +65,8 @@ typedef struct {
     int last_network_result;
     int rebuffering;
     int rendition_cache_hit;
+    int adaptive_profile_hit;
+    unsigned int startup_lag_segments;
     MiniIptvProducerState producer_state;
     MiniIptvBufferShadowSnapshot shadow;
 } MiniIptvLiveInfo;

@@ -67,6 +67,13 @@ ring, or 4 MiB atomic segment cap.
   cold or marginal channels, and three after repeated underruns.
 - Never select across an HLS discontinuity.
 
+Implemented in rc9.9. A cold channel begins two segments behind. After at least
+three validated segment samples, teardown saves the shadow recommendation in a
+fixed 32-entry, session-only profile table. Returning to that channel applies
+its one-, two-, or three-segment lag while the producer uses the already parsed
+media playlist to catch up concurrently with FFmpeg and MVD initialization.
+The applied lag and warm/cold profile state are included in telemetry.
+
 Starting farther behind adds broadcast latency rather than download work. It
 also gives the producer already-published segments to fetch while FFmpeg and
 MVD initialize, which is the best available way to build reserve entirely on
@@ -85,10 +92,11 @@ download headroom, and recent underruns, then clamped to 2.5--12 seconds and
 
 ## Session profiles
 
-A fixed 32-entry table will retain measurements and a recommended lag for each
-channel during the current app session. It requires only a few KiB of ordinary
-RAM, writes nothing to the SD card, and never logs channel URLs. Persistence can
-be considered only after the recommendations prove useful on hardware.
+A fixed 32-entry table retains measurements and a recommended lag for each
+channel during the current app session. It stores only a 64-bit channel-key
+hash plus numeric measurements, requires only a few KiB of ordinary RAM, writes
+nothing to the SD card, and never logs channel URLs. Persistence can be
+considered only after the recommendations prove useful on hardware.
 
 ## Safety invariants
 
