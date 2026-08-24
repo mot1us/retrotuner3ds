@@ -37,6 +37,11 @@ typedef struct {
     uint32_t no_new_poll_streak;
     uint32_t last_refill_ms;
     uint32_t last_refill_commits;
+    uint32_t app_region_total_bytes;
+    uint32_t heap_total_bytes;
+    uint32_t heap_used_bytes;
+    uint32_t linear_total_bytes;
+    uint32_t linear_free_bytes;
     int64_t last_error;
     bool rebuffering;
     bool periodic;

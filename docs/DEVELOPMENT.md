@@ -60,6 +60,13 @@ The pipeline detail page uses compact counters:
 These counters are diagnostic only and do not relax the MVD, segment-size,
 whole-segment, or teardown safety boundaries.
 
+During playback, `telemetry.csv` also records memory headroom every five
+seconds. `heap_used_bytes/heap_total_bytes` covers the fixed ordinary heap;
+`linear_free_bytes/linear_total_bytes` covers the larger linear allocator used
+by video, FFmpeg, and larger wrapped allocations; `app_region_total_bytes`
+identifies the process memory layout. The sampler reads allocator counters and
+never allocates test blocks.
+
 The rc9.7 `SHADOW` page reports what a future adaptive-buffer controller would
 choose while leaving the actual player unchanged:
 
@@ -126,7 +133,7 @@ temporary directory, tests and builds that clean snapshot, and refuses to
 include playlists:
 
 ```sh
-./scripts/package-release.sh 0.5.1-rc9.9
+./scripts/package-release.sh 0.5.1-rc9.10
 ```
 
 The argument must exactly match `RETROTUNER_VERSION` in

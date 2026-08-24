@@ -31,6 +31,15 @@
 #define DEF_UTIL_NS_TO_MS_D(s)				(double)(((double)(s)) / 1000000.0)
 #define DEF_UTIL_NS_TO_US_D(s)				(double)(((double)(s)) / 1000.0)
 
+typedef struct
+{
+	uint32_t app_region_total_bytes;
+	uint32_t heap_total_bytes;
+	uint32_t heap_used_bytes;
+	uint32_t linear_total_bytes;
+	uint32_t linear_free_bytes;
+} Util_memory_stats;
+
 /**
  * @brief Initialize platform.
  * @param arg (in) Platform specific arg.
@@ -141,6 +150,15 @@ uint32_t Util_base64_decode(const char* encoded_text, Str_data* text);
  * @note Thread safe.
 */
 uint32_t Util_check_free_linear_space(void);
+
+/**
+ * @brief Read allocator counters without probing allocations.
+ * @param out_stats (out) Current application, ordinary heap, and linear heap
+ * memory counters.
+ * @note Thread safe. This is intentionally separate from
+ * Util_check_free_ram(), which measures capacity by allocating memory.
+*/
+void Util_get_memory_stats(Util_memory_stats* out_stats);
 
 /**
  * @brief Check free memory size.

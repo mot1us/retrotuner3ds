@@ -116,6 +116,8 @@ int miniiptv_telemetry_log_open(const char *path, const char *version,
         "jitter_ms,rebuffering,recent_underruns,"
         "total_underruns,global_underruns,downloaded_segments,no_new_streak,"
         "ring_min_bytes,ring_max_bytes,last_refill_ms,last_refill_commits,"
+        "app_region_total_bytes,heap_total_bytes,heap_used_bytes,"
+        "linear_total_bytes,linear_free_bytes,"
         "last_error\n";
     if (!path || !version) return -1;
     miniiptv_telemetry_log_close();
@@ -210,6 +212,7 @@ void miniiptv_telemetry_log_record(
         ",%" PRIu32 ",%" PRIu32
         ",%" PRIu32 ",%" PRIu32 ",%u,%" PRIu32 ",%" PRIu32 ",%" PRIu64
         ",%" PRIu64 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32
+        ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32
         ",%" PRIu32 ",%" PRId64 "\n",
         version, elapsed_ms, event, channel, app_state, tune_phase,
         shadow_state, producer_state, sample->width, sample->height,
@@ -224,7 +227,10 @@ void miniiptv_telemetry_log_record(
         sample->global_underruns, sample->downloaded_segments,
         sample->no_new_poll_streak, sample->ring_min_bytes,
         sample->ring_max_bytes, sample->last_refill_ms,
-        sample->last_refill_commits, recorded_error);
+        sample->last_refill_commits, sample->app_region_total_bytes,
+        sample->heap_total_bytes, sample->heap_used_bytes,
+        sample->linear_total_bytes, sample->linear_free_bytes,
+        recorded_error);
     if (length <= 0 || (size_t)length >= sizeof(line) ||
         !append_line(line, (size_t)length))
         return;

@@ -843,7 +843,7 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
         log_sample.shadow_state = "";
         log_sample.producer_state = "";
         log_sample.last_error = player_error_code
-            ? (int64_t)(uint64_t)player_error_code
+            ? (int64_t)(int32_t)player_error_code
             : (int64_t)tune.result;
         log_sample.periodic = state == LIVE_APP_LOADING;
         miniiptv_telemetry_log_record(osGetTime(), &log_sample);

@@ -102,6 +102,7 @@
 #define MINIIPTV_COLOR_CYAN					(uint32_t)(0xFFFFEB5D)
 #define MINIIPTV_COLOR_SHADOW					(uint32_t)(0xFF120C08)
 #define MINIIPTV_BUFFER_METER_MS			(uint32_t)(8000)
+#define MINIIPTV_MEMORY_SAMPLE_INTERVAL_MS	(uint64_t)(5000)
 #define MINIIPTV_DETAILS_HIDDEN				(uint8_t)(0)
 #define MINIIPTV_DETAILS_PIPELINE			(uint8_t)(1)
 #define MINIIPTV_DETAILS_SHADOW				(uint8_t)(2)
@@ -803,6 +804,8 @@ static uint8_t vid_miniptv_detail_page = MINIIPTV_DETAILS_SHADOW;
 static bool vid_miniptv_return_requested = false;
 static bool vid_miniptv_switch_requested = false;
 static bool vid_live_startup_timeout_latched = false;
+static Util_memory_stats vid_miniptv_memory_stats = { 0, };
+static uint64_t vid_miniptv_memory_sample_ms = 0;
 
 static void Vid_reset_live_diagnostics(void);
 static void Vid_check_live_startup_timeout(void);
@@ -862,6 +865,16 @@ static void Vid_draw_miniiptv_live_overlay(void)
 	const char* rating_text = "CHECKING SIGNAL";
 	uint32_t state_color = MINIIPTV_COLOR_ORANGE;
 	char line[128] = { 0, };
+	uint64_t now_ms = osGetTime();
+
+	if(vid_miniptv_memory_sample_ms == 0
+	|| now_ms < vid_miniptv_memory_sample_ms
+	|| now_ms - vid_miniptv_memory_sample_ms >=
+		MINIIPTV_MEMORY_SAMPLE_INTERVAL_MS)
+	{
+		Util_get_memory_stats(&vid_miniptv_memory_stats);
+		vid_miniptv_memory_sample_ms = now_ms;
+	}
 
 	miniiptv_live_stream_get_info(&live_info);
 	miniiptv_live_stream_get_stats(&buffered, &downloaded, &read_kib,
@@ -904,10 +917,16 @@ static void Vid_draw_miniiptv_live_overlay(void)
 	log_sample.last_refill_ms = live_info.shadow.last_refill_ms;
 	log_sample.last_refill_commits =
 		live_info.shadow.last_refill_commits;
+	log_sample.app_region_total_bytes =
+		vid_miniptv_memory_stats.app_region_total_bytes;
+	log_sample.heap_total_bytes = vid_miniptv_memory_stats.heap_total_bytes;
+	log_sample.heap_used_bytes = vid_miniptv_memory_stats.heap_used_bytes;
+	log_sample.linear_total_bytes = vid_miniptv_memory_stats.linear_total_bytes;
+	log_sample.linear_free_bytes = vid_miniptv_memory_stats.linear_free_bytes;
 	log_sample.last_error = live_error;
 	log_sample.rebuffering = live_info.rebuffering != 0;
 	log_sample.periodic = true;
-	miniiptv_telemetry_log_record(osGetTime(), &log_sample);
+	miniiptv_telemetry_log_record(now_ms, &log_sample);
 
 	/* PLAYER_STATE_BUFFERING also covers the decoder's very short raw-frame
 	 * refills.  Those refills can pulse every few frames while the compressed

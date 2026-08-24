@@ -48,6 +48,11 @@ static void test_rows_and_events(void) {
     sample.periodic = true;
     sample.ring_bytes = 512u;
     sample.headroom_permille = 1800u;
+    sample.app_region_total_bytes = 130023424u;
+    sample.heap_total_bytes = 5242880u;
+    sample.heap_used_bytes = 1048576u;
+    sample.linear_total_bytes = 104857600u;
+    sample.linear_free_bytes = 73400320u;
     miniiptv_telemetry_log_record(1000, &sample);
     miniiptv_telemetry_log_record(1500, &sample);
     miniiptv_telemetry_log_record(2000, &sample);
@@ -63,6 +68,11 @@ static void test_rows_and_events(void) {
 
     data = read_file(path, NULL);
     assert(strstr(data, "version,elapsed_ms,event,channel") != NULL);
+    assert(strstr(data, "app_region_total_bytes,heap_total_bytes,"
+                        "heap_used_bytes,linear_total_bytes,"
+                        "linear_free_bytes,last_error") != NULL);
+    assert(strstr(data, ",130023424,5242880,1048576,104857600,"
+                        "73400320,0\n") != NULL);
     assert(strstr(data, ",START,") != NULL);
     assert(strstr(data, ",SAMPLE,") != NULL);
     assert(strstr(data, ",UNDERRUN,") != NULL);

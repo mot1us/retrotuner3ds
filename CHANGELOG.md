@@ -5,6 +5,9 @@ versioning while the player remains experimental.
 
 ## [Unreleased]
 
+- Add low-frequency, allocation-free memory telemetry for the application
+  region, ordinary heap, and linear heap; also preserve signed player errors in
+  the CSV diagnostics.
 - Add session-only adaptive startup depth: cold channels begin two published
   segments behind live, while measured repeat tunes apply a one-, two-, or
   three-segment lag without increasing the one-segment blocking download.

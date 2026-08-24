@@ -1092,6 +1092,28 @@ uint32_t Util_check_free_linear_space(void)
 	return linearSpaceFree();
 }
 
+void Util_get_memory_stats(Util_memory_stats* out_stats)
+{
+	struct mallinfo heap_info = { 0, };
+
+	if(!out_stats)
+		return;
+
+	memset(out_stats, 0, sizeof(*out_stats));
+	out_stats->app_region_total_bytes =
+		osGetMemRegionSize(MEMREGION_APPLICATION);
+	out_stats->heap_total_bytes = envGetHeapSize();
+	out_stats->linear_total_bytes = envGetLinearHeapSize();
+
+	/* Keep the snapshot ordered with the project's wrapped malloc calls.
+	 * mallinfo() reads newlib's counters without reserving a test block. */
+	LightLock_Lock(&util_malloc_mutex);
+	heap_info = mallinfo();
+	LightLock_Unlock(&util_malloc_mutex);
+	out_stats->heap_used_bytes = (uint32_t)heap_info.uordblks;
+	out_stats->linear_free_bytes = linearSpaceFree();
+}
+
 uint32_t Util_check_free_ram(void)
 {
 	//Put this array on static area so that we don't need to fly our stack.
