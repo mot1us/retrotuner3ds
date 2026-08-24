@@ -12,7 +12,7 @@
 #include "system/util/thread_types.h"
 #include "system/util/util.h"
 
-#define STREAM_RING_SIZE (6u * 1024u * 1024u)
+#define STREAM_RING_SIZE MINIIPTV_STREAM_RING_CAPACITY_BYTES
 #define STREAM_INITIAL_SEGMENTS 1
 #define STREAM_REBUFFER_TARGET_MS 3000u
 #define STREAM_REBUFFER_MIN_BYTES (128u * 1024u)
@@ -20,6 +20,7 @@
 #define STREAM_HIGH_WATER_BYTES (5u * 1024u * 1024u)
 #define STREAM_SLEEP_US 10000ULL
 #define STREAM_INITIAL_TUNE_TIMEOUT_MS 30000ULL
+#define STREAM_SHADOW_SAMPLE_MAX_DOWNLOAD_MS 300000ULL
 #define STREAM_RENDITION_CACHE_ENTRIES 4u
 #define STREAM_RENDITION_CACHE_TTL_MS 60000ULL
 #define TS_PACKET_SIZE 188u
@@ -77,6 +78,7 @@ typedef struct {
     int last_network_result;
     int last_error;
     MiniIptvProducerState producer_state;
+    MiniIptvBufferShadow buffer_shadow;
 } LiveStream;
 
 typedef struct {
@@ -412,10 +414,18 @@ static bool ring_commit_segment(const unsigned char *data, size_t size) {
             stream.ring_write = (stream.ring_write + size) % STREAM_RING_SIZE;
             stream.ring_count += size;
             stream.bytes_written += size;
+            miniiptv_buffer_shadow_note_segment_published(
+                &stream.buffer_shadow);
+            miniiptv_buffer_shadow_note_ring(&stream.buffer_shadow,
+                (uint32_t)stream.ring_count, stream.reader_started);
             LightLock_Unlock(&stream.lock);
             return true;
         }
         can_wait = stream.reader_started;
+        /* A segment can require more free space before the nominal 5 MiB
+         * high-water threshold. Exclude that deliberate producer wait from
+         * the next delivery-gap sample too. */
+        miniiptv_buffer_shadow_note_high_water(&stream.buffer_shadow);
         LightLock_Unlock(&stream.lock);
         /* Before playback starts there is no consumer that can free space.
          * Fail cleanly instead of deadlocking during initial buffering. */
@@ -440,7 +450,13 @@ static int stream_segment(const HlsSegment *segment, size_t *downloaded_size) {
     SegmentWriter writer;
     NetworkStreamMetrics metrics = {0};
     uint64_t download_started;
+    uint64_t download_finished;
     uint64_t download_elapsed;
+    uint64_t commit_ms = 0;
+    uint32_t duration_ms = 0;
+    uint32_t download_ms = 0;
+    uint32_t shadow_download_ms = 0;
+    bool download_clock_valid;
     bool too_large = false;
     bool valid_ts = false;
     bool committed = false;
@@ -458,7 +474,11 @@ static int stream_segment(const HlsSegment *segment, size_t *downloaded_size) {
                                  MINIIPTV_SEGMENT_LIMIT,
                                  segment_write_callback, &writer,
                                  curl_should_cancel, NULL, &metrics);
-    download_elapsed = osGetTime() - download_started;
+    download_finished = osGetTime();
+    download_clock_valid = download_finished >= download_started;
+    download_elapsed = download_clock_valid
+        ? download_finished - download_started : 0;
+    if (download_clock_valid && download_elapsed == 0) download_elapsed = 1;
     if (result == -5) {
         int cancelled = cancellation_result();
         if (cancelled != MINIIPTV_STAGE_OK) result = cancelled;
@@ -466,8 +486,10 @@ static int stream_segment(const HlsSegment *segment, size_t *downloaded_size) {
     too_large = result == MINIIPTV_NETWORK_TOO_LARGE;
     if (result == 0 && metrics.received_size == writer.total_size)
         valid_ts = is_complete_mpeg_ts(segment_staging, writer.total_size);
-    if (result == 0 && valid_ts)
+    if (result == 0 && valid_ts) {
         committed = ring_commit_segment(segment_staging, writer.total_size);
+        if (committed) commit_ms = osGetTime();
+    }
     if (downloaded_size) *downloaded_size = committed ? writer.total_size : 0;
 
     LightLock_Lock(&stream.lock);
@@ -475,24 +497,37 @@ static int stream_segment(const HlsSegment *segment, size_t *downloaded_size) {
     stream.reported_segment_bytes = metrics.reported_size;
     stream.last_network_result = result;
     if (result == 0 && valid_ts && committed) {
-        if (download_elapsed == 0) download_elapsed = 1;
+        if (segment->duration > 0.0) {
+            double scaled_duration = segment->duration * 1000.0;
+            if (scaled_duration <= (double)UINT32_MAX - 0.5)
+                duration_ms = (uint32_t)(scaled_duration + 0.5);
+        }
+        if (download_clock_valid)
+            download_ms = download_elapsed > UINT32_MAX
+                ? UINT32_MAX : (uint32_t)download_elapsed;
+        if (download_clock_valid
+        && download_elapsed <= STREAM_SHADOW_SAMPLE_MAX_DOWNLOAD_MS)
+            shadow_download_ms = download_ms;
         stream.downloaded_segments++;
         stream.last_segment_bytes = writer.total_size;
-        stream.last_download_milliseconds = download_elapsed > 0xffffffffu
-            ? 0xffffffffu : (unsigned int)download_elapsed;
-        stream.last_segment_milliseconds = segment->duration > 0.0
-            ? (unsigned int)(segment->duration * 1000.0 + 0.5) : 0;
-        {
+        stream.last_download_milliseconds = download_ms;
+        stream.last_segment_milliseconds = duration_ms;
+        if (download_ms > 0) {
             uint64_t network_bps =
-                ((uint64_t)writer.total_size * 8000u) / download_elapsed;
+                ((uint64_t)writer.total_size * 8000u) / download_ms;
             stream.network_bandwidth = network_bps > 0xffffffffu
                 ? 0xffffffffu : (unsigned long)network_bps;
         }
-        if (segment->duration > 0.0) {
-            stream.measured_segment_bytes += writer.total_size;
-            stream.measured_segment_milliseconds +=
-                (uint64_t)(segment->duration * 1000.0 + 0.5);
+        else {
+            stream.network_bandwidth = 0;
         }
+        if (duration_ms > 0) {
+            stream.measured_segment_bytes += writer.total_size;
+            stream.measured_segment_milliseconds += duration_ms;
+        }
+        miniiptv_buffer_shadow_note_segment(&stream.buffer_shadow,
+            (uint32_t)writer.total_size, duration_ms, shadow_download_ms,
+            commit_ms);
         stream.last_sequence = segment->sequence;
         stream.last_error = 0;
     } else {
@@ -795,8 +830,10 @@ static void producer_main(void *unused) {
 
         LightLock_Lock(&stream.lock);
         buffered = stream.ring_count;
-        if (buffered >= STREAM_HIGH_WATER_BYTES)
+        if (buffered >= STREAM_HIGH_WATER_BYTES) {
             stream.producer_state = MINIIPTV_PRODUCER_RING_HIGH;
+            miniiptv_buffer_shadow_note_high_water(&stream.buffer_shadow);
+        }
         LightLock_Unlock(&stream.lock);
         if (buffered >= STREAM_HIGH_WATER_BYTES) {
             Util_sleep(50000);
@@ -820,7 +857,15 @@ static void producer_main(void *unused) {
                 continue;
             }
         }
-        if (media.target_duration) stream.target_duration = media.target_duration;
+        if (media.target_duration) {
+            LightLock_Lock(&stream.lock);
+            stream.target_duration = media.target_duration;
+            miniiptv_buffer_shadow_set_target(&stream.buffer_shadow,
+                media.target_duration > UINT32_MAX / 1000u
+                    ? UINT32_MAX : media.target_duration * 1000u,
+                osGetTime());
+            LightLock_Unlock(&stream.lock);
+        }
         if (media.count > 0 && stream.last_sequence > 0 &&
             media.segments[media.count - 1].sequence < stream.last_sequence) {
             LightLock_Lock(&stream.lock);
@@ -856,6 +901,12 @@ static void producer_main(void *unused) {
                 break;
             }
             added = true;
+        }
+        if (!used_seed) {
+            LightLock_Lock(&stream.lock);
+            miniiptv_buffer_shadow_note_playlist_poll(&stream.buffer_shadow,
+                found_new_segment);
+            LightLock_Unlock(&stream.lock);
         }
         /* A consumed seed with no newer sequence is stale but not an error;
          * refresh immediately.  Preserve the normal retry delay when a
@@ -909,6 +960,7 @@ int miniiptv_live_stream_start(const MiniIptvChannel *channel,
     memset(&stream, 0, sizeof(stream));
     LightLock_Init(&stream.lock);
     stream.initialized = true;
+    miniiptv_buffer_shadow_reset(&stream.buffer_shadow, 6000u);
     stream.channel = *channel;
     stream.producer_state = MINIIPTV_PRODUCER_STARTING;
     stream.initial_tune_active = true;
@@ -921,6 +973,10 @@ int miniiptv_live_stream_start(const MiniIptvChannel *channel,
     result = resolve_initial_playlist(channel, &media);
     if (result != MINIIPTV_STAGE_OK) goto failure;
     stream.target_duration = media.target_duration ? media.target_duration : 6;
+    miniiptv_buffer_shadow_set_target(&stream.buffer_shadow,
+        stream.target_duration > UINT32_MAX / 1000u
+            ? UINT32_MAX : stream.target_duration * 1000u,
+        osGetTime());
     /* A complete transport-stream segment gives FFmpeg a reliable PAT/PMT,
      * SPS/PPS, and keyframe before the player opens. Hardware testing showed
      * that handing off a partially downloaded segment caused a long white
@@ -1040,11 +1096,19 @@ int miniiptv_live_stream_read(unsigned char *buffer, int buffer_size) {
          * low-bitrate channels. */
         if (stream.bytes_read > 0 && available == 0 &&
             !stream.rebuffering && !finished) {
+            uint64_t now = osGetTime();
             stream.rebuffering = true;
             stream.underruns++;
+            miniiptv_buffer_shadow_note_ring(&stream.buffer_shadow, 0, true);
+            miniiptv_buffer_shadow_begin_refill(&stream.buffer_shadow, now);
         }
-        if (stream.rebuffering && available >= rebuffer_target)
+        if (stream.rebuffering && available >= rebuffer_target) {
+            uint64_t now = osGetTime();
             stream.rebuffering = false;
+            miniiptv_buffer_shadow_end_refill(&stream.buffer_shadow, now);
+            miniiptv_buffer_shadow_note_ring(&stream.buffer_shadow,
+                (uint32_t)available, true);
+        }
         if ((!stream.rebuffering || finished) && available > 0) {
             contiguous = STREAM_RING_SIZE - stream.ring_read;
             chunk = (size_t)buffer_size;
@@ -1054,6 +1118,11 @@ int miniiptv_live_stream_read(unsigned char *buffer, int buffer_size) {
             stream.ring_read = (stream.ring_read + chunk) % STREAM_RING_SIZE;
             stream.ring_count -= chunk;
             stream.bytes_read += chunk;
+            /* This is deliberately clock-free and division-free: it records
+             * exact reserve minima/risk on the hot FFmpeg read path without
+             * extending the shared-lock hold with shadow calculations. */
+            miniiptv_buffer_shadow_note_ring(&stream.buffer_shadow,
+                (uint32_t)stream.ring_count, true);
             LightLock_Unlock(&stream.lock);
             return (int)chunk;
         }
@@ -1085,10 +1154,14 @@ void miniiptv_live_stream_get_stats(size_t *buffered_bytes,
 }
 
 void miniiptv_live_stream_get_info(MiniIptvLiveInfo *info) {
+    MiniIptvBufferShadow shadow_copy;
+    uint64_t now;
     if (!info) return;
     memset(info, 0, sizeof(*info));
     if (!stream.initialized) return;
     LightLock_Lock(&stream.lock);
+    miniiptv_buffer_shadow_note_ring(&stream.buffer_shadow,
+        (uint32_t)stream.ring_count, stream.reader_started);
     snprintf(info->channel_name, sizeof(info->channel_name), "%s",
              stream.channel.name);
     snprintf(info->codecs, sizeof(info->codecs), "%s", stream.variant_codecs);
@@ -1109,5 +1182,9 @@ void miniiptv_live_stream_get_info(MiniIptvLiveInfo *info) {
     info->rebuffering = stream.rebuffering;
     info->rendition_cache_hit = stream.rendition_cache_hit;
     info->producer_state = stream.producer_state;
+    shadow_copy = stream.buffer_shadow;
     LightLock_Unlock(&stream.lock);
+    now = osGetTime();
+    miniiptv_buffer_shadow_snapshot(&shadow_copy, now, info->rebuffering,
+        &info->shadow);
 }

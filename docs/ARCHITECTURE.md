@@ -27,6 +27,12 @@ return and tears down the live session before another channel is selected.
    avoiding scarce linear memory.
 7. A custom FFmpeg input bridge exposes the ring as a streaming media source.
 
+An observation-only shadow controller samples complete segment delivery and
+actual ring underruns. It derives integer EWMAs for content rate, network
+headroom, delivery gaps, and gap deviation, then reports a desired reserve and
+live-edge lag. The controller owns no pointers and cannot change playback in
+rc9.7; its state is discarded with the existing stream teardown.
+
 ## Playback path
 
 FFmpeg demuxes MPEG-TS and AAC. Compatible H.264 packets are normalized by
@@ -81,9 +87,14 @@ first-frame phases have separate bounded waits. Their timeout path uses the
 ordinary worker-owned abort sequence; it never frees MVD surfaces from the draw
 thread.
 
+After the first frame, `SELECT` cycles a shadow-buffer page, the pipeline page,
+and a clean view. `SHADOW` values are recommendations for later hardware-tested
+releases, not active settings.
+
 ## Tests
 
-Host tests exercise HLS parsing/staging and H.264 Annex B normalization under
-AddressSanitizer and UndefinedBehaviorSanitizer. Console integration still
-requires a real New 3DS-family device because MVD behavior cannot be faithfully
-validated by ordinary desktop tests or current emulators.
+Host tests exercise HLS parsing/staging, H.264 Annex B normalization, and the
+integer shadow-buffer controller under AddressSanitizer and
+UndefinedBehaviorSanitizer. Console integration still requires a real New
+3DS-family device because MVD behavior cannot be faithfully validated by
+ordinary desktop tests or current emulators.

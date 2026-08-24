@@ -5,6 +5,11 @@ versioning while the player remains experimental.
 
 ## [Unreleased]
 
+- Add an observation-only adaptive-buffer controller that measures segment
+  delivery headroom, delivery-gap jitter, reserve pressure, and real refill
+  stalls without changing startup, playback, or recovery behavior.
+- Add a dedicated, readable shadow-controller telemetry page to the live deck;
+  `SELECT` cycles shadow metrics, pipeline diagnostics, and a clean view.
 - Break the live first-frame circular wait once one validated texture is
   already queued: resume through the existing buffering-complete notification,
   present it, then restore the ordinary MVD refill threshold.

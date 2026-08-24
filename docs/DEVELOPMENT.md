@@ -46,9 +46,9 @@ Open a pull request into `main`. For playback work, record desktop test results
 and the real-hardware result separately. A pull request can remain open while a
 `.3dsx` candidate is being tested.
 
-## Live startup diagnostics
+## Live diagnostics
 
-The rc9.6 detail overlay uses compact pipeline counters:
+The pipeline detail page uses compact counters:
 
 - `V packet>decode>texture>draw` identifies the first video stage that stopped.
 - `A<tracks>:state demux>frame>queue` separates FFmpeg audio discovery,
@@ -59,6 +59,21 @@ The rc9.6 detail overlay uses compact pipeline counters:
 
 These counters are diagnostic only and do not relax the MVD, segment-size,
 whole-segment, or teardown safety boundaries.
+
+The rc9.7 `SHADOW` page reports what a future adaptive-buffer controller would
+choose while leaving the actual player unchanged:
+
+- `H` is segment media time divided by download time (`2.0x` means the network
+  delivered that sample twice as fast as playback consumes it).
+- `WANT` is the calculated reserve target and `LAG` is the suggested number of
+  published HLS segments to stay behind the live edge.
+- `SEG`, `GAP`, and `JIT` are smoothed media duration, complete-segment delivery
+  gap, and delivery-gap deviation.
+- `U90` counts real empty-ring underruns in the recent 90-second window.
+
+Press `SELECT` to cycle shadow telemetry, pipeline diagnostics, and a clean
+view. Every value is numeric telemetry copied under the stream lock; it does
+not change the rc9.7 tune, ring, or decoder behavior.
 
 Player failures return to a dedicated error panel that preserves the final
 video and audio snapshot on separate readable rows. This snapshot is cleared
@@ -111,7 +126,7 @@ temporary directory, tests and builds that clean snapshot, and refuses to
 include playlists:
 
 ```sh
-./scripts/package-release.sh 0.5.1-rc9.6
+./scripts/package-release.sh 0.5.1-rc9.7
 ```
 
 The argument must exactly match `RETROTUNER_VERSION` in

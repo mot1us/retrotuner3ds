@@ -6,9 +6,10 @@
 #include "miniiptv/hls.h"
 #include "miniiptv/network.h"
 #include "miniiptv/playlist.h"
+#include "miniiptv/stream_limits.h"
 
 #define MINIIPTV_PREFETCH_SEGMENTS 3
-#define MINIIPTV_SEGMENT_LIMIT (4u * 1024u * 1024u)
+#define MINIIPTV_SEGMENT_LIMIT MINIIPTV_STREAM_ATOMIC_SEGMENT_LIMIT_BYTES
 #define MINIIPTV_PREFETCH_LIMIT (12u * 1024u * 1024u)
 
 typedef int (*MiniIptvFetchFunction)(const char *url, const char *user_agent,

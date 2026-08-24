@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "miniiptv/buffer_shadow.h"
 #include "miniiptv/hls_prefetch.h"
 #include "miniiptv/playlist.h"
 
@@ -65,6 +66,7 @@ typedef struct {
     int rebuffering;
     int rendition_cache_hit;
     MiniIptvProducerState producer_state;
+    MiniIptvBufferShadowSnapshot shadow;
 } MiniIptvLiveInfo;
 
 int miniiptv_live_stream_start(const MiniIptvChannel *channel,

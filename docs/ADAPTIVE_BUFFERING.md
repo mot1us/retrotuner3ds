@@ -33,9 +33,22 @@ Network reserve and decoder stalls remain separate signals.
 ### rc9.7: shadow controller
 
 - Calculate `COLD`, `HEALTHY`, `AT RISK`, `MARGINAL`, `REFILL`, and
-  `UNSUSTAINABLE` states without changing playback.
-- Display headroom, jitter, desired reserve, and recommended live-edge lag.
+  `UNSUSTAINABLE` states in a fixed-size, integer-only helper without changing
+  playback.
+- Display headroom, delivery-gap jitter, desired reserve, and recommended
+  live-edge lag on a clearly labelled `SHADOW` page.
 - Compare the recommendations with five-minute hardware tests.
+
+The shadow helper has no clock, lock, allocator, network access, or decoder
+dependency. The live-stream owner supplies timestamps and validated segment
+samples while holding its existing lock. Failed or partial downloads are never
+sampled, and time spent deliberately paused at the ring high-water mark is
+excluded from the following delivery-gap sample.
+
+`SELECT` cycles the shadow page, existing pipeline diagnostics, and a clean
+view. A shadow recommendation is telemetry only in rc9.7: it does not alter the
+one-segment initial tune, three-second refill, 5 MiB high-water mark, 6 MiB
+ring, or 4 MiB atomic segment cap.
 
 ### rc9.8: adaptive start depth
 
