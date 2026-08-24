@@ -78,9 +78,10 @@ resolution, profile, frame rate, and bitrate.
   until the decoder service exits.
 - The producer pauses at a high-water mark. Playback only enters its bounded
   three-second refill after the network ring actually runs empty.
-- Encrypted, byte-range, and fMP4 playlists are rejected before handoff;
-  later discontinuities or media-sequence gaps stop the producer before the
-  changed segment reaches the decoder.
+- Encrypted, byte-range, and fMP4 playlists are rejected before handoff.
+  Explicit discontinuities and playlist regressions stop the producer before
+  changed media reaches the decoder. An ordinary forward media-sequence gap is
+  treated as a recoverable live-window resynchronization and logged.
 - Stop and channel-change paths request producer cancellation, join the thread,
   close FFmpeg/MVD resources, and reset the ring.
 

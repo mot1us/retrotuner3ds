@@ -79,6 +79,7 @@ static void test_oversized_url_is_rejected(void) {
 
 static void test_channel_limit(void) {
     char text[8192];
+    char expected_name[32];
     MiniIptvPlaylist playlist;
     size_t offset = 0;
     unsigned int i;
@@ -98,8 +99,10 @@ static void test_channel_limit(void) {
     assert(playlist_parse_text(text, &playlist) == 0);
     assert(playlist.count == MINIIPTV_MAX_CHANNELS);
     assert(strcmp(playlist.channels[0].name, "Channel 0") == 0);
+    snprintf(expected_name, sizeof(expected_name), "Channel %u",
+             MINIIPTV_MAX_CHANNELS - 1u);
     assert(strcmp(playlist.channels[MINIIPTV_MAX_CHANNELS - 1].name,
-                  "Channel 31") == 0);
+                  expected_name) == 0);
 }
 
 int main(void) {

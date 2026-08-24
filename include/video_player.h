@@ -17,6 +17,7 @@
 
 typedef bool (*Vid_idle_hid_hook)(const Hid_info* key);
 typedef void (*Vid_idle_draw_hook)(bool top_screen, uint32_t color, uint32_t back_color);
+typedef void (*Vid_init_draw_hook)(void);
 typedef void (*Vid_live_error_hook)(uint32_t error_code);
 typedef void (*Vid_live_channel_hook)(int direction);
 
@@ -62,6 +63,9 @@ void Vid_init(bool draw);
 void Vid_exit(bool draw);
 
 void Vid_enable_standalone_mode(void);
+
+//Keep a standalone splash refreshed while the inherited decoder initializes.
+void Vid_set_init_draw_hook(Vid_init_draw_hook draw_hook);
 
 void Vid_set_idle_hooks(Vid_idle_hid_hook hid_hook, Vid_idle_draw_hook draw_hook);
 

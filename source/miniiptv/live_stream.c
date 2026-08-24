@@ -84,6 +84,7 @@ typedef struct {
     unsigned int last_segment_milliseconds;
     unsigned long network_bandwidth;
     unsigned long downloaded_segments;
+    unsigned long sequence_resyncs;
     unsigned long underruns;
     size_t attempted_segment_bytes;
     size_t reported_segment_bytes;
@@ -1122,6 +1123,7 @@ static void producer_main(void *unused) {
         for (size_t i = 0; i < media.count && !stop_was_requested(); i++) {
             size_t ignored_size = 0;
             const HlsSegment *audio_segment = NULL;
+            bool sequence_gap = false;
             if (media.segments[i].sequence <= stream.last_sequence) continue;
             found_new_segment = true;
             if (stream.separate_audio) {
@@ -1133,10 +1135,7 @@ static void producer_main(void *unused) {
                 }
                 if (audio_segment->sequence <= stream.last_audio_sequence)
                     continue;
-                if (audio_segment->discontinuity ||
-                    (stream.last_audio_sequence > 0 &&
-                     audio_segment->sequence !=
-                         stream.last_audio_sequence + 1u)) {
+                if (audio_segment->discontinuity) {
                     LightLock_Lock(&stream.lock);
                     stream.last_error = MINIIPTV_STAGE_DISCONTINUITY;
                     stream.stop_requested = true;
@@ -1144,16 +1143,29 @@ static void producer_main(void *unused) {
                     LightLock_Unlock(&stream.lock);
                     break;
                 }
+                sequence_gap = stream.last_audio_sequence > 0 &&
+                    audio_segment->sequence >
+                        stream.last_audio_sequence + 1u;
             }
-            if (media.segments[i].discontinuity ||
-                (stream.last_sequence > 0 &&
-                 media.segments[i].sequence != stream.last_sequence + 1)) {
+            if (media.segments[i].discontinuity) {
                 LightLock_Lock(&stream.lock);
                 stream.last_error = MINIIPTV_STAGE_DISCONTINUITY;
                 stream.stop_requested = true;
                 stream.producer_state = MINIIPTV_PRODUCER_ERROR;
                 LightLock_Unlock(&stream.lock);
                 break;
+            }
+            if (stream.last_sequence > 0 &&
+                media.segments[i].sequence > stream.last_sequence + 1u)
+                sequence_gap = true;
+            if (sequence_gap) {
+                /* A sliding live window can legitimately advance past us
+                 * while the New 3DS is downloading a slow segment. MPEG-TS
+                 * HLS segments begin on independently decodable boundaries,
+                 * so resume at the next available segment instead of turning
+                 * an ordinary forward skip into a terminal -11. Explicit
+                 * EXT-X-DISCONTINUITY tags remain fail-closed above because
+                 * they can signal a codec or timestamp-domain change. */
             }
             LightLock_Lock(&stream.lock);
             stream.producer_state = MINIIPTV_PRODUCER_SEGMENT;
@@ -1167,6 +1179,11 @@ static void producer_main(void *unused) {
                 for (int retry = 0; retry < 5 && !stop_was_requested(); retry++)
                     Util_sleep(100000);
                 break;
+            }
+            if (sequence_gap) {
+                LightLock_Lock(&stream.lock);
+                stream.sequence_resyncs++;
+                LightLock_Unlock(&stream.lock);
             }
             added = true;
         }
@@ -1519,6 +1536,7 @@ void miniiptv_live_stream_get_info(MiniIptvLiveInfo *info) {
     info->bandwidth = stream.variant_bandwidth;
     info->measured_bandwidth = measured_bandwidth_locked();
     info->network_bandwidth = stream.network_bandwidth;
+    info->sequence_resyncs = stream.sequence_resyncs;
     info->last_segment_bytes = stream.last_segment_bytes;
     info->attempted_segment_bytes = stream.attempted_segment_bytes;
     info->reported_segment_bytes = stream.reported_segment_bytes;

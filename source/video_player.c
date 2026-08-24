@@ -794,6 +794,7 @@ static bool vid_embedded_test_mode = false;
 static bool vid_embedded_exit_requested = false;
 static Vid_idle_hid_hook vid_idle_hid_hook = NULL;
 static Vid_idle_draw_hook vid_idle_draw_hook = NULL;
+static Vid_init_draw_hook vid_init_draw_hook = NULL;
 static Vid_live_error_hook vid_live_error_hook = NULL;
 static Vid_live_channel_hook vid_live_channel_hook = NULL;
 static volatile uint32_t vid_playback_return_generation = 0;
@@ -892,6 +893,7 @@ static void Vid_draw_miniiptv_live_overlay(void)
 		miniiptv_live_producer_state_label(live_info.producer_state);
 	log_sample.ring_bytes = buffered;
 	log_sample.downloaded_segments = downloaded;
+	log_sample.sequence_resyncs = live_info.sequence_resyncs;
 	log_sample.global_underruns = underruns;
 	log_sample.width = live_info.width;
 	log_sample.height = live_info.height;
@@ -2176,6 +2178,11 @@ void Vid_init(bool draw)
 	{
 		if(draw)
 			Vid_draw_init_exit_message();
+		else if(vid_init_draw_hook)
+		{
+			vid_init_draw_hook();
+			Util_sleep(16000);
+		}
 		else
 			Util_sleep(20000);
 	}
@@ -2196,6 +2203,11 @@ void Vid_enable_standalone_mode(void)
 {
 	vid_embedded_test_mode = true;
 	__atomic_store_n(&vid_embedded_exit_requested, false, __ATOMIC_RELEASE);
+}
+
+void Vid_set_init_draw_hook(Vid_init_draw_hook draw_hook)
+{
+	vid_init_draw_hook = draw_hook;
 }
 
 void Vid_set_idle_hooks(Vid_idle_hid_hook hid_hook, Vid_idle_draw_hook draw_hook)

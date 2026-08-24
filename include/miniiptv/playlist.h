@@ -3,7 +3,7 @@
 
 #include <stddef.h>
 
-#define MINIIPTV_MAX_CHANNELS 32
+#define MINIIPTV_MAX_CHANNELS 64
 #define MINIIPTV_NAME_MAX 64
 #define MINIIPTV_GROUP_MAX 32
 #define MINIIPTV_URL_MAX 1024

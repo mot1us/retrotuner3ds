@@ -13,7 +13,7 @@ It has only been tested on that model; other 3DS-family systems are unverified.
 - Live, continuous HLS playback—segments are streamed into a bounded memory
   ring rather than downloading an entire program first.
 - Hardware-accelerated H.264 decoding on the tested New Nintendo 3DS.
-- Up to 32 channels from a user-provided `channels.m3u` file, shown in pages.
+- Up to 64 channels from a user-provided `channels.m3u` file, shown in pages.
 - Automatic selection of the lowest advertised HLS rendition.
 - Retro dual-screen channel deck, buffering state, and stream diagnostics.
 - A bounded diagnostics log for hardware buffer testing.
@@ -57,8 +57,9 @@ Each app launch replaces:
 During tuning and playback, the file records monotonic elapsed time, channel
 name, pipeline state, compressed-ring depth, segment delivery timing, shadow
 buffer recommendations, applied startup lag, warm/cold profile state,
-underruns, and errors. Normal channel-switch cancellation is not recorded as
-an error. It never records stream URLs, video, or audio. Rows are buffered in
+live-window sequence resynchronizations, underruns, and errors. Normal
+channel-switch cancellation is not recorded as an error. It never records
+stream URLs, video, or audio. Rows are buffered in
 ordinary RAM and sampled every two seconds for the first minute after launch
 or a channel change, then every ten seconds. State changes, errors, underruns,
 and channel changes are recorded immediately. Data is flushed every ten
@@ -83,7 +84,7 @@ RetroTuner3DS supports a deliberately small subset of extended M3U:
 https://example.test/live/index.m3u8
 ```
 
-The parser accepts up to 32 channels. `user-agent` and `referrer` attributes
+The parser accepts up to 64 channels. `user-agent` and `referrer` attributes
 are supported for streams that legitimately require them. If
 `sd:/3ds/retrotuner3ds/channels.m3u` is missing or invalid, the app displays its
 expected location instead of loading bundled stations.

@@ -266,9 +266,10 @@ void Menu_init(void)
 		Util_err_set_show_flag(true);
 	}
 
-	for (uint16_t i = 0; i < DEF_EXFONT_NUM_OF_FONT_NAME; i++)
-		Exfont_set_external_font_request_state(i, true);
-
+	/* RetroTuner's UI and channel deck are intentionally ASCII-only. Loading
+	 * the inherited project's full CJK/Hangul/Unicode atlas costs several
+	 * seconds at startup and provides no glyphs this standalone app uses. */
+	Exfont_set_external_font_request_state(DEF_EXFONT_BLOCK_BASIC_LATIN, true);
 	Exfont_request_load_external_font();
 
 	menu_thread_run = true;

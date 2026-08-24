@@ -14,6 +14,7 @@ typedef struct {
     const char *producer_state;
     uint64_t ring_bytes;
     uint64_t downloaded_segments;
+    uint64_t sequence_resyncs;
     uint64_t global_underruns;
     uint32_t width;
     uint32_t height;

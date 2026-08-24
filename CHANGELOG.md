@@ -5,6 +5,15 @@ versioning while the player remains experimental.
 
 ## [Unreleased]
 
+- Recover from ordinary forward HLS media-sequence gaps when a slow client
+  falls behind a sliding live window. Explicit `EXT-X-DISCONTINUITY` markers
+  and playlist regressions still fail closed before changed media reaches the
+  decoder.
+- Record producer sequence resynchronizations in `telemetry.csv` so hardware
+  tests can distinguish a recovered live-window skip from a decoder failure.
+- Load only the Basic Latin font block used by the interface and keep the
+  RetroTuner boot frame refreshed while the inherited video system starts.
+- Raise the user playlist limit from 32 to 64 channels.
 - Detect HLS `EXT-X-MEDIA` audio groups and, when video and AAC arrive as
   separate aligned MPEG-TS renditions, combine them into one bounded transport
   stream before the existing FFmpeg/MVD pipeline. Unsafe or unalignable tables
@@ -110,7 +119,7 @@ versioning while the player remains experimental.
   live worker before freeing shared state.
 - Order START shutdown as producer cancellation, player-thread join, decoder
   close, then stream and network teardown.
-- Stop cleanly at HLS discontinuities or media-sequence gaps.
+- Stop cleanly at HLS discontinuities or unsafe media-sequence changes.
 - Fix the inherited 48-frame restart threshold that left the three-slot MVD
   queue permanently stuck at 4.17% on video-only or unsupported-audio feeds.
 - Replace blank startup textures with a dark animated signal-lock screen.
