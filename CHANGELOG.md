@@ -5,6 +5,16 @@ versioning while the player remains experimental.
 
 ## [Unreleased]
 
+- Force automatic relocks to rebuild a conservative two-segment startup
+  reserve instead of reusing a stale one-segment warm profile from before the
+  stream boundary.
+- Identify HLS discontinuities, playlist regressions, decoder format changes,
+  and repeated oversized segments separately in hardware telemetry, including
+  a session relock counter.
+- Replace the visible boundary error/deck flash with an orange relock state and
+  the animated tuning transition while FFmpeg/MVD is rebuilt.
+- Back off transient startup network retries by 250 ms and then 1 second while
+  preserving the existing two-retry and 30-second tune bounds.
 - Add bounded clean relocking after explicit HLS discontinuities, playlist
   regressions, or player-detected format boundaries. Every relock fully tears
   down FFmpeg/MVD before opening the fresh signal.

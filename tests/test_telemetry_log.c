@@ -47,6 +47,9 @@ static void test_rows_and_events(void) {
     sample.producer_state = "LIVE EDGE";
     sample.periodic = true;
     sample.ring_bytes = 512u;
+    sample.boundary_reason = 2u;
+    sample.relock_reason = 1u;
+    sample.automatic_relocks = 3u;
     sample.headroom_permille = 1800u;
     sample.rebuffer_target_bytes = 524288u;
     sample.rebuffer_wait_limit_ms = 6000u;
@@ -82,6 +85,9 @@ static void test_rows_and_events(void) {
     assert(strstr(data, "version,elapsed_ms,event,channel") != NULL);
     assert(strstr(data, "want_ms,rebuffer_target_bytes,"
                         "rebuffer_wait_limit_ms,lag_segments") != NULL);
+    assert(strstr(data, "oversized_segment_skips,boundary_reason,"
+                        "relock_reason,automatic_relocks,no_new_streak")
+           != NULL);
     assert(strstr(data, "app_region_total_bytes,heap_total_bytes,"
                         "heap_used_bytes,linear_total_bytes,"
                         "linear_free_bytes,video_packets,") != NULL);

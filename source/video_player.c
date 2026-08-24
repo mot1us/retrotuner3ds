@@ -895,6 +895,9 @@ static void Vid_draw_miniiptv_live_overlay(void)
 	log_sample.downloaded_segments = downloaded;
 	log_sample.sequence_resyncs = live_info.sequence_resyncs;
 	log_sample.oversized_segment_skips = live_info.oversized_segment_skips;
+	log_sample.boundary_reason = live_info.boundary_reason;
+	log_sample.relock_reason = live_info.relock_reason;
+	log_sample.automatic_relocks = live_info.automatic_relocks;
 	log_sample.global_underruns = underruns;
 	log_sample.width = live_info.width;
 	log_sample.height = live_info.height;
@@ -971,7 +974,15 @@ static void Vid_draw_miniiptv_live_overlay(void)
 			state_text = "1ST FRAME";
 	}
 
-	if(live_error != 0)
+	if(live_error == MINIIPTV_STAGE_DISCONTINUITY)
+	{
+		/* Keep presenting already-buffered frames while the producer has asked
+		 * for a clean decoder rebuild. This is a controlled station relock, not
+		 * a terminal playback failure. */
+		state_text = "RELOCK";
+		state_color = MINIIPTV_COLOR_ORANGE;
+	}
+	else if(live_error != 0)
 	{
 		state_text = "SIGNAL ERROR";
 		state_color = DEF_DRAW_RED;
@@ -1002,8 +1013,12 @@ static void Vid_draw_miniiptv_live_overlay(void)
 	/* This is only the compressed network ring. FFmpeg packets, decoded MVD
 	 * frames, and speaker buffers are downstream and intentionally excluded.
 	 * Color it against the real refill target instead of arbitrary seconds. */
-	if(live_error != 0 || live_info.rebuffering || buffered == 0)
+	if((live_error != 0 &&
+	   live_error != MINIIPTV_STAGE_DISCONTINUITY) ||
+	   live_info.rebuffering || buffered == 0)
 		buffer_color = DEF_DRAW_RED;
+	else if(live_error == MINIIPTV_STAGE_DISCONTINUITY)
+		buffer_color = MINIIPTV_COLOR_ORANGE;
 	else if(live_info.rebuffer_target_bytes > 0
 	&& buffered < live_info.rebuffer_target_bytes)
 		buffer_color = MINIIPTV_COLOR_ORANGE;

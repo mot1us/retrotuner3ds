@@ -109,7 +109,8 @@ For console safety, the current live path also rejects video above 640x480,
 known frame rates above 30.5 fps and partial segments. A mid-stream HLS
 discontinuity or detected format boundary first tears down the decoder, then
 attempts a bounded clean relock; changed media is never fed into the active MVD
-session. A rejected channel returns to the deck instead of falling back to
+session. Relocks rebuild a conservative two-segment reserve and record their
+boundary reason in `telemetry.csv`. A rejected channel returns to the deck instead of falling back to
 software decoding.
 
 At tuning time, the player selects the lowest rendition advertised by the

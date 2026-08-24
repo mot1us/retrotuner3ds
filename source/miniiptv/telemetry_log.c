@@ -132,7 +132,8 @@ int miniiptv_telemetry_log_open(const char *path, const char *version,
         "applied_lag_segments,profile_hit,segment_ms,download_ms,gap_ms,"
         "jitter_ms,rebuffering,recent_underruns,"
         "total_underruns,global_underruns,downloaded_segments,sequence_resyncs,"
-        "oversized_segment_skips,no_new_streak,"
+        "oversized_segment_skips,boundary_reason,relock_reason,"
+        "automatic_relocks,no_new_streak,"
         "ring_min_bytes,ring_max_bytes,last_refill_ms,last_refill_commits,"
         "app_region_total_bytes,heap_total_bytes,heap_used_bytes,"
         "linear_total_bytes,linear_free_bytes,"
@@ -239,7 +240,9 @@ void miniiptv_telemetry_log_record(
         ",%" PRIu32 ",%" PRIu32
         ",%" PRIu32 ",%" PRIu32
         ",%" PRIu32 ",%" PRIu32 ",%u,%" PRIu32 ",%" PRIu32 ",%" PRIu64
-        ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32
+        ",%" PRIu64 ",%" PRIu64 ",%" PRIu64
+        ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32
+        ",%" PRIu32 ",%" PRIu32 ",%" PRIu32
         ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32
         ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32
         ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32
@@ -257,6 +260,8 @@ void miniiptv_telemetry_log_record(
         sample->recent_underruns, sample->total_underruns,
         sample->global_underruns, sample->downloaded_segments,
         sample->sequence_resyncs, sample->oversized_segment_skips,
+        sample->boundary_reason, sample->relock_reason,
+        sample->automatic_relocks,
         sample->no_new_poll_streak, sample->ring_min_bytes,
         sample->ring_max_bytes, sample->last_refill_ms,
         sample->last_refill_commits, sample->app_region_total_bytes,

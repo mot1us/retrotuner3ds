@@ -79,6 +79,7 @@ typedef struct {
     bool has_player_error_diagnostics;
     unsigned int auto_relock_attempts;
     uint64_t auto_relock_window_started_ms;
+    MiniIptvBoundaryReason pending_relock_reason;
     bool exit_requested;
 } LiveApp;
 
@@ -258,6 +259,7 @@ static bool recoverable_stream_boundary_error(int result) {
 static void reset_auto_relock_locked(void) {
     app.auto_relock_attempts = 0;
     app.auto_relock_window_started_ms = 0;
+    app.pending_relock_reason = MINIIPTV_BOUNDARY_NONE;
 }
 
 static void player_error(uint32_t error_code) {
@@ -270,7 +272,8 @@ static void player_error(uint32_t error_code) {
      * one. With no request, this remains an ordinary NO SIGNAL state. */
     if (app.pending_channel_step == 0)
         app.switching_from_player = false;
-    app.state = LIVE_APP_ERROR;
+    app.state = error_code == DEF_ERR_UNSAFE_VIDEO_STREAM
+        ? LIVE_APP_LOADING : LIVE_APP_ERROR;
     app.player_error_code = error_code;
     app.player_error_diagnostics = diagnostics;
     app.has_player_error_diagnostics = true;
@@ -294,7 +297,7 @@ static void player_error(uint32_t error_code) {
                  "SEPARATE AUDIO COULD NOT SYNC");
     else if (error_code == DEF_ERR_UNSAFE_VIDEO_STREAM)
         snprintf(app.status, sizeof(app.status),
-                 "SIGNAL FORMAT CHANGED // STOPPED FOR SAFETY");
+                 "SIGNAL SHIFT // PREPARING CLEAN RELOCK...");
     else
         snprintf(app.status, sizeof(app.status),
                  "PLAYER ERROR 0x%08lX // PRESS A TO RETRY",
@@ -382,6 +385,7 @@ static void worker_main(void *unused) {
     bool queued_tune = false;
     bool stop_stream = false;
     bool network_ready;
+    MiniIptvBoundaryReason relock_reason;
     (void)unused;
 
     LightLock_Lock(&app.lock);
@@ -390,6 +394,7 @@ static void worker_main(void *unused) {
     exiting = app.exit_requested;
     cancel_to_deck = app.cancel_to_deck;
     queued_tune = app.queued_tune;
+    relock_reason = app.pending_relock_reason;
     LightLock_Unlock(&app.lock);
     if (exiting || cancel_to_deck || queued_tune) {
         result = MINIIPTV_STAGE_CANCELLED;
@@ -415,6 +420,7 @@ static void worker_main(void *unused) {
             result = MINIIPTV_STAGE_CANCELLED;
         else
             result = miniiptv_live_stream_start(&pending_channel, &info,
+                                                relock_reason,
                                                 tune_should_cancel, NULL);
     }
     /* Session setup can fail before live_stream_start() has a chance to own
@@ -652,12 +658,14 @@ static void process_player_return_action(PlayerReturnAction action) {
     bool preserve_stream_error = false;
     bool recoverable_player_boundary = false;
     int stream_error = 0;
+    MiniIptvLiveInfo stream_info = {0};
     Vid_live_diagnostics stream_error_diagnostics = {0};
 
     if (action == PLAYER_RETURN_NONE) return;
     if (action == PLAYER_RETURN_STOP) {
         miniiptv_live_stream_get_stats(NULL, NULL, NULL, NULL,
                                        &stream_error);
+        miniiptv_live_stream_get_info(&stream_info);
         LightLock_Lock(&app.lock);
         recoverable_player_boundary =
             app.player_error_code == DEF_ERR_UNSAFE_VIDEO_STREAM;
@@ -698,6 +706,18 @@ static void process_player_return_action(PlayerReturnAction action) {
             if (app.auto_relock_attempts < AUTO_RELOCK_MAX_ATTEMPTS) {
                 app.auto_relock_attempts++;
                 app.pending_channel = app.playlist.channels[app.selected];
+                if (recoverable_player_boundary)
+                    app.pending_relock_reason =
+                        MINIIPTV_BOUNDARY_PLAYER_FORMAT;
+                else if (stream_info.boundary_reason !=
+                         MINIIPTV_BOUNDARY_NONE)
+                    app.pending_relock_reason = stream_info.boundary_reason;
+                else if (stream_error == MINIIPTV_STAGE_TOO_LARGE)
+                    app.pending_relock_reason =
+                        MINIIPTV_BOUNDARY_OVERSIZED_SEGMENT;
+                else
+                    app.pending_relock_reason =
+                        MINIIPTV_BOUNDARY_DISCONTINUITY;
                 app.tuning_started_ms = now;
                 set_status_locked(
                     LIVE_APP_LOADING,
@@ -965,6 +985,13 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
     reap_worker_if_finished();
     LightLock_Lock(&app.lock);
     return_action = update_player_return_locked();
+    LightLock_Unlock(&app.lock);
+    process_player_return_action(return_action);
+
+    /* Snapshot after processing a playback return. Otherwise one stale deck
+     * or error frame is drawn between the player and the relocking animation,
+     * making a controlled decoder rebuild look like a failed channel. */
+    LightLock_Lock(&app.lock);
     count = app.playlist.count;
     for (i = 0; i < count; i++)
         snprintf(channel_names[i], sizeof(channel_names[i]), "%s",
@@ -995,7 +1022,6 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
         log_sample.periodic = state == LIVE_APP_LOADING;
         miniiptv_telemetry_log_record(osGetTime(), &log_sample);
     }
-    process_player_return_action(return_action);
 
     page_start = count ? (selected / CHANNELS_PER_PAGE) * CHANNELS_PER_PAGE : 0;
     page_end = page_start + CHANNELS_PER_PAGE;

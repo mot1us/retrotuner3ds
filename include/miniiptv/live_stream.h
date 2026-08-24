@@ -34,6 +34,14 @@ typedef enum {
     MINIIPTV_PRODUCER_ERROR
 } MiniIptvProducerState;
 
+typedef enum {
+    MINIIPTV_BOUNDARY_NONE = 0,
+    MINIIPTV_BOUNDARY_DISCONTINUITY,
+    MINIIPTV_BOUNDARY_PLAYLIST_REGRESSION,
+    MINIIPTV_BOUNDARY_PLAYER_FORMAT,
+    MINIIPTV_BOUNDARY_OVERSIZED_SEGMENT
+} MiniIptvBoundaryReason;
+
 typedef struct {
     MiniIptvTunePhase phase;
     MiniIptvTunePhase failure_phase;
@@ -54,6 +62,7 @@ typedef struct {
     unsigned long network_bandwidth;
     unsigned long sequence_resyncs;
     unsigned long oversized_segment_skips;
+    unsigned long automatic_relocks;
     size_t last_segment_bytes;
     size_t attempted_segment_bytes;
     size_t reported_segment_bytes;
@@ -70,12 +79,15 @@ typedef struct {
     int rendition_cache_hit;
     int adaptive_profile_hit;
     unsigned int startup_lag_segments;
+    MiniIptvBoundaryReason boundary_reason;
+    MiniIptvBoundaryReason relock_reason;
     MiniIptvProducerState producer_state;
     MiniIptvBufferShadowSnapshot shadow;
 } MiniIptvLiveInfo;
 
 int miniiptv_live_stream_start(const MiniIptvChannel *channel,
                                MiniIptvStageInfo *initial_info,
+                               MiniIptvBoundaryReason relock_reason,
                                MiniIptvCancelFunction should_cancel,
                                void *cancel_userdata);
 void miniiptv_live_stream_request_stop(void);

@@ -16,6 +16,9 @@ typedef struct {
     uint64_t downloaded_segments;
     uint64_t sequence_resyncs;
     uint64_t oversized_segment_skips;
+    uint32_t boundary_reason;
+    uint32_t relock_reason;
+    uint32_t automatic_relocks;
     uint64_t global_underruns;
     uint32_t width;
     uint32_t height;

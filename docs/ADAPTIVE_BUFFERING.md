@@ -109,6 +109,18 @@ after the target duration plus two seconds, bounded to 2.5--8 seconds.
 - At most two consecutive oversized live segments may be skipped. Atomic
   staging remains capped at 4 MiB and repeated oversize is terminal.
 
+### rc9.17: boundary-aware relock reserve
+
+- Automatic relocks always stage two complete segments. A healthy warm profile
+  from before a discontinuity cannot select the one-segment fast path for the
+  replacement decoder session.
+- Startup network retry spacing is 250 ms then 1 second, still bounded by two
+  retries and the existing 30-second total tune deadline.
+- Telemetry distinguishes the boundary detected by the old stream from the
+  reason used to start the new decoder and counts automatic relocks.
+- The player drains safe buffered media under an orange `RELOCK` state, then
+  transitions directly to animated tuning while FFmpeg/MVD is fully rebuilt.
+
 ## Session profiles
 
 A fixed 32-entry table retains measurements and a recommended lag for each
