@@ -93,7 +93,7 @@
 #define ENTER_FULL_SCREEN_TRANSITION_PERIOD			(uint16_t)(180)							//Transition period from non-full-screen to full-screen in frames.
 
 /* RetroTuner3DS's code-drawn palette (ABGR8888). */
-#define MINIIPTV_COLOR_INK						(uint32_t)(0xFF121110)
+#define MINIIPTV_COLOR_INK						(uint32_t)(0xFF241A14)
 #define MINIIPTV_COLOR_CREAM					(uint32_t)(0xFFE8EBED)
 #define MINIIPTV_COLOR_ORANGE					(uint32_t)(0xFF4AA6E3)
 #define MINIIPTV_COLOR_MINT					(uint32_t)(0xFFB6B9B9)
@@ -819,7 +819,7 @@ static void Vid_draw_miniiptv_top_bar(void)
 	bool on_air = miniiptv_live_stream_is_active();
 
 	Draw_texture(&pixel, MINIIPTV_COLOR_INK, 0, 0, 400, 15);
-	Draw_texture(&pixel, MINIIPTV_COLOR_CREAM, 0, 14, 400, 1);
+	Draw_texture(&pixel, MINIIPTV_COLOR_CYAN, 0, 14, 400, 1);
 	Draw_c("RETRO TUNER", 6, 1, 9.5f, MINIIPTV_COLOR_CREAM);
 	Draw_align_c(on_air ? "LIVE TELEVISION" : "CHANNELS", 94, 0, 9.0f,
 		MINIIPTV_COLOR_CREAM, DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER,
@@ -1022,8 +1022,8 @@ static void Vid_draw_miniiptv_live_overlay(void)
 	&& buffered < live_info.rebuffer_target_bytes)
 		buffer_color = MINIIPTV_COLOR_ORANGE;
 
-	Draw_texture(&pixel, MINIIPTV_COLOR_INK, 0, 0, 320, 225);
-	Draw_texture(&pixel, MINIIPTV_COLOR_CREAM, 12, 12, 296, 1);
+	Draw_texture(&pixel, MINIIPTV_COLOR_INK, 0, 0, 320, 240);
+	Draw_texture(&pixel, MINIIPTV_COLOR_CYAN, 12, 12, 296, 2);
 	Draw_c("LIVE", 14, 21, 13.0f, MINIIPTV_COLOR_CREAM);
 	Draw_align_c(state_text, 220, 21, 9.5f, state_color,
 		DRAW_X_ALIGN_RIGHT, DRAW_Y_ALIGN_CENTER, 86, 14);
@@ -1163,7 +1163,7 @@ static void Vid_draw_miniiptv_live_overlay(void)
 		}
 	}
 
-	Draw_texture(&pixel, MINIIPTV_COLOR_CREAM, 12, 190, 296, 1);
+	Draw_texture(&pixel, MINIIPTV_COLOR_ORANGE, 12, 190, 296, 1);
 	Draw_align_c("A PLAY/PAUSE     B CHANNELS", 8, 198, 9.0f,
 		MINIIPTV_COLOR_CREAM, DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER,
 		304, 12);

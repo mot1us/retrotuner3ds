@@ -5,6 +5,12 @@ versioning while the player remains experimental.
 
 ## [Unreleased]
 
+- Hold the expanding-static boot sequence on screen long enough to read as an
+  intentional television warm-up instead of a one-frame horizontal flash.
+- Keep tune progress exclusively on the top screen; the lower display remains
+  a larger, higher-contrast station list during startup and channel changes.
+- Paint the full 240-pixel bottom framebuffer, eliminating the inherited white
+  strip, and restore restrained cyan/orange tuning accents to the minimal UI.
 - Add a non-destructive live channel drawer: `B` shows the station list on the
   bottom screen while the current video continues above; confirming a different
   station then enters the existing serialized teardown and handoff.

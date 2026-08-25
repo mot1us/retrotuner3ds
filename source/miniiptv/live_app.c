@@ -30,9 +30,10 @@
 #define AUTO_RELOCK_WINDOW_MS 30000ULL
 
 /* Minimal 1990s portable-TV palette (ABGR8888). */
-#define UI_INK 0xFF121110u
-#define UI_PANEL 0xFF2C2926u
+#define UI_INK 0xFF241A14u
+#define UI_PANEL 0xFF3B2B24u
 #define UI_CREAM 0xFFE8EBEDu
+#define UI_ORANGE 0xFF4AA6E3u
 #define UI_MINT 0xFFB6B9B9u
 #define UI_PINK 0xFF4F4FD5u
 #define UI_CYAN 0xFFD2B56Cu
@@ -105,15 +106,19 @@ typedef struct {
 } LiveApp;
 
 static LiveApp app;
+static uint64_t boot_started_ms;
 
 static void launch_tune_worker(void);
 static void launch_scan_worker(void);
 static void draw_static_aperture(Draw_image_data *pixel, uint64_t now,
                                  float top, float height);
 
+void MiniIptv_live_app_reset_boot_screen(void) {
+    boot_started_ms = osGetTime();
+}
+
 void MiniIptv_live_app_draw_boot_screen(void) {
     Draw_image_data pixel = Draw_get_empty_image();
-    static uint64_t boot_started_ms = 0;
     uint64_t now = osGetTime();
     uint64_t elapsed;
     float aperture_height;
@@ -124,15 +129,17 @@ void MiniIptv_live_app_draw_boot_screen(void) {
         boot_started_ms = now;
     elapsed = now - boot_started_ms;
     aperture_height = elapsed >= 1500u
-        ? 240.0f : 2.0f + (float)elapsed * 238.0f / 1500.0f;
+        ? 240.0f : 18.0f + (float)elapsed * 222.0f / 1500.0f;
     aperture_top = (240.0f - aperture_height) / 2.0f;
     sweep = (unsigned int)((elapsed / 90u) % 16u);
 
     Draw_frame_ready();
     Draw_screen_ready(DRAW_SCREEN_TOP_LEFT, UI_INK);
     draw_static_aperture(&pixel, now, aperture_top, aperture_height);
-    if (elapsed > 450u) {
+    if (elapsed > 100u) {
         Draw_texture(&pixel, 0xD0121110u, 84, 87, 232, 65);
+        Draw_texture(&pixel, UI_CYAN, 96, 83, 72, 2);
+        Draw_texture(&pixel, UI_ORANGE, 232, 154, 72, 2);
         Draw_align_c("RETRO TUNER", 0, 96, 20.0f, UI_CREAM,
                      DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 400, 28);
         Draw_align_c("PORTABLE TELEVISION", 0, 126, 9.5f, UI_MINT,
@@ -145,7 +152,7 @@ void MiniIptv_live_app_draw_boot_screen(void) {
     Draw_align_c("VIDEO  /  AUDIO  /  NETWORK", 0, 102, 9.0f, UI_MINT,
                  DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 320, 14);
     Draw_texture(&pixel, UI_PANEL, 31, 132, 258, 6);
-    Draw_texture(&pixel, UI_CREAM, 33 + (float)sweep * 16, 133, 14, 4);
+    Draw_texture(&pixel, UI_ORANGE, 33 + (float)sweep * 16, 133, 14, 4);
     Draw_apply_draw();
 }
 
@@ -649,8 +656,8 @@ static void live_drawer_draw(uint32_t color, uint32_t back_color) {
         ? (count + DRAWER_CHANNELS_PER_PAGE - 1u) /
             DRAWER_CHANNELS_PER_PAGE : 0;
 
-    Draw_texture(&pixel, UI_INK, 0, 0, 320, 225);
-    Draw_texture(&pixel, UI_CREAM, 10, 10, 300, 1);
+    Draw_texture(&pixel, UI_INK, 0, 0, 320, 240);
+    Draw_texture(&pixel, UI_CYAN, 10, 10, 300, 2);
     Draw_c("CHANNELS", 12, 17, 13.0f, UI_CREAM);
     snprintf(line, sizeof(line), "PAGE %lu/%lu",
              (unsigned long)(page_count ? page_start /
@@ -660,26 +667,26 @@ static void live_drawer_draw(uint32_t color, uint32_t back_color) {
                  DRAW_X_ALIGN_RIGHT, DRAW_Y_ALIGN_CENTER, 82, 14);
     snprintf(line, sizeof(line), "LIVE  CH %02lu",
              (unsigned long)(active + 1u));
-    Draw_c(line, 12, 32, 9.0f, UI_CYAN);
+    Draw_c(line, 12, 32, 9.5f, UI_ORANGE);
 
     for (i = page_start; i < page_end; i++) {
-        float y = 49.0f + (float)(i - page_start) * 17.0f;
+        float y = 48.0f + (float)(i - page_start) * 18.0f;
         char marker = session[i] == CHANNEL_SESSION_PLAYED ? '+' :
             (session[i] == CHANNEL_SESSION_FAILED ? '!' :
              (scan[i] == MINIIPTV_SCAN_READY ? '*' : '?'));
         if (i == selected)
-            Draw_texture(&pixel, UI_CREAM, 10, y, 300, 15);
+            Draw_texture(&pixel, UI_CYAN, 10, y, 300, 17);
         else if (i == active)
-            Draw_texture(&pixel, UI_PANEL, 10, y, 300, 15);
+            Draw_texture(&pixel, UI_PANEL, 10, y, 300, 17);
         snprintf(line, sizeof(line), "%c %02lu  %.34s",
                  marker, (unsigned long)(i + 1u), names[i]);
-        Draw_c(line, 17, y + 2, 10.0f,
+        Draw_c(line, 17, y + 2, 11.5f,
                i == selected ? UI_INK :
                    (i == active ? UI_CYAN : UI_CREAM));
     }
 
-    Draw_texture(&pixel, UI_CREAM, 10, 192, 300, 1);
-    Draw_align_c("A TUNE   B CLOSE   LEFT/RIGHT PAGE", 8, 198, 9.0f,
+    Draw_texture(&pixel, UI_ORANGE, 10, 196, 300, 1);
+    Draw_align_c("A TUNE   B CLOSE   LEFT/RIGHT PAGE", 8, 204, 9.5f,
                  UI_CREAM, DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER,
                  304, 15);
 }
@@ -1364,9 +1371,6 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
     size_t count;
     size_t selected;
     uint64_t tuning_started_ms;
-    bool switching_from_player;
-    size_t switch_from_index;
-    size_t switch_to_index;
     uint32_t player_error_code;
     char status[160];
     char line[112];
@@ -1407,9 +1411,6 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
     state = app.state;
     selected = app.selected;
     tuning_started_ms = app.tuning_started_ms;
-    switching_from_player = app.switching_from_player;
-    switch_from_index = app.switch_from_index;
-    switch_to_index = app.switch_to_index;
     player_error_code = app.player_error_code;
     snprintf(status, sizeof(status), "%s", app.status);
     scan_running = app.scan_worker_running;
@@ -1455,9 +1456,12 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
         else
             Draw_texture(&pixel, UI_INK, 0, 15, 400, 225);
 
-        Draw_texture(&pixel, 0xE0121110u, 0, 15, 400, 31);
-        Draw_texture(&pixel, UI_CREAM, 12, 43, 376, 1);
-        Draw_c("RETRO TUNER", 12, 23, 11.0f, UI_CREAM);
+        Draw_texture(&pixel, 0xE0241A14u, 0, 15, 400, 31);
+        Draw_texture(&pixel, UI_CYAN, 12, 43, 376, 2);
+        Draw_c(state == LIVE_APP_LOADING ? "SIGNAL SEARCH" :
+                   (state == LIVE_APP_ERROR ? "OFF AIR" :
+                    "CHANNEL SELECT"),
+               12, 23, 11.0f, UI_CREAM);
         Draw_align_c(scan_running ? "SCANNING" :
                          (state == LIVE_APP_LOADING ? "TUNING" :
                           (state == LIVE_APP_ERROR ? "NO SIGNAL" :
@@ -1481,7 +1485,7 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
             Draw_align_c(line, 34, 143, 9.5f, UI_MINT,
                          DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 332, 12);
             Draw_texture(&pixel, UI_PANEL, 54, 164, 292, 5);
-            Draw_texture(&pixel, UI_CREAM, 56 + (float)phase * 16,
+            Draw_texture(&pixel, UI_ORANGE, 56 + (float)phase * 16,
                          165, 14, 3);
             Draw_align_c(count ? "A  WATCH A FOUND CHANNEL"
                                : "CHANNELS APPEAR AS THEY ARE FOUND",
@@ -1503,7 +1507,7 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
             Draw_align_c(line, 0, 137, 9.5f, UI_MINT,
                          DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 400, 16);
             Draw_texture(&pixel, UI_PANEL, 54, 161, 292, 5);
-            Draw_texture(&pixel, UI_CREAM, 56 + (float)phase * 16,
+            Draw_texture(&pixel, UI_ORANGE, 56 + (float)phase * 16,
                          162, 14, 3);
             Draw_align_c("B  CANCEL     L/R  CHANGE", 0, 199, 9.0f,
                          UI_CREAM,
@@ -1540,8 +1544,8 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
         } else if (count) {
             snprintf(line, sizeof(line), "%02lu",
                      (unsigned long)(selected + 1u));
-            Draw_c(line, 26, 65, 34.0f, UI_CREAM);
-            Draw_c("CHANNEL", 28, 104, 8.5f, UI_MINT);
+            Draw_c(line, 26, 65, 34.0f, UI_ORANGE);
+            Draw_c("CHANNEL", 28, 104, 8.5f, UI_CYAN);
             Draw_align_c(channel_names[selected], 116, 70, 16.0f,
                          UI_CREAM, DRAW_X_ALIGN_LEFT, DRAW_Y_ALIGN_CENTER,
                          258, 42);
@@ -1555,7 +1559,7 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
                          (unsigned long)count, (unsigned long)page_number,
                          (unsigned long)page_count);
             Draw_c(line, 118, 118, 9.0f, UI_MINT);
-            Draw_texture(&pixel, UI_CREAM, 24, 151, 352, 1);
+            Draw_texture(&pixel, UI_CYAN, 24, 151, 352, 2);
             Draw_align_c("A WATCH     D-PAD BROWSE     START EXIT", 0, 174,
                          9.5f, UI_CREAM, DRAW_X_ALIGN_CENTER,
                          DRAW_Y_ALIGN_CENTER, 400, 16);
@@ -1569,36 +1573,8 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
         return;
     }
 
-    Draw_texture(&pixel, UI_INK, 0, 0, 320, 225);
-    Draw_texture(&pixel, UI_CREAM, 12, 12, 296, 1);
-
-    if (state == LIVE_APP_LOADING && switching_from_player && count > 0) {
-        uint64_t elapsed = osGetTime() - tuning_started_ms;
-        unsigned int phase = (unsigned int)((elapsed / 120u) % 18u);
-        Draw_c("TUNING", 14, 22, 14.0f, UI_CREAM);
-        snprintf(line, sizeof(line), "CH %02lu",
-                 (unsigned long)(switch_to_index + 1));
-        Draw_c(line, 14, 54, 26.0f, UI_CREAM);
-        Draw_align_c(channel_names[switch_to_index], 83, 52, 13.0f,
-                     UI_CREAM, DRAW_X_ALIGN_LEFT, DRAW_Y_ALIGN_CENTER,
-                     222, 32);
-        snprintf(line, sizeof(line), "FROM  CH %02lu  %.28s",
-                 (unsigned long)(switch_from_index + 1),
-                 channel_names[switch_from_index]);
-        Draw_c(line, 15, 93, 9.0f, UI_MINT);
-        Draw_texture(&pixel, UI_PANEL, 16, 124, 288, 5);
-        Draw_texture(&pixel, UI_CREAM, 18 + (float)phase * 15,
-                     125, 13, 3);
-        format_tune_status(line, sizeof(line), &tune);
-        Draw_align_c(line, 12, 147, 10.0f, UI_MINT,
-                     DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 296, 18);
-        Draw_texture(&pixel, UI_CREAM, 12, 192, 296, 1);
-        Draw_align_c("B CANCEL        L/R CHANGE", 12, 204, 9.5f,
-                     UI_CREAM, DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER,
-                     296, 14);
-        Draw_set_refresh_needed(true);
-        return;
-    }
+    Draw_texture(&pixel, UI_INK, 0, 0, 320, 240);
+    Draw_texture(&pixel, UI_CYAN, 12, 12, 296, 2);
 
     Draw_c(scan_running ? "AUTO TUNING" : "CHANNELS",
            14, 20, 13.0f, UI_CREAM);
@@ -1617,21 +1593,22 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
                      300, 30);
 
     for (i = page_start; i < page_end; i++) {
-        float y = 50 + (float)(i - page_start) * 12;
+        float y = 47 + (float)(i - page_start) * 13;
         if (i == selected)
-            Draw_texture(&pixel, UI_CREAM, 10, y, 300, 11);
+            Draw_texture(&pixel, UI_CYAN, 10, y, 300, 12);
         snprintf(line, sizeof(line), "%c %02lu  %.35s",
                  channel_session_state[i] == CHANNEL_SESSION_PLAYED ? '+' :
                  (channel_session_state[i] == CHANNEL_SESSION_FAILED ? '!' :
                   (channel_scan_status[i] == MINIIPTV_SCAN_READY ? '*' : '?')),
                  (unsigned long)(i + 1), channel_names[i]);
-        Draw_c(line, 16, y, 9.5f,
+        Draw_c(line, 16, y, 11.0f,
                i == selected ? UI_INK : UI_CREAM);
     }
 
-    Draw_texture(&pixel, UI_CREAM, 12, 176, 296, 1);
+    Draw_texture(&pixel, UI_ORANGE, 12, 180, 296, 1);
     if (state == LIVE_APP_LOADING)
-        format_tune_status(line, sizeof(line), &tune);
+        snprintf(line, sizeof(line), "CH %02lu SELECTED",
+                 (unsigned long)(selected + 1u));
     else if (state == LIVE_APP_ERROR)
         snprintf(line, sizeof(line), "NO SIGNAL // RETRY OR PICK ANOTHER");
     else if (count && page_count > 1u && state == LIVE_APP_IDLE)
@@ -1639,7 +1616,7 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
                  "+ PLAYED   ! FAILED   * VERIFIED   ? CHECK");
     else
         snprintf(line, sizeof(line), "%.111s", status);
-    Draw_align_c(line, 14, 183, 8.5f,
+    Draw_align_c(line, 14, 187, 9.0f,
                  state == LIVE_APP_ERROR || state == LIVE_APP_NO_PLAYLIST
                      ? UI_PINK : UI_MINT,
                  DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 292, 14);
@@ -1651,7 +1628,7 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
         snprintf(line, sizeof(line), "A WATCH   D-PAD BROWSE   START EXIT");
     else
         snprintf(line, sizeof(line), "START EXIT");
-    Draw_align_c(line, 8, 207, 9.0f, UI_CREAM,
+    Draw_align_c(line, 8, 211, 9.5f, UI_CREAM,
                  DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 304, 12);
 }
 
