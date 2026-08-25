@@ -43,13 +43,18 @@ playlist and are responsible for having permission to access its streams.
 | D-pad Up/Down | Choose a channel |
 | D-pad Left/Right | Move one page through the channel deck |
 | A | Tune the selected channel |
-| B | Cancel tuning, or stop playback and return to the channel deck |
+| B | Cancel tuning; during playback, open or close the channel drawer |
 | L / R | Queue the previous or next channel while tuning or playing |
 | Select | Cycle optional playback diagnostics |
 | Start | Exit |
 
 After a no-signal or player error, use `A` to retry, `B` to return to the
 channel deck, or `L`/`R` to try the adjacent signal.
+
+The live channel drawer leaves the current video, decoder, and network buffer
+running on the top screen. Use Up/Down to browse, Left/Right to change pages,
+and `A` to tune the highlighted station. The existing stream is torn down only
+after a different station is confirmed.
 
 At launch, RetroTuner3DS starts with an empty deck and checks channels in M3U
 order. `*` means the master playlist explicitly advertises a supported size

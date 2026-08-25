@@ -5,6 +5,15 @@ versioning while the player remains experimental.
 
 ## [Unreleased]
 
+- Add a non-destructive live channel drawer: `B` shows the station list on the
+  bottom screen while the current video continues above; confirming a different
+  station then enters the existing serialized teardown and handoff.
+- Replace the colored startup frame with an allocation-free expanding-static
+  television aperture that remains responsive while inherited video services
+  initialize.
+- Rebuild the deck, tuning, failure, and live OSD around a minimal monochrome
+  1990s portable-TV presentation, with quieter status text and no inherited
+  bottom-screen player chrome.
 - Unify the channel deck and live player around a restrained portable-TV
   palette with clearer station, scan, tune, playback, and failure hierarchy.
 - Open live playback in a clean viewer by default. `SELECT` still exposes the

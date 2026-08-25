@@ -22,6 +22,17 @@ typedef void (*Vid_live_error_hook)(uint32_t error_code);
 typedef void (*Vid_live_channel_hook)(int direction);
 
 typedef enum {
+	VID_LIVE_DRAWER_HANDLED = 0,
+	VID_LIVE_DRAWER_CLOSE,
+	VID_LIVE_DRAWER_TUNE
+} Vid_live_drawer_result;
+
+typedef Vid_live_drawer_result (*Vid_live_drawer_hid_hook)(
+	const Hid_info* key);
+typedef void (*Vid_live_drawer_draw_hook)(uint32_t color,
+	uint32_t back_color);
+
+typedef enum {
 	VID_LIVE_AUDIO_SCANNING = 0,
 	VID_LIVE_AUDIO_NONE,
 	VID_LIVE_AUDIO_DEMUXED,
@@ -74,6 +85,10 @@ void Vid_set_live_error_hook(Vid_live_error_hook error_hook);
 
 //Request a clean live-player handoff (-1 previous, +1 next, 0 channel deck).
 void Vid_set_live_channel_hook(Vid_live_channel_hook channel_hook);
+
+//Keep playback active while RetroTuner's bottom-screen channel drawer is open.
+void Vid_set_live_drawer_hooks(Vid_live_drawer_hid_hook hid_hook,
+	Vid_live_drawer_draw_hook draw_hook);
 
 //Prepare a bounded file for the existing player while it is idle.
 bool Vid_prepare_file(const char* directory, const char* name);
