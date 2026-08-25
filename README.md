@@ -16,7 +16,8 @@ It has only been tested on that model; other 3DS-family systems are unverified.
 - An incremental "airwave" scan of up to 64 user-provided channels. Stations
   appear as their small HLS manifests pass compatibility checks.
 - Automatic selection of the lowest advertised HLS rendition.
-- Retro dual-screen channel deck, buffering state, and stream diagnostics.
+- Retro dual-screen channel deck, readable signal reserve, and optional stream
+  diagnostics.
 - A bounded diagnostics log for hardware buffer testing.
 - Full teardown of the stream and decoder when leaving a channel.
 
@@ -44,7 +45,7 @@ playlist and are responsible for having permission to access its streams.
 | A | Tune the selected channel |
 | B | Cancel tuning, or stop playback and return to the channel deck |
 | L / R | Queue the previous or next channel while tuning or playing |
-| Select | Toggle playback details |
+| Select | Cycle optional playback diagnostics |
 | Start | Exit |
 
 After a no-signal or player error, use `A` to retry, `B` to return to the
@@ -53,7 +54,9 @@ channel deck, or `L`/`R` to try the adjacent signal.
 At launch, RetroTuner3DS starts with an empty deck and checks channels in M3U
 order. `*` means the master playlist explicitly advertises a supported size
 and frame rate; `?` means the HLS layout passed but the server did not publish
-enough metadata to know until tuning. You may tune any discovered station
+enough metadata to know until tuning. During the current app session, `+`
+marks a station that played and `!` marks a failed startup; neither marker
+prevents a retry. You may tune any discovered station
 without waiting for the scan to finish. Discovery pauses completely during
 playback and resumes after returning to the deck, so it cannot compete with
 the live stream for the New 3DS Wi-Fi connection.

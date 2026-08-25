@@ -93,14 +93,14 @@
 #define ENTER_FULL_SCREEN_TRANSITION_PERIOD			(uint16_t)(180)							//Transition period from non-full-screen to full-screen in frames.
 
 /* RetroTuner3DS's code-drawn palette (ABGR8888). */
-#define MINIIPTV_COLOR_INK						(uint32_t)(0xFF21160F)
-#define MINIIPTV_COLOR_PANEL					(uint32_t)(0xFF3C2A1D)
-#define MINIIPTV_COLOR_CREAM					(uint32_t)(0xFFB8EEFF)
-#define MINIIPTV_COLOR_ORANGE					(uint32_t)(0xFF00A8FF)
-#define MINIIPTV_COLOR_MINT					(uint32_t)(0xFF8FEA69)
-#define MINIIPTV_COLOR_PINK					(uint32_t)(0xFF9A4FFF)
-#define MINIIPTV_COLOR_CYAN					(uint32_t)(0xFFFFEB5D)
-#define MINIIPTV_COLOR_SHADOW					(uint32_t)(0xFF120C08)
+#define MINIIPTV_COLOR_INK						(uint32_t)(0xFF121110)
+#define MINIIPTV_COLOR_PANEL					(uint32_t)(0xFF2C2926)
+#define MINIIPTV_COLOR_CREAM					(uint32_t)(0xFFE8EBED)
+#define MINIIPTV_COLOR_ORANGE					(uint32_t)(0xFF4AA6E3)
+#define MINIIPTV_COLOR_MINT					(uint32_t)(0xFFB6B9B9)
+#define MINIIPTV_COLOR_PINK					(uint32_t)(0xFF4F4FD5)
+#define MINIIPTV_COLOR_CYAN					(uint32_t)(0xFFD2B56C)
+#define MINIIPTV_COLOR_SHADOW					(uint32_t)(0xFF1B1917)
 #define MINIIPTV_BUFFER_METER_MS			(uint32_t)(8000)
 #define MINIIPTV_MEMORY_SAMPLE_INTERVAL_MS	(uint64_t)(5000)
 #define MINIIPTV_DETAILS_HIDDEN				(uint8_t)(0)
@@ -800,9 +800,9 @@ static Vid_live_channel_hook vid_live_channel_hook = NULL;
 static volatile uint32_t vid_playback_return_generation = 0;
 static bool vid_miniptv_force_initial_autoplay = false;
 static bool vid_miniptv_start_pending = false;
-/* Default to the rc9.7 observation page. SELECT cycles shadow, clean, then
- * the established pipeline diagnostics without opening inherited controls. */
-static uint8_t vid_miniptv_detail_page = MINIIPTV_DETAILS_SHADOW;
+/* Normal viewing is intentionally quiet. SELECT exposes the two engineering
+ * pages when a hardware test needs the buffer and decoder diagnostics. */
+static uint8_t vid_miniptv_detail_page = MINIIPTV_DETAILS_HIDDEN;
 static bool vid_miniptv_return_requested = false;
 static bool vid_miniptv_switch_requested = false;
 static bool vid_live_startup_timeout_latched = false;
@@ -821,8 +821,8 @@ static void Vid_draw_miniiptv_top_bar(void)
 	Draw_texture(&pixel, MINIIPTV_COLOR_PINK, 0, 13, 400, 2);
 	Draw_texture(&pixel, MINIIPTV_COLOR_CYAN, 0, 13,
 		on_air ? 292 : 126, 2);
-	Draw_c("RT//3DS", 6, 1, 10.5f, MINIIPTV_COLOR_PINK);
-	Draw_align_c(on_air ? "LIVE SIGNAL" : "SIGNAL DECK", 94, 0, 10.0f,
+	Draw_c("RT  3DS", 6, 1, 10.5f, MINIIPTV_COLOR_PINK);
+	Draw_align_c(on_air ? "LIVE" : "CHANNELS", 94, 0, 10.0f,
 		MINIIPTV_COLOR_CREAM, DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER,
 		212, 13);
 	Draw_align_c(on_air ? "ON AIR" : "STANDBY", 320, 0, 10.0f,
@@ -864,7 +864,7 @@ static void Vid_draw_miniiptv_live_overlay(void)
 	uint32_t buffer_color = MINIIPTV_COLOR_MINT;
 	unsigned long effective_bandwidth = 0;
 	const char* state_text = "TUNING";
-	const char* rating_text = "CHECKING SIGNAL";
+	const char* rating_text = "CHECKING BAND";
 	uint32_t state_color = MINIIPTV_COLOR_ORANGE;
 	char line[128] = { 0, };
 	uint64_t now_ms = osGetTime();
@@ -1001,9 +1001,9 @@ static void Vid_draw_miniiptv_live_overlay(void)
 		if(effective_bandwidth <= 1000000ul
 		&& (live_info.width == 0 || live_info.width <= MINIIPTV_LIVE_MAX_WIDTH)
 		&& (live_info.height == 0 || live_info.height <= MINIIPTV_LIVE_MAX_HEIGHT))
-			rating_text = "3DS SWEET SPOT";
+			rating_text = "LOW-BAND SIGNAL";
 		else
-			rating_text = "HEAVY SIGNAL";
+			rating_text = "HIGH-BAND SIGNAL";
 	}
 
 	bar_width = (uint32_t)(((uint64_t)live_info.buffered_milliseconds * 276u)
@@ -1027,27 +1027,33 @@ static void Vid_draw_miniiptv_live_overlay(void)
 	for(uint32_t y = 4; y < 220; y += 8)
 		Draw_texture(&pixel, MINIIPTV_COLOR_SHADOW, 0, y, 320, 1);
 
-	Draw_texture(&pixel, MINIIPTV_COLOR_ORANGE, 8, 8, 304, 3);
-	Draw_c("[ RETRO TUNER // LIVE ]", 14, 16, 15.0f, MINIIPTV_COLOR_CREAM);
+	Draw_texture(&pixel, MINIIPTV_COLOR_ORANGE, 8, 8, 304, 2);
+	Draw_c("RETRO TUNER  /  LIVE", 14, 16, 13.0f, MINIIPTV_COLOR_CREAM);
 	Draw_texture(&pixel, state_color, 238, 17, 68, 16);
 	Draw_align_c(state_text, 240, 17, 10.5f, MINIIPTV_COLOR_INK,
 		DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 64, 16);
 
-	Draw_texture(&pixel, MINIIPTV_COLOR_PANEL, 10, 42, 300, 48);
-	snprintf(line, sizeof(line), "CH  // %.35s", live_info.channel_name);
-	Draw_c(line, 18, 50, 13.0f, MINIIPTV_COLOR_CREAM);
-	Draw_c(rating_text, 18, 70, 10.5f,
-		strcmp(rating_text, "3DS SWEET SPOT") == 0
-			? MINIIPTV_COLOR_MINT : MINIIPTV_COLOR_ORANGE);
+	Draw_texture(&pixel, MINIIPTV_COLOR_PANEL, 10, 42, 300, 52);
+	Draw_c("NOW RECEIVING", 18, 49, 9.0f, MINIIPTV_COLOR_CYAN);
+	snprintf(line, sizeof(line), "%.38s", live_info.channel_name);
+	Draw_c(line, 18, 64, 13.0f, MINIIPTV_COLOR_CREAM);
+	Draw_align_c(rating_text, 205, 78, 8.5f,
+		strcmp(rating_text, "LOW-BAND SIGNAL") == 0
+			? MINIIPTV_COLOR_MINT : MINIIPTV_COLOR_ORANGE,
+		DRAW_X_ALIGN_RIGHT, DRAW_Y_ALIGN_CENTER, 96, 12);
 
-	Draw_c("NETWORK RESERVE", 14, 101, 10.5f, MINIIPTV_COLOR_CREAM);
-	Draw_texture(&pixel, MINIIPTV_COLOR_SHADOW, 14, 117, 280, 13);
-	Draw_texture(&pixel, buffer_color, 16, 119, bar_width, 9);
-	snprintf(line, sizeof(line), "~%u.%us ring  //  %lu KiB  //  U:%lu",
+	Draw_c("SIGNAL RESERVE", 14, 104, 9.5f, MINIIPTV_COLOR_CREAM);
+	Draw_texture(&pixel, MINIIPTV_COLOR_SHADOW, 14, 119, 280, 12);
+	Draw_texture(&pixel, buffer_color, 16, 121, bar_width, 8);
+	if(live_info.rebuffering)
+		snprintf(line, sizeof(line), "REFILLING  //  %u.%u SEC HELD",
+			live_info.buffered_milliseconds / 1000u,
+			(live_info.buffered_milliseconds % 1000u) / 100u);
+	else
+		snprintf(line, sizeof(line), "%u.%u SEC READY",
 		live_info.buffered_milliseconds / 1000u,
-		(live_info.buffered_milliseconds % 1000u) / 100u,
-		(unsigned long)(buffered / 1024u), underruns);
-	Draw_align_c(line, 14, 134, 10.0f, MINIIPTV_COLOR_CREAM,
+		(live_info.buffered_milliseconds % 1000u) / 100u);
+	Draw_align_c(line, 14, 136, 9.5f, MINIIPTV_COLOR_CREAM,
 		DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 280, 14);
 
 	if(vid_miniptv_detail_page != MINIIPTV_DETAILS_HIDDEN)
@@ -1163,16 +1169,16 @@ static void Vid_draw_miniiptv_live_overlay(void)
 		}
 	}
 
-	Draw_texture(&pixel, MINIIPTV_COLOR_PANEL, 8, 180, 304, 34);
+	Draw_texture(&pixel, MINIIPTV_COLOR_PANEL, 8, 179, 304, 36);
 	Draw_texture(&pixel, MINIIPTV_COLOR_PINK, 18, 184, 19, 13);
 	Draw_align_c("A", 18, 184, 10.0f, MINIIPTV_COLOR_INK,
 		DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 19, 13);
-	Draw_c("PAUSE / PLAY", 42, 185, 10.0f, MINIIPTV_COLOR_CREAM);
+	Draw_c("PLAY / PAUSE", 42, 185, 9.5f, MINIIPTV_COLOR_CREAM);
 	Draw_texture(&pixel, MINIIPTV_COLOR_CYAN, 171, 184, 19, 13);
 	Draw_align_c("B", 171, 184, 10.0f, MINIIPTV_COLOR_INK,
 		DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 19, 13);
-	Draw_c("CHANNELS", 195, 185, 10.0f, MINIIPTV_COLOR_CREAM);
-	Draw_align_c("L PREV  //  R NEXT  //  SELECT PAGE", 8, 199, 9.5f,
+	Draw_c("CHANNELS", 195, 185, 9.5f, MINIIPTV_COLOR_CREAM);
+	Draw_align_c("L/R SWITCH  //  SELECT DETAILS", 8, 200, 9.0f,
 		MINIIPTV_COLOR_ORANGE, DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER,
 		304, 12);
 }

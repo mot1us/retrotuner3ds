@@ -47,6 +47,12 @@ typedef enum {
 } LiveAppState;
 
 typedef enum {
+    CHANNEL_SESSION_UNTRIED = 0,
+    CHANNEL_SESSION_PLAYED,
+    CHANNEL_SESSION_FAILED
+} ChannelSessionState;
+
+typedef enum {
     PLAYER_RETURN_NONE = 0,
     PLAYER_RETURN_STOP,
     PLAYER_RETURN_STOP_TO_DECK,
@@ -58,6 +64,7 @@ typedef struct {
     MiniIptvPlaylist source_playlist;
     MiniIptvPlaylist playlist;
     MiniIptvScanStatus playlist_scan_status[MINIIPTV_MAX_CHANNELS];
+    ChannelSessionState channel_session_state[MINIIPTV_MAX_CHANNELS];
     MiniIptvScanResult scan_results[MINIIPTV_MAX_CHANNELS];
     size_t scan_index;
     size_t scan_current_index;
@@ -239,20 +246,6 @@ static void set_status_locked(LiveAppState state, const char *message) {
            sizeof(app.player_error_diagnostics));
     app.has_player_error_diagnostics = false;
     snprintf(app.status, sizeof(app.status), "%s", message ? message : "");
-}
-
-static const char *audio_diagnostic_state(Vid_live_audio_state state) {
-    switch (state) {
-        case VID_LIVE_AUDIO_NONE: return "NONE";
-        case VID_LIVE_AUDIO_DEMUXED: return "DEMUX";
-        case VID_LIVE_AUDIO_READY: return "OK";
-        case VID_LIVE_AUDIO_INIT_FAILED: return "INIT!";
-        case VID_LIVE_AUDIO_DECODE_FAILED: return "DEC!";
-        case VID_LIVE_AUDIO_CONVERT_FAILED: return "CVT!";
-        case VID_LIVE_AUDIO_OUTPUT_FAILED: return "OUT!";
-        case VID_LIVE_AUDIO_SCANNING:
-        default: return "SCAN";
-    }
 }
 
 static int tune_should_cancel(void *unused) {
@@ -481,6 +474,13 @@ static void player_error(uint32_t error_code) {
     app.player_error_code = error_code;
     app.player_error_diagnostics = diagnostics;
     app.has_player_error_diagnostics = true;
+    if (app.selected < app.playlist.count)
+        app.channel_session_state[app.selected] =
+            diagnostics.presented_frames > 0
+                ? CHANNEL_SESSION_PLAYED
+                : (app.channel_session_state[app.selected] ==
+                       CHANNEL_SESSION_PLAYED
+                       ? CHANNEL_SESSION_PLAYED : CHANNEL_SESSION_FAILED);
     if ((int32_t)error_code == MINIIPTV_STAGE_PLAYER_OPEN_TIMEOUT)
         snprintf(app.status, sizeof(app.status),
                  "PLAYER SETUP TIMEOUT // TRY ANOTHER SIGNAL");
@@ -657,6 +657,12 @@ static void worker_main(void *unused) {
         auto_start = true;
     } else {
         app.state = LIVE_APP_ERROR;
+        if (app.selected < app.playlist.count &&
+            result != MINIIPTV_STAGE_CANCELLED &&
+            app.channel_session_state[app.selected] !=
+                CHANNEL_SESSION_PLAYED)
+            app.channel_session_state[app.selected] =
+                CHANNEL_SESSION_FAILED;
         app.pending_channel_step = 0;
         app.switching_from_player = false;
         if (result == MINIIPTV_STAGE_CANCELLED) {
@@ -821,6 +827,8 @@ static PlayerReturnAction update_player_return_locked(void) {
 
     app.awaiting_player_return = false;
     deck_requested = app.cancel_to_deck;
+    if (app.state != LIVE_APP_ERROR && app.selected < app.playlist.count)
+        app.channel_session_state[app.selected] = CHANNEL_SESSION_PLAYED;
     if (!deck_requested && app.pending_channel_step != 0 &&
         app.playlist.count > 0) {
         if (app.pending_channel_step < 0)
@@ -1193,6 +1201,7 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
     MiniIptvTuneTelemetry tune = {0};
     char channel_names[MINIIPTV_MAX_CHANNELS][MINIIPTV_NAME_MAX];
     MiniIptvScanStatus channel_scan_status[MINIIPTV_MAX_CHANNELS];
+    ChannelSessionState channel_session_state[MINIIPTV_MAX_CHANNELS];
     LiveAppState state;
     size_t count;
     size_t selected;
@@ -1201,8 +1210,6 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
     size_t switch_from_index;
     size_t switch_to_index;
     uint32_t player_error_code;
-    Vid_live_diagnostics player_error_diagnostics;
-    bool has_player_error_diagnostics;
     char status[160];
     char line[112];
     size_t i;
@@ -1239,6 +1246,7 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
         snprintf(channel_names[i], sizeof(channel_names[i]), "%s",
                  app.playlist.channels[i].name);
         channel_scan_status[i] = app.playlist_scan_status[i];
+        channel_session_state[i] = app.channel_session_state[i];
     }
     state = app.state;
     selected = app.selected;
@@ -1247,8 +1255,6 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
     switch_from_index = app.switch_from_index;
     switch_to_index = app.switch_to_index;
     player_error_code = app.player_error_code;
-    player_error_diagnostics = app.player_error_diagnostics;
-    has_player_error_diagnostics = app.has_player_error_diagnostics;
     snprintf(status, sizeof(status), "%s", app.status);
     scan_running = app.scan_worker_running;
     scan_complete = app.scan_complete;
@@ -1303,7 +1309,7 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
                          (state == LIVE_APP_LOADING || scan_running
                               ? UI_ORANGE : UI_CYAN),
                      0, 15, 400, 3);
-        Draw_c("RT/3DS", 12, 22, 9.5f, UI_MINT);
+        Draw_c("RT  3DS", 12, 22, 9.5f, UI_MINT);
         Draw_align_c(scan_running ? "AUTO SCAN" :
                          (state == LIVE_APP_LOADING ? "TUNING" :
                               (state == LIVE_APP_ERROR ? "OFF AIR"
@@ -1317,7 +1323,7 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
                      320, 21, 9.0f,
                      state == LIVE_APP_ERROR ? UI_PINK : UI_MINT,
                      DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 72, 13);
-        Draw_align_c("RETRO TUNER 3DS", 0, 42, 18.0f, UI_CREAM,
+        Draw_align_c("RETRO TUNER", 0, 42, 18.0f, UI_CREAM,
                      DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 400, 24);
 
         Draw_texture(&pixel, UI_PANEL, 24, 76, 352, 78);
@@ -1342,9 +1348,19 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
                      (unsigned long)(selected + 1), channel_names[selected]);
             Draw_align_c(line, 34, 106, 16.0f, UI_CREAM,
                          DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 332, 28);
-            snprintf(line, sizeof(line), "PAGE %lu OF %lu // %lu FOUND",
-                     (unsigned long)page_number, (unsigned long)page_count,
-                     (unsigned long)count);
+            if (channel_session_state[selected] == CHANNEL_SESSION_PLAYED)
+                snprintf(line, sizeof(line),
+                         "PLAYED THIS SESSION // PAGE %lu OF %lu",
+                         (unsigned long)page_number,
+                         (unsigned long)page_count);
+            else if (channel_session_state[selected] ==
+                     CHANNEL_SESSION_FAILED)
+                snprintf(line, sizeof(line),
+                         "FAILED LAST TRY // RETRY ANY TIME");
+            else
+                snprintf(line, sizeof(line), "PAGE %lu OF %lu // %lu FOUND",
+                         (unsigned long)page_number,
+                         (unsigned long)page_count, (unsigned long)count);
             Draw_align_c(line, 34, 137, 9.5f, UI_MINT,
                          DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 332, 12);
         }
@@ -1379,23 +1395,15 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
                          DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 400, 10);
             Draw_set_refresh_needed(true);
         } else if (state == LIVE_APP_ERROR) {
-            Draw_align_c("NO SIGNAL // A RETRY // B DECK // L/R CHANGE",
+            Draw_align_c("NO SIGNAL",
                          0, 171, 12.0f,
                          UI_PINK, DRAW_X_ALIGN_CENTER,
                          DRAW_Y_ALIGN_CENTER, 400, 20);
             if (tune.phase == MINIIPTV_TUNE_PHASE_FAILED) {
-                if (has_player_error_diagnostics)
-                    snprintf(line, sizeof(line),
-                             "FAILED @ %s // T+%u.%us // ERR:%08lX",
-                             miniiptv_live_tune_phase_label(tune.failure_phase),
-                             tune.total_elapsed_milliseconds / 1000u,
-                             (tune.total_elapsed_milliseconds % 1000u) / 100u,
-                             (unsigned long)player_error_code);
-                else
-                    snprintf(line, sizeof(line), "FAILED @ %s // T+%u.%us",
-                             miniiptv_live_tune_phase_label(tune.failure_phase),
-                             tune.total_elapsed_milliseconds / 1000u,
-                             (tune.total_elapsed_milliseconds % 1000u) / 100u);
+                snprintf(line, sizeof(line), "FAILED AT %s // %u.%us",
+                         miniiptv_live_tune_phase_label(tune.failure_phase),
+                         tune.total_elapsed_milliseconds / 1000u,
+                         (tune.total_elapsed_milliseconds % 1000u) / 100u);
                 Draw_align_c(line, 0, 194, 8.5f, UI_ORANGE,
                              DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER,
                              400, 12);
@@ -1415,7 +1423,7 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
                          UI_ORANGE, DRAW_X_ALIGN_CENTER,
                          DRAW_Y_ALIGN_CENTER, 400, 18);
         }
-        Draw_align_c("RETROTUNER " RETROTUNER_VERSION " // H264", 0, 215,
+        Draw_align_c("RETROTUNER " RETROTUNER_VERSION, 0, 215,
                      9.0f, UI_MINT, DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER,
                      400, 14);
         return;
@@ -1489,44 +1497,28 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
         Draw_texture(&pixel, i == selected ? UI_CYAN : UI_PANEL,
                      10, y, 300, 12);
         snprintf(line, sizeof(line), "%c %02lu  %.35s",
-                 channel_scan_status[i] == MINIIPTV_SCAN_READY ? '*' : '?',
+                 channel_session_state[i] == CHANNEL_SESSION_PLAYED ? '+' :
+                 (channel_session_state[i] == CHANNEL_SESSION_FAILED ? '!' :
+                  (channel_scan_status[i] == MINIIPTV_SCAN_READY ? '*' : '?')),
                  (unsigned long)(i + 1), channel_names[i]);
         Draw_c(line, 17, y + 1, 10.0f,
                i == selected ? UI_INK : UI_CREAM);
     }
 
-    if (state == LIVE_APP_ERROR && has_player_error_diagnostics) {
-        Draw_texture(&pixel, UI_PANEL, 8, 178, 304, 32);
-        snprintf(line, sizeof(line), "V PKT:%lu DEC:%lu TEX:%lu SHOW:%lu",
-                 (unsigned long)player_error_diagnostics.video_packets,
-                 (unsigned long)player_error_diagnostics.decoded_frames,
-                 (unsigned long)player_error_diagnostics.textures,
-                 (unsigned long)player_error_diagnostics.presented_frames);
-        Draw_align_c(line, 12, 180, 8.5f, UI_CYAN,
-                     DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 296, 12);
-        snprintf(line, sizeof(line), "A %u %s RX:%lu DEC:%lu Q:%lu AE:%lX",
-                 player_error_diagnostics.audio_tracks,
-                 audio_diagnostic_state(player_error_diagnostics.audio_state),
-                 (unsigned long)player_error_diagnostics.audio_demux_packets,
-                 (unsigned long)player_error_diagnostics.audio_frames,
-                 (unsigned long)player_error_diagnostics.audio_buffers,
-                 (unsigned long)player_error_diagnostics.audio_last_error);
-        Draw_align_c(line, 12, 195, 8.0f, UI_MINT,
-                     DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 296, 12);
-    } else {
-        Draw_texture(&pixel, UI_PANEL, 8, 178, 304, 32);
-        if (state == LIVE_APP_LOADING)
-            format_tune_status(line, sizeof(line), &tune);
-        else if (count && page_count > 1u && state == LIVE_APP_IDLE)
-            snprintf(line, sizeof(line),
-                     "READY // LEFT/RIGHT PAGE // A TUNE");
-        else
-            snprintf(line, sizeof(line), "%.111s", status);
-        Draw_align_c(line, 14, 181, 9.5f,
-                     state == LIVE_APP_ERROR || state == LIVE_APP_NO_PLAYLIST
-                         ? UI_PINK : UI_MINT,
-                     DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 292, 24);
-    }
+    Draw_texture(&pixel, UI_PANEL, 8, 178, 304, 32);
+    if (state == LIVE_APP_LOADING)
+        format_tune_status(line, sizeof(line), &tune);
+    else if (state == LIVE_APP_ERROR)
+        snprintf(line, sizeof(line), "NO SIGNAL // RETRY OR PICK ANOTHER");
+    else if (count && page_count > 1u && state == LIVE_APP_IDLE)
+        snprintf(line, sizeof(line),
+                 "+ PLAYED   ! FAILED   * VERIFIED   ? CHECK");
+    else
+        snprintf(line, sizeof(line), "%.111s", status);
+    Draw_align_c(line, 14, 181, 9.5f,
+                 state == LIVE_APP_ERROR || state == LIVE_APP_NO_PLAYLIST
+                     ? UI_PINK : UI_MINT,
+                 DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 292, 24);
     if (state == LIVE_APP_LOADING) {
         draw_key_hint(&pixel, "B", "CANCEL", 9, 211, 17, UI_PINK);
         draw_key_hint(&pixel, "L/R", "CHANGE", 77, 211, 32, UI_CYAN);

@@ -5,6 +5,16 @@ versioning while the player remains experimental.
 
 ## [Unreleased]
 
+- Unify the channel deck and live player around a restrained portable-TV
+  palette with clearer station, scan, tune, playback, and failure hierarchy.
+- Open live playback in a clean viewer by default. `SELECT` still exposes the
+  shadow-buffer and pipeline pages needed for hardware diagnostics.
+- Mark stations played or failed during the current app session while keeping
+  every discovered station retryable; scan verification markers remain
+  visible for untried channels.
+- Replace the default live KiB/underrun readout with a human-readable reserve
+  in seconds and clearer playback/channel-switch controls. Telemetry retains
+  the full engineering measurements.
 - Clarify the scanned channel deck with explicit page/count labels, one-page
   D-pad Left/Right navigation, quieter portable-TV styling, and distinct
   scanning, tuning, ready, and error presentation.
