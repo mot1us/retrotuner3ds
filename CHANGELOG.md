@@ -5,6 +5,14 @@ versioning while the player remains experimental.
 
 ## [Unreleased]
 
+- Separate the lower-screen loading cursor from the active tune. Browsing no
+  longer cancels network/decoder setup; only `A` commits a different station.
+- Replace the arbitrary loading sweep with truthful eight-stage tune progress,
+  and soften the animated static with smaller marks and slower updates.
+- Give each `SELECT` diagnostics page the full bottom screen with substantially
+  larger pipeline and adaptive-buffer labels and values.
+- Prevent idle sleep while RetroTuner is running and restore the console's
+  previous sleep permission during normal shutdown.
 - Hold the expanding-static boot sequence on screen long enough to read as an
   intentional television warm-up instead of a one-frame horizontal flash.
 - Keep tune progress exclusively on the top screen; the lower display remains

@@ -1,6 +1,6 @@
 #ifndef MINIIPTV_VERSION_H
 #define MINIIPTV_VERSION_H
 
-#define RETROTUNER_VERSION "0.5.1-rc9.22"
+#define RETROTUNER_VERSION "0.5.1-rc9.23"
 
 #endif

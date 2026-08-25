@@ -24,8 +24,11 @@
 int main(void)
 {
 	uint64_t boot_animation_ends_ms;
+	bool previous_sleep_allowed;
 
 	Menu_init();
+	previous_sleep_allowed = aptIsSleepAllowed();
+	aptSetSleepAllowed(false);
 	Vid_set_init_draw_hook(MiniIptv_live_app_draw_boot_screen);
 	MiniIptv_live_app_reset_boot_screen();
 	MiniIptv_live_app_draw_boot_screen();
@@ -56,6 +59,7 @@ int main(void)
 	}
 
 	MiniIptv_live_app_exit();
+	aptSetSleepAllowed(previous_sleep_allowed);
 	Menu_exit();
 	return 0;
 }

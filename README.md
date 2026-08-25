@@ -56,6 +56,11 @@ running on the top screen. Use Up/Down to browse, Left/Right to change pages,
 and `A` to tune the highlighted station. The existing stream is torn down only
 after a different station is confirmed.
 
+While a new station is tuning, D-pad and shoulder input only moves the lower
+screen cursor. The in-progress tune is left alone until `A` explicitly confirms
+a different station. RetroTuner also keeps idle sleep disabled while running
+and restores the console's prior sleep permission when it exits.
+
 At launch, RetroTuner3DS starts with an empty deck and checks channels in M3U
 order. `*` means the master playlist explicitly advertises a supported size
 and frame rate; `?` means the HLS layout passed but the server did not publish

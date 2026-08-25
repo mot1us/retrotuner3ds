@@ -77,6 +77,7 @@ typedef struct {
     MiniIptvStageInfo stage_info;
     size_t selected;
     size_t drawer_selected;
+    size_t loading_cursor;
     Thread worker;
     bool worker_finished;
     bool worker_reaping;
@@ -175,22 +176,22 @@ static uint32_t tuning_static_next(uint32_t *seed) {
 static void draw_static_aperture(Draw_image_data *pixel, uint64_t now,
                                  float top, float height) {
     static const uint32_t snow[] = {
-        0xFF242424u, 0xFF484848u, 0xFF747474u, 0xFFA8A8A8u,
-        0xFFD8D8D8u
+        0xFF202020u, 0xFF303030u, 0xFF484848u, 0xFF606060u,
+        0xFF787878u
     };
-    uint32_t seed = (uint32_t)(now / 70u) ^ 0x52543344u;
+    uint32_t seed = (uint32_t)(now / 170u) ^ 0x52543344u;
     size_t i;
 
     if (height < 1.0f) height = 1.0f;
     if (top < 0.0f) top = 0.0f;
     if (top + height > 240.0f) height = 240.0f - top;
     Draw_texture(pixel, 0xFF181818u, 0, top, 400, height);
-    for (i = 0; i < 40; i++) {
+    for (i = 0; i < 64; i++) {
         uint32_t value = tuning_static_next(&seed);
         float x = (float)(value % 400u);
         float y = top + (float)((value >> 9) % (uint32_t)height);
-        float width = 8.0f + (float)((value >> 18) % 84u);
-        float noise_height = 1.0f + (float)((value >> 27) % 4u);
+        float width = 2.0f + (float)((value >> 18) % 25u);
+        float noise_height = 1.0f;
         if (x + width > 400.0f) width = 400.0f - x;
         if (y + noise_height > top + height)
             noise_height = top + height - y;
@@ -199,8 +200,8 @@ static void draw_static_aperture(Draw_image_data *pixel, uint64_t now,
                           (sizeof(snow) / sizeof(snow[0]))],
                      x, y, width, noise_height);
     }
-    for (i = (size_t)top; i < (size_t)(top + height); i += 7u)
-        Draw_texture(pixel, (i & 1u) ? 0xFF303030u : 0xFF0D0D0Du,
+    for (i = (size_t)top; i < (size_t)(top + height); i += 10u)
+        Draw_texture(pixel, (i & 1u) ? 0xFF262626u : 0xFF141414u,
                      0, (float)i, 400, 1);
 }
 
@@ -224,6 +225,17 @@ static void format_tune_status(char *line, size_t line_size,
                  (tune->phase_elapsed_milliseconds % 1000u) / 100u,
                  tune->total_elapsed_milliseconds / 1000u,
                  (tune->total_elapsed_milliseconds % 1000u) / 100u);
+}
+
+static unsigned int tune_progress_step(const MiniIptvTuneTelemetry *tune) {
+    MiniIptvTunePhase phase;
+
+    if (!tune) return 0;
+    phase = tune->phase == MINIIPTV_TUNE_PHASE_FAILED
+        ? tune->failure_phase : tune->phase;
+    if (phase <= MINIIPTV_TUNE_PHASE_IDLE) return 0;
+    if (phase >= MINIIPTV_TUNE_PHASE_READY) return 8;
+    return (unsigned int)phase;
 }
 
 static const char *stage_error_text(int result) {
@@ -870,6 +882,7 @@ static bool prepare_selected_tune_locked(void) {
         app.exit_requested)
         return false;
     app.pending_channel = app.playlist.channels[app.selected];
+    app.loading_cursor = app.selected;
     app.cancel_to_deck = false;
     app.queued_tune = false;
     reset_auto_relock_locked();
@@ -948,6 +961,7 @@ static void reap_worker_if_finished(void) {
             app.playlist.count > 0) {
             app.queued_tune = false;
             app.pending_channel = app.playlist.channels[app.selected];
+            app.loading_cursor = app.selected;
             app.tuning_started_ms = osGetTime();
             set_status_locked(LIVE_APP_LOADING,
                               "SWITCHING > LOCK > RESERVE > PLAY...");
@@ -997,6 +1011,7 @@ static PlayerReturnAction update_player_return_locked(void) {
         app.pending_channel_step = 0;
         app.pending_channel_target_valid = false;
         app.drawer_selected = app.selected;
+        app.loading_cursor = app.selected;
         app.pending_channel = app.playlist.channels[app.selected];
         app.cancel_to_deck = false;
         app.queued_tune = false;
@@ -1082,6 +1097,7 @@ static void process_player_return_action(PlayerReturnAction action) {
             if (app.auto_relock_attempts < AUTO_RELOCK_MAX_ATTEMPTS) {
                 app.auto_relock_attempts++;
                 app.pending_channel = app.playlist.channels[app.selected];
+                app.loading_cursor = app.selected;
                 if (recoverable_player_boundary)
                     app.pending_relock_reason =
                         MINIIPTV_BOUNDARY_PLAYER_FORMAT;
@@ -1123,6 +1139,7 @@ static void process_player_return_action(PlayerReturnAction action) {
             !app.worker && !app.worker_reaping && app.playlist.count > 0) {
             app.queued_tune = false;
             app.pending_channel = app.playlist.channels[app.selected];
+            app.loading_cursor = app.selected;
             app.tuning_started_ms = osGetTime();
             set_status_locked(LIVE_APP_LOADING,
                               "SWITCHING > LOCK > RESERVE > PLAY...");
@@ -1138,8 +1155,8 @@ static bool live_hid(const Hid_info *key) {
     LiveAppState state;
     size_t count;
     PlayerReturnAction return_action;
-    int loading_step = 0;
     bool cancel_loading = false;
+    bool loading_cursor_changed = false;
     bool launch_error_tune = false;
     bool stop_error_stream = false;
     bool error_return_input_latched = false;
@@ -1219,16 +1236,34 @@ static bool live_hid(const Hid_info *key) {
             cancel_loading = true;
         } else if (count && (DEF_HID_PHY_PR(key->d_up) ||
                             DEF_HID_PHY_PR(key->l))) {
-            loading_step = -1;
+            app.loading_cursor = app.loading_cursor == 0
+                ? count - 1 : app.loading_cursor - 1;
+            loading_cursor_changed = true;
         } else if (count && (DEF_HID_PHY_PR(key->d_down) ||
                             DEF_HID_PHY_PR(key->r))) {
-            loading_step = 1;
-        }
-        if (loading_step != 0) {
+            app.loading_cursor = (app.loading_cursor + 1) % count;
+            loading_cursor_changed = true;
+        } else if (count && DEF_HID_PHY_PR(key->d_left)) {
+            size_t page = app.loading_cursor / CHANNELS_PER_PAGE;
+            if (page > 0) {
+                app.loading_cursor = (page - 1u) * CHANNELS_PER_PAGE;
+                loading_cursor_changed = true;
+            }
+        } else if (count && DEF_HID_PHY_PR(key->d_right)) {
+            size_t page = app.loading_cursor / CHANNELS_PER_PAGE;
+            size_t pages = (count + CHANNELS_PER_PAGE - 1u) /
+                CHANNELS_PER_PAGE;
+            if (page + 1u < pages) {
+                app.loading_cursor = (page + 1u) * CHANNELS_PER_PAGE;
+                loading_cursor_changed = true;
+            }
+        } else if (count && DEF_HID_PHY_PR(key->a)) {
+            if (app.loading_cursor == app.selected) {
+                LightLock_Unlock(&app.lock);
+                return true;
+            }
             size_t previous = app.selected;
-            app.selected = loading_step < 0
-                ? (app.selected == 0 ? count - 1 : app.selected - 1)
-                : (app.selected + 1) % count;
+            app.selected = app.loading_cursor;
             reset_auto_relock_locked();
             if (!app.switching_from_player) app.switch_from_index = previous;
             app.switching_from_player = true;
@@ -1239,6 +1274,11 @@ static bool live_hid(const Hid_info *key) {
                      "CANCELING CURRENT TUNE // QUEUED CH %02lu",
                      (unsigned long)(app.selected + 1));
             cancel_loading = true;
+        }
+        if (loading_cursor_changed) {
+            LightLock_Unlock(&app.lock);
+            Draw_set_refresh_needed(true);
+            return true;
         }
         if (cancel_loading) {
             LightLock_Unlock(&app.lock);
@@ -1284,6 +1324,7 @@ static bool live_hid(const Hid_info *key) {
         } else {
             app.queued_tune = false;
             app.pending_channel = app.playlist.channels[app.selected];
+            app.loading_cursor = app.selected;
             app.tuning_started_ms = osGetTime();
             set_status_locked(LIVE_APP_LOADING,
                               "SWITCHING > LOCK > RESERVE > PLAY...");
@@ -1370,7 +1411,8 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
     LiveAppState state;
     size_t count;
     size_t selected;
-    uint64_t tuning_started_ms;
+    size_t loading_cursor;
+    size_t display_selected;
     uint32_t player_error_code;
     char status[160];
     char line[112];
@@ -1410,7 +1452,7 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
     }
     state = app.state;
     selected = app.selected;
-    tuning_started_ms = app.tuning_started_ms;
+    loading_cursor = app.loading_cursor;
     player_error_code = app.player_error_code;
     snprintf(status, sizeof(status), "%s", app.status);
     scan_running = app.scan_worker_running;
@@ -1442,7 +1484,10 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
         miniiptv_telemetry_log_record(osGetTime(), &log_sample);
     }
 
-    page_start = count ? (selected / CHANNELS_PER_PAGE) * CHANNELS_PER_PAGE : 0;
+    display_selected = !top_screen && state == LIVE_APP_LOADING &&
+        loading_cursor < count ? loading_cursor : selected;
+    page_start = count
+        ? (display_selected / CHANNELS_PER_PAGE) * CHANNELS_PER_PAGE : 0;
     page_end = page_start + CHANNELS_PER_PAGE;
     if (page_end > count) page_end = count;
     page_count = count
@@ -1471,7 +1516,10 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
                      DRAW_X_ALIGN_RIGHT, DRAW_Y_ALIGN_CENTER, 94, 14);
 
         if (scan_running && state == LIVE_APP_IDLE) {
-            unsigned int phase = (unsigned int)((osGetTime() / 130u) % 18u);
+            float scan_width = source_count
+                ? 288.0f * (float)(scan_current_index + 1u) /
+                    (float)source_count : 0.0f;
+            if (scan_width > 288.0f) scan_width = 288.0f;
             Draw_texture(&pixel, 0xD0121110u, 34, 72, 332, 113);
             Draw_align_c("AUTO TUNING", 0, 80, 13.0f, UI_CREAM,
                          DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 400, 18);
@@ -1484,17 +1532,16 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
                      (unsigned long)count);
             Draw_align_c(line, 34, 143, 9.5f, UI_MINT,
                          DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 332, 12);
-            Draw_texture(&pixel, UI_PANEL, 54, 164, 292, 5);
-            Draw_texture(&pixel, UI_ORANGE, 56 + (float)phase * 16,
-                         165, 14, 3);
+            Draw_texture(&pixel, UI_PANEL, 54, 163, 292, 8);
+            Draw_texture(&pixel, UI_ORANGE, 56, 165, scan_width, 4);
             Draw_align_c(count ? "A  WATCH A FOUND CHANNEL"
                                : "CHANNELS APPEAR AS THEY ARE FOUND",
                          0, 198, 9.0f, UI_CREAM, DRAW_X_ALIGN_CENTER,
                          DRAW_Y_ALIGN_CENTER, 400, 12);
             Draw_set_refresh_needed(true);
         } else if (state == LIVE_APP_LOADING) {
-            uint64_t elapsed = osGetTime() - tuning_started_ms;
-            unsigned int phase = (unsigned int)((elapsed / 130u) % 18u);
+            unsigned int progress_step = tune_progress_step(&tune);
+            float progress_width = (float)progress_step * 36.0f;
             Draw_texture(&pixel, 0xD0121110u, 34, 70, 332, 118);
             snprintf(line, sizeof(line), "TUNING  CH %02lu",
                      (unsigned long)(selected + 1u));
@@ -1506,10 +1553,16 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
             format_tune_status(line, sizeof(line), &tune);
             Draw_align_c(line, 0, 137, 9.5f, UI_MINT,
                          DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 400, 16);
-            Draw_texture(&pixel, UI_PANEL, 54, 161, 292, 5);
-            Draw_texture(&pixel, UI_ORANGE, 56 + (float)phase * 16,
-                         162, 14, 3);
-            Draw_align_c("B  CANCEL     L/R  CHANGE", 0, 199, 9.0f,
+            Draw_texture(&pixel, UI_PANEL, 54, 160, 292, 10);
+            Draw_texture(&pixel, UI_ORANGE, 56, 162,
+                         progress_width, 6);
+            for (i = 1; i < 8; i++)
+                Draw_texture(&pixel, UI_INK, 55 + (float)i * 36,
+                             161, 1, 8);
+            snprintf(line, sizeof(line), "STEP %u OF 8", progress_step);
+            Draw_align_c(line, 0, 177, 8.5f, UI_CREAM,
+                         DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 400, 12);
+            Draw_align_c("D-PAD BROWSE   A SELECT   B CANCEL", 0, 199, 9.0f,
                          UI_CREAM,
                          DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 400, 10);
             Draw_set_refresh_needed(true);
@@ -1594,7 +1647,7 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
 
     for (i = page_start; i < page_end; i++) {
         float y = 47 + (float)(i - page_start) * 13;
-        if (i == selected)
+        if (i == display_selected)
             Draw_texture(&pixel, UI_CYAN, 10, y, 300, 12);
         snprintf(line, sizeof(line), "%c %02lu  %.35s",
                  channel_session_state[i] == CHANNEL_SESSION_PLAYED ? '+' :
@@ -1602,13 +1655,13 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
                   (channel_scan_status[i] == MINIIPTV_SCAN_READY ? '*' : '?')),
                  (unsigned long)(i + 1), channel_names[i]);
         Draw_c(line, 16, y, 11.0f,
-               i == selected ? UI_INK : UI_CREAM);
+               i == display_selected ? UI_INK : UI_CREAM);
     }
 
     Draw_texture(&pixel, UI_ORANGE, 12, 180, 296, 1);
     if (state == LIVE_APP_LOADING)
         snprintf(line, sizeof(line), "CH %02lu SELECTED",
-                 (unsigned long)(selected + 1u));
+                 (unsigned long)(display_selected + 1u));
     else if (state == LIVE_APP_ERROR)
         snprintf(line, sizeof(line), "NO SIGNAL // RETRY OR PICK ANOTHER");
     else if (count && page_count > 1u && state == LIVE_APP_IDLE)
@@ -1621,7 +1674,7 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
                      ? UI_PINK : UI_MINT,
                  DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 292, 14);
     if (state == LIVE_APP_LOADING)
-        snprintf(line, sizeof(line), "B CANCEL   L/R CHANGE");
+        snprintf(line, sizeof(line), "A TUNE SELECTION   B CANCEL");
     else if (state == LIVE_APP_ERROR)
         snprintf(line, sizeof(line), "A RETRY   B CHANNELS   L/R CHANGE");
     else if (count)

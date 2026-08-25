@@ -1052,83 +1052,46 @@ static void Vid_draw_miniiptv_live_overlay(void)
 
 	if(vid_miniptv_detail_page != MINIIPTV_DETAILS_HIDDEN)
 	{
-		if(!has_presented_frame
-		|| vid_miniptv_detail_page == MINIIPTV_DETAILS_PIPELINE)
+		uint32_t detail_color = live_error == 0
+			? MINIIPTV_COLOR_MINT : DEF_DRAW_RED;
+		Draw_texture(&pixel, MINIIPTV_COLOR_INK, 0, 0, 320, 240);
+		Draw_texture(&pixel, MINIIPTV_COLOR_CYAN, 10, 10, 300, 2);
+		Draw_c("STREAM DETAILS", 12, 18, 14.0f, MINIIPTV_COLOR_CREAM);
+		Draw_align_c(vid_miniptv_detail_page == MINIIPTV_DETAILS_PIPELINE
+			? "PAGE 1 / 2" : "PAGE 2 / 2", 220, 18, 9.5f,
+			MINIIPTV_COLOR_CYAN, DRAW_X_ALIGN_RIGHT, DRAW_Y_ALIGN_CENTER,
+			88, 14);
+		snprintf(line, sizeof(line), "%.37s", live_info.channel_name);
+		Draw_c(line, 12, 39, 11.5f, MINIIPTV_COLOR_CREAM);
+		Draw_texture(&pixel, MINIIPTV_COLOR_SHADOW, 10, 58, 300, 1);
+
+		if(vid_miniptv_detail_page == MINIIPTV_DETAILS_PIPELINE)
 		{
-			if(!has_presented_frame)
-				snprintf(line, sizeof(line), "%s %u.%us T+%u.%us P:%s C:%c",
-					miniiptv_live_tune_phase_label(tune.phase),
-					tune.phase_elapsed_milliseconds / 1000u,
-					(tune.phase_elapsed_milliseconds % 1000u) / 100u,
-					tune.total_elapsed_milliseconds / 1000u,
-					(tune.total_elapsed_milliseconds % 1000u) / 100u,
-					miniiptv_live_producer_state_label(live_info.producer_state),
-					live_info.rendition_cache_hit ? 'H' : '-');
-			else if(live_info.width && live_info.height)
-				snprintf(line, sizeof(line), "%ux%u B:%luk N:%luk P:%s A:%s(%u)",
-					live_info.width, live_info.height,
-					effective_bandwidth / 1000ul,
-					live_info.network_bandwidth / 1000ul,
-					miniiptv_live_producer_state_label(live_info.producer_state),
-					Vid_live_audio_state_label(diagnostics.audio_state),
-					diagnostics.audio_tracks);
-			else
-				snprintf(line, sizeof(line), "AUTO N:%luk SEG:%ums P:%s A:%s(%u)",
-					live_info.network_bandwidth / 1000ul,
-					live_info.last_download_milliseconds,
-					miniiptv_live_producer_state_label(live_info.producer_state),
-					Vid_live_audio_state_label(diagnostics.audio_state),
-					diagnostics.audio_tracks);
-			Draw_align_c(line, 8, 156, 9.0f,
-				live_error == 0 ? MINIIPTV_COLOR_MINT : DEF_DRAW_RED,
-				DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 304, 16);
-			if(!has_presented_frame)
-				snprintf(line, sizeof(line),
-				"V:%lu>%lu>%lu>%lu A%u:%s %lu>%lu>%lu E:%08lX",
-					(unsigned long)diagnostics.video_packets,
-					(unsigned long)diagnostics.decoded_frames,
-					(unsigned long)diagnostics.textures,
-					(unsigned long)diagnostics.presented_frames,
-					diagnostics.audio_tracks,
-					Vid_live_audio_state_label(diagnostics.audio_state),
-					(unsigned long)diagnostics.audio_demux_packets,
-					(unsigned long)diagnostics.audio_frames,
-					(unsigned long)diagnostics.audio_buffers,
-					(unsigned long)diagnostics.audio_last_error);
-			else if(tune.phase == MINIIPTV_TUNE_PHASE_READY && live_error == 0)
-				snprintf(line, sizeof(line),
-					"TUNE R:%u.%u M:%u.%u S:%u.%u P:%u.%u D:%u.%u F:%u.%u",
-					tune.phase_milliseconds[MINIIPTV_TUNE_PHASE_ROOT_MANIFEST] / 1000u,
-					(tune.phase_milliseconds[MINIIPTV_TUNE_PHASE_ROOT_MANIFEST] % 1000u) / 100u,
-					tune.phase_milliseconds[MINIIPTV_TUNE_PHASE_MEDIA_MANIFEST] / 1000u,
-					(tune.phase_milliseconds[MINIIPTV_TUNE_PHASE_MEDIA_MANIFEST] % 1000u) / 100u,
-					tune.phase_milliseconds[MINIIPTV_TUNE_PHASE_INITIAL_SEGMENT] / 1000u,
-					(tune.phase_milliseconds[MINIIPTV_TUNE_PHASE_INITIAL_SEGMENT] % 1000u) / 100u,
-					tune.phase_milliseconds[MINIIPTV_TUNE_PHASE_PLAYER_OPEN] / 1000u,
-					(tune.phase_milliseconds[MINIIPTV_TUNE_PHASE_PLAYER_OPEN] % 1000u) / 100u,
-					tune.phase_milliseconds[MINIIPTV_TUNE_PHASE_MVD_INIT] / 1000u,
-					(tune.phase_milliseconds[MINIIPTV_TUNE_PHASE_MVD_INIT] % 1000u) / 100u,
-					tune.phase_milliseconds[MINIIPTV_TUNE_PHASE_FIRST_FRAME] / 1000u,
-					(tune.phase_milliseconds[MINIIPTV_TUNE_PHASE_FIRST_FRAME] % 1000u) / 100u);
-			else if(live_error == MINIIPTV_STAGE_TOO_LARGE)
-				snprintf(line, sizeof(line), "SEG RX:%luK LEN:%luK CAP:%luK N:%d",
-					(unsigned long)(live_info.attempted_segment_bytes / 1024u),
-					(unsigned long)(live_info.reported_segment_bytes / 1024u),
-					(unsigned long)(live_info.segment_limit_bytes / 1024u),
-					live_info.last_network_result);
-			else
-				snprintf(line, sizeof(line), "SEG:%luK/%ums MEDIA:%ums DL:%lu",
-					(unsigned long)(live_info.last_segment_bytes / 1024u),
-					live_info.last_download_milliseconds,
-					live_info.last_segment_milliseconds, downloaded);
-			Draw_align_c(line, 8, 168,
-				(!has_presented_frame
-				|| (tune.phase == MINIIPTV_TUNE_PHASE_READY && live_error == 0))
-					? 7.5f : 9.0f,
-				MINIIPTV_COLOR_CYAN,
-				DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 304, 12);
+			snprintf(line, sizeof(line), "VIDEO   %ux%u H.264",
+				live_info.width, live_info.height);
+			Draw_c(line, 14, 69, 11.0f, MINIIPTV_COLOR_CREAM);
+			snprintf(line, sizeof(line), "AUDIO   AAC / %s / %u TRACK%s",
+				Vid_live_audio_state_label(diagnostics.audio_state),
+				diagnostics.audio_tracks,
+				diagnostics.audio_tracks == 1 ? "" : "S");
+			Draw_c(line, 14, 91, 11.0f, MINIIPTV_COLOR_CREAM);
+			snprintf(line, sizeof(line), "NETWORK %lu KBIT/S",
+				live_info.network_bandwidth / 1000ul);
+			Draw_c(line, 14, 113, 11.0f, MINIIPTV_COLOR_CREAM);
+			snprintf(line, sizeof(line), "SEGMENT %lu KiB / %u MS",
+				(unsigned long)(live_info.last_segment_bytes / 1024u),
+				live_info.last_download_milliseconds);
+			Draw_c(line, 14, 135, 11.0f, MINIIPTV_COLOR_CREAM);
+			snprintf(line, sizeof(line), "VIDEO   %lu PACKETS / %lu SHOWN",
+				(unsigned long)diagnostics.video_packets,
+				(unsigned long)diagnostics.presented_frames);
+			Draw_c(line, 14, 157, 10.5f, detail_color);
+			snprintf(line, sizeof(line), "AUDIO   %lu FRAMES / ERROR %08lX",
+				(unsigned long)diagnostics.audio_frames,
+				(unsigned long)diagnostics.audio_last_error);
+			Draw_c(line, 14, 178, 9.5f, detail_color);
 		}
-		else if(vid_miniptv_detail_page == MINIIPTV_DETAILS_SHADOW)
+		else
 		{
 			uint32_t shadow_color = MINIIPTV_COLOR_ORANGE;
 			if(live_info.shadow.state == MINIIPTV_BUFFER_SHADOW_HEALTHY)
@@ -1136,31 +1099,37 @@ static void Vid_draw_miniiptv_live_overlay(void)
 			else if(live_info.shadow.state == MINIIPTV_BUFFER_SHADOW_AT_RISK
 			|| live_info.shadow.state == MINIIPTV_BUFFER_SHADOW_UNSUSTAINABLE)
 				shadow_color = DEF_DRAW_RED;
-			snprintf(line, sizeof(line),
-				"%s H%lu.%02lux WANT%lu.%lus R%u",
-				miniiptv_buffer_shadow_state_label(live_info.shadow.state),
-				(unsigned long)(live_info.shadow.headroom_permille / 1000u),
-				(unsigned long)((live_info.shadow.headroom_permille % 1000u) / 10u),
+			snprintf(line, sizeof(line), "BUFFER  %s",
+				miniiptv_buffer_shadow_state_label(live_info.shadow.state));
+			Draw_c(line, 14, 69, 12.0f, shadow_color);
+			snprintf(line, sizeof(line), "READY   %u.%u SEC / WANT %lu.%lu SEC",
+				live_info.buffered_milliseconds / 1000u,
+				(live_info.buffered_milliseconds % 1000u) / 100u,
 				(unsigned long)(live_info.shadow.desired_reserve_ms / 1000u),
-				(unsigned long)((live_info.shadow.desired_reserve_ms % 1000u) / 100u),
-				(unsigned int)live_info.shadow.recommended_lag_segments);
-			Draw_align_c(line, 8, 156, 8.5f, shadow_color,
-				DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 304, 16);
-			snprintf(line, sizeof(line),
-				"USE%u %s N%lu SEG%lu.%lu GAP%lu.%lu J%lu.%lu U%lu",
-				live_info.startup_lag_segments,
+				(unsigned long)((live_info.shadow.desired_reserve_ms % 1000u) / 100u));
+			Draw_c(line, 14, 94, 10.5f, MINIIPTV_COLOR_CREAM);
+			snprintf(line, sizeof(line), "NET     %lu / CONTENT %lu KBIT/S",
+				(unsigned long)(live_info.shadow.network_bps / 1000u),
+				(unsigned long)(live_info.shadow.content_bps / 1000u));
+			Draw_c(line, 14, 117, 10.5f, MINIIPTV_COLOR_CREAM);
+			snprintf(line, sizeof(line), "PROFILE %s / LAG %u SEGMENTS",
 				live_info.adaptive_profile_hit ? "WARM" : "COLD",
+				live_info.startup_lag_segments);
+			Draw_c(line, 14, 140, 10.5f, MINIIPTV_COLOR_CREAM);
+			snprintf(line, sizeof(line), "RING    %lu KiB / %lu UNDERRUNS",
+				(unsigned long)(buffered / 1024u), underruns);
+			Draw_c(line, 14, 163, 10.5f, detail_color);
+			snprintf(line, sizeof(line), "SAMPLES %lu / HEADROOM %lu.%02lux",
 				(unsigned long)live_info.shadow.valid_samples,
-				(unsigned long)(live_info.shadow.segment_ms / 1000u),
-				(unsigned long)((live_info.shadow.segment_ms % 1000u) / 100u),
-				(unsigned long)(live_info.shadow.commit_gap_ms / 1000u),
-				(unsigned long)((live_info.shadow.commit_gap_ms % 1000u) / 100u),
-				(unsigned long)(live_info.shadow.commit_gap_deviation_ms / 1000u),
-				(unsigned long)((live_info.shadow.commit_gap_deviation_ms % 1000u) / 100u),
-				(unsigned long)live_info.shadow.recent_underruns);
-			Draw_align_c(line, 8, 168, 7.5f, MINIIPTV_COLOR_CYAN,
-				DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 304, 12);
+				(unsigned long)(live_info.shadow.headroom_permille / 1000u),
+				(unsigned long)((live_info.shadow.headroom_permille % 1000u) / 10u));
+			Draw_c(line, 14, 184, 9.5f, shadow_color);
 		}
+		Draw_texture(&pixel, MINIIPTV_COLOR_ORANGE, 10, 207, 300, 1);
+		Draw_align_c("SELECT NEXT PAGE     B CHANNELS", 8, 214, 9.5f,
+			MINIIPTV_COLOR_CREAM, DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER,
+			304, 14);
+		return;
 	}
 
 	Draw_texture(&pixel, MINIIPTV_COLOR_ORANGE, 12, 190, 296, 1);
