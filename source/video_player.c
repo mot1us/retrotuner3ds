@@ -606,6 +606,8 @@ typedef struct
 	volatile uint16_t live_audio_peak_right;			//Latest right PCM peak.
 	volatile uint8_t live_audio_tracks;				//Audio tracks reported by FFmpeg demux.
 	volatile Vid_live_audio_state live_audio_state;	//Live audio initialization state.
+	double live_av_clock_offset_ms;					//Initial live audio/video timestamp offset.
+	bool live_av_clock_offset_ready;					//Whether the live offset has been captured.
 	uint64_t previous_ts;							//Time stamp for last every-100ms-graph update.
 	double decoding_min_time;						//Minimum video decoding time in ms.
 	double decoding_max_time;						//Maximum video decoding time in ms.
@@ -2454,6 +2456,8 @@ static void Vid_reset_live_diagnostics(void)
 	__atomic_store_n(&vid_player.live_audio_tracks, 0, __ATOMIC_RELEASE);
 	__atomic_store_n(&vid_player.live_audio_state, VID_LIVE_AUDIO_SCANNING,
 		__ATOMIC_RELEASE);
+	vid_player.live_av_clock_offset_ms = 0;
+	vid_player.live_av_clock_offset_ready = false;
 	__atomic_store_n(&vid_live_startup_timeout_latched, false,
 		__ATOMIC_RELEASE);
 }
@@ -4651,7 +4655,29 @@ static void Vid_update_video_delay(Vid_eye eye_index)
 	for(uint8_t i = 0; i < array_size - 1; i++)
 		vid_player.video_delay_ms[eye_index][i] = vid_player.video_delay_ms[eye_index][i + 1];
 
-	vid_player.video_delay_ms[eye_index][array_size - 1] = (vid_player.audio_current_pos - (vid_player.video_current_pos[eye_index] - buffered_video_ms));
+	vid_player.video_delay_ms[eye_index][array_size - 1] =
+		(vid_player.audio_current_pos
+			- (vid_player.video_current_pos[eye_index] - buffered_video_ms));
+
+	/* MPEG-TS broadcasts commonly use large absolute PTS/DTS values, and some
+	 * feeds start audio and video on different absolute epochs. Comparing those
+	 * raw clocks makes the ordinary file-player sync logic drop every decoded
+	 * picture after startup even though both tracks advance normally. Once the
+	 * first live texture reaches the display, capture that fixed epoch difference
+	 * and synchronize only the relative drift that follows. Local files retain
+	 * the original absolute-clock behavior. */
+	if(miniiptv_live_stream_is_active()
+	&& __atomic_load_n(&vid_player.has_presented_frame, __ATOMIC_ACQUIRE))
+	{
+		if(!vid_player.live_av_clock_offset_ready)
+		{
+			vid_player.live_av_clock_offset_ms =
+				vid_player.video_delay_ms[eye_index][array_size - 1];
+			vid_player.live_av_clock_offset_ready = true;
+		}
+		vid_player.video_delay_ms[eye_index][array_size - 1] -=
+			vid_player.live_av_clock_offset_ms;
+	}
 
 	for(uint8_t i = 0; i < array_size; i++)
 		total_delay += vid_player.video_delay_ms[eye_index][i];

@@ -5,6 +5,9 @@ versioning while the player remains experimental.
 
 ## [Unreleased]
 
+- Rebase live audio/video synchronization onto the first presented frame so
+  MPEG-TS feeds with unrelated absolute timestamp epochs do not decode hundreds
+  of frames only to drop every texture after the first picture.
 - Remove the abandoned SD-card cached-excerpt prefetch/session path while
   retaining its shared stream result types for the bounded live producer.
 - Increase stream-reserve and battery legibility, clarify that the reserve is
