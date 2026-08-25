@@ -5,7 +5,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "miniiptv/hls_prefetch.h"
+#include "miniiptv/stage.h"
 
 #define LOG_BUFFER_BYTES 8192u
 #define LOG_FAST_SAMPLE_INTERVAL_MS 2000u

@@ -1,20 +1,9 @@
-#ifndef MINIIPTV_HLS_PREFETCH_H
-#define MINIIPTV_HLS_PREFETCH_H
+#ifndef MINIIPTV_STAGE_H
+#define MINIIPTV_STAGE_H
 
 #include <stddef.h>
 
 #include "miniiptv/hls.h"
-#include "miniiptv/network.h"
-#include "miniiptv/playlist.h"
-#include "miniiptv/stream_limits.h"
-
-#define MINIIPTV_PREFETCH_SEGMENTS 3
-#define MINIIPTV_SEGMENT_LIMIT MINIIPTV_STREAM_ATOMIC_SEGMENT_LIMIT_BYTES
-#define MINIIPTV_PREFETCH_LIMIT (12u * 1024u * 1024u)
-
-typedef int (*MiniIptvFetchFunction)(const char *url, const char *user_agent,
-                                    const char *referrer, size_t maximum_size,
-                                    NetworkTextResponse *response);
 
 typedef enum {
     MINIIPTV_STAGE_OK = 0,
@@ -49,8 +38,5 @@ typedef struct {
     int last_network_result;
     char media_url[MINIIPTV_HLS_URL_MAX];
 } MiniIptvStageInfo;
-
-int miniiptv_stage_hls(const MiniIptvChannel *channel, const char *output_path,
-                       MiniIptvFetchFunction fetch, MiniIptvStageInfo *info);
 
 #endif

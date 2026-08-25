@@ -9,11 +9,13 @@
 
 #include "miniiptv/hls.h"
 #include "miniiptv/network.h"
+#include "miniiptv/stream_limits.h"
 #include "miniiptv/ts_mux.h"
 #include "system/util/thread_types.h"
 #include "system/util/util.h"
 
 #define STREAM_RING_SIZE MINIIPTV_STREAM_RING_CAPACITY_BYTES
+#define MINIIPTV_SEGMENT_LIMIT MINIIPTV_STREAM_ATOMIC_SEGMENT_LIMIT_BYTES
 #define STREAM_COLD_INITIAL_SEGMENTS 2u
 #define STREAM_WARM_INITIAL_SEGMENTS 1u
 #define STREAM_MAX_CONSECUTIVE_OVERSIZE_SKIPS 2u

@@ -6,7 +6,6 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "miniiptv/live_session.h"
 #include "miniiptv/live_stream.h"
 #include "miniiptv/channel_scan.h"
 #include "miniiptv/network.h"
@@ -305,7 +304,7 @@ static void scan_worker_main(void *unused) {
     if (!app.network_ready && !app.exit_requested &&
         !app.scan_stop_requested) {
         LightLock_Unlock(&app.lock);
-        if (miniiptv_live_session_init() == 0) {
+        if (network_init() == 0) {
             LightLock_Lock(&app.lock);
             app.network_ready = true;
             LightLock_Unlock(&app.lock);
@@ -682,8 +681,8 @@ static void live_drawer_draw(uint32_t color, uint32_t back_color) {
     Draw_c(line, 12, 32, 9.5f, UI_ORANGE);
     snprintf(line, sizeof(line), "BAT %u%%%s", system_state.battery_level,
              system_state.is_charging ? "+" : "");
-    Draw_align_c(line, 225, 32, 8.5f,
-                 system_state.is_charging ? UI_ORANGE : UI_MINT,
+    Draw_align_c(line, 217, 31, 10.5f,
+                 system_state.is_charging ? UI_ORANGE : UI_CREAM,
                  DRAW_X_ALIGN_RIGHT, DRAW_Y_ALIGN_CENTER, 82, 12);
 
     for (i = page_start; i < page_end; i++) {
@@ -770,7 +769,7 @@ static void worker_main(void *unused) {
     if (exiting || cancel_to_deck || queued_tune) {
         result = MINIIPTV_STAGE_CANCELLED;
     } else if (!network_ready) {
-        result = miniiptv_live_session_init();
+        result = network_init();
         if (result == 0) {
             LightLock_Lock(&app.lock);
             app.network_ready = true;
@@ -1508,10 +1507,7 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
 
         Draw_texture(&pixel, 0xE0241A14u, 0, 15, 400, 31);
         Draw_texture(&pixel, UI_CYAN, 12, 43, 376, 2);
-        Draw_c(state == LIVE_APP_LOADING ? "SIGNAL SEARCH" :
-                   (state == LIVE_APP_ERROR ? "OFF AIR" :
-                    "CHANNEL SELECT"),
-               12, 23, 11.0f, UI_CREAM);
+        Draw_c("RETRO TUNER", 12, 23, 11.0f, UI_CREAM);
         Draw_align_c(scan_running ? "SCANNING" :
                          (state == LIVE_APP_LOADING ? "TUNING" :
                           (state == LIVE_APP_ERROR ? "NO SIGNAL" :
@@ -1591,6 +1587,7 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
             Draw_align_c("A RETRY   B CHANNELS   L/R CHANGE", 0, 198,
                          9.0f, UI_CREAM, DRAW_X_ALIGN_CENTER,
                          DRAW_Y_ALIGN_CENTER, 400, 12);
+            Draw_set_refresh_needed(true);
         } else if (state == LIVE_APP_NO_PLAYLIST) {
             Draw_align_c("NO CHANNEL LIST", 0, 82, 16.0f,
                          UI_PINK, DRAW_X_ALIGN_CENTER,
@@ -1758,6 +1755,6 @@ void MiniIptv_live_app_exit(void) {
     network_ready = app.network_ready;
     app.network_ready = false;
     LightLock_Unlock(&app.lock);
-    if (network_ready) miniiptv_live_session_exit();
+    if (network_ready) network_exit();
     miniiptv_telemetry_log_close();
 }

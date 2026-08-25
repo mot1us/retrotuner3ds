@@ -33,16 +33,6 @@ ASAN_OPTIONS=detect_leaks=0 tests/bin/test_channel_scan_san
 cc -std=c11 -Wall -Wextra -Werror -pedantic \
   -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer \
   -Iinclude \
-  source/miniiptv/hls.c \
-  source/miniiptv/hls_prefetch.c \
-  tests/test_hls_prefetch.c \
-  -o tests/bin/test_hls_prefetch_san
-
-ASAN_OPTIONS=detect_leaks=0 tests/bin/test_hls_prefetch_san
-
-cc -std=c11 -Wall -Wextra -Werror -pedantic \
-  -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer \
-  -Iinclude \
   source/miniiptv/ts_mux.c \
   tests/test_ts_mux.c \
   -o tests/bin/test_ts_mux_san

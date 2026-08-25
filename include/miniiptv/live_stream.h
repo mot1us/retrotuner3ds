@@ -5,8 +5,9 @@
 #include <stdint.h>
 
 #include "miniiptv/buffer_shadow.h"
-#include "miniiptv/hls_prefetch.h"
+#include "miniiptv/network.h"
 #include "miniiptv/playlist.h"
+#include "miniiptv/stage.h"
 
 #define MINIIPTV_LIVE_STREAM_URL "miniiptv://live.ts"
 

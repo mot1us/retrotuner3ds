@@ -830,7 +830,7 @@ static void Vid_draw_miniiptv_top_bar(void)
 	Draw_texture(&pixel, MINIIPTV_COLOR_CYAN, 0, 14, 400, 1);
 	Draw_c("RETRO TUNER", 6, 1, 9.5f, MINIIPTV_COLOR_CREAM);
 	Draw_align_c(on_air ? "LIVE TELEVISION" :
-		(active ? "SIGNAL SEARCH" : "CHANNELS"), 94, 0, 9.0f,
+		(active ? "RECEIVER" : "CHANNELS"), 94, 0, 9.0f,
 		MINIIPTV_COLOR_CREAM, DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER,
 		212, 13);
 	Draw_align_c(on_air ? "ON AIR" : (active ? "TUNING" : "STANDBY"),
@@ -1107,9 +1107,9 @@ static void Vid_draw_miniiptv_live_overlay(const Sem_state* system_state)
 	Draw_c("RECEIVER", 14, 21, 12.0f, MINIIPTV_COLOR_CREAM);
 	snprintf(battery_text, sizeof(battery_text), "BAT %u%%%s",
 		battery_level, charging ? "+" : "");
-	Draw_align_c(battery_text, 210, 21, 9.5f,
-		charging ? MINIIPTV_COLOR_ORANGE : MINIIPTV_COLOR_MINT,
-		DRAW_X_ALIGN_RIGHT, DRAW_Y_ALIGN_CENTER, 96, 14);
+	Draw_align_c(battery_text, 198, 20, 11.5f,
+		charging ? MINIIPTV_COLOR_ORANGE : MINIIPTV_COLOR_CREAM,
+		DRAW_X_ALIGN_RIGHT, DRAW_Y_ALIGN_CENTER, 108, 14);
 
 	Draw_c("NOW RECEIVING", 14, 51, 8.5f, MINIIPTV_COLOR_MINT);
 	snprintf(line, sizeof(line), "%.38s", live_info.channel_name);
@@ -1120,7 +1120,10 @@ static void Vid_draw_miniiptv_live_overlay(const Sem_state* system_state)
 			? MINIIPTV_COLOR_MINT : MINIIPTV_COLOR_ORANGE,
 		DRAW_X_ALIGN_RIGHT, DRAW_Y_ALIGN_CENTER, 96, 12);
 
-	Draw_c("NETWORK RESERVE // 24 SEC SCALE", 14, 108, 8.0f,
+	/* This is compressed HLS input waiting in the producer ring, not a
+	 * decoder/render health meter.  "STREAM" avoids promising that a full bar
+	 * means MVD is still producing pictures. */
+	Draw_c("STREAM RESERVE  //  24 SEC", 14, 107, 9.5f,
 		MINIIPTV_COLOR_CREAM);
 	Draw_texture(&pixel, MINIIPTV_COLOR_SHADOW, 14, 122, 280, 10);
 	for(uint32_t i = 0; i < MINIIPTV_BUFFER_METER_SEGMENTS; i++)
@@ -1150,12 +1153,12 @@ static void Vid_draw_miniiptv_live_overlay(const Sem_state* system_state)
 			(live_info.buffered_milliseconds % 1000u) / 100u,
 			(unsigned int)(reserve_goal_ms / 1000u),
 			(unsigned int)((reserve_goal_ms % 1000u) / 100u));
-	Draw_align_c(line, 14, 135, 8.0f, MINIIPTV_COLOR_CREAM,
+	Draw_align_c(line, 14, 135, 9.5f, MINIIPTV_COLOR_CREAM,
 		DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 280, 14);
 	snprintf(line, sizeof(line), "RING %lu / %lu KiB",
 		(unsigned long)(buffered / 1024u),
 		(unsigned long)(MINIIPTV_STREAM_RING_CAPACITY_BYTES / 1024u));
-	Draw_align_c(line, 14, 149, 7.5f, MINIIPTV_COLOR_CYAN,
+	Draw_align_c(line, 14, 150, 9.0f, MINIIPTV_COLOR_CYAN,
 		DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 280, 12);
 	Draw_c("AUDIO", 14, 166, 7.5f, MINIIPTV_COLOR_CREAM);
 	Draw_texture(&pixel, MINIIPTV_COLOR_SHADOW, 64, 168, 230, 5);

@@ -5,6 +5,11 @@ versioning while the player remains experimental.
 
 ## [Unreleased]
 
+- Remove the abandoned SD-card cached-excerpt prefetch/session path while
+  retaining its shared stream result types for the bounded live producer.
+- Increase stream-reserve and battery legibility, clarify that the reserve is
+  input data rather than decoder health, reduce duplicated tuning labels, and
+  keep no-signal static animating at its intended cadence.
 - Weight tune progress by measured startup work and advance continuously within
   each initial HLS segment before the short FFmpeg/MVD/first-frame tail.
 - Replace the early-saturating reserve bar with a fixed 24-second segmented
