@@ -14,6 +14,7 @@
 #include "miniiptv/telemetry_log.h"
 #include "miniiptv/version.h"
 #include "system/draw/draw.h"
+#include "system/sem.h"
 #include "system/util/err_types.h"
 #include "system/util/hid_types.h"
 #include "system/util/thread_types.h"
@@ -211,31 +212,28 @@ static void draw_tuning_static(Draw_image_data *pixel, uint64_t now) {
 
 static void format_tune_status(char *line, size_t line_size,
                                const MiniIptvTuneTelemetry *tune) {
+    unsigned int current_segment;
+    unsigned int target_segments;
     if (!line || line_size == 0 || !tune) return;
-    if (tune->phase == MINIIPTV_TUNE_PHASE_INITIAL_SEGMENT)
-        snprintf(line, line_size, "%s // %lu KiB // T+%u.%us",
+    if (tune->phase == MINIIPTV_TUNE_PHASE_INITIAL_SEGMENT) {
+        target_segments = tune->initial_segments_target
+            ? tune->initial_segments_target : 1u;
+        current_segment = tune->initial_segments_completed < target_segments
+            ? tune->initial_segments_completed + 1u : target_segments;
+        snprintf(line, line_size, "%s %u/%u // %lu KiB // T+%u.%us",
                  miniiptv_live_tune_phase_label(tune->phase),
+                 current_segment,
+                 target_segments,
                  (unsigned long)(tune->initial_segment_received_bytes / 1024u),
                  tune->total_elapsed_milliseconds / 1000u,
                  (tune->total_elapsed_milliseconds % 1000u) / 100u);
-    else
+    } else
         snprintf(line, line_size, "%s // %u.%us // T+%u.%us",
                  miniiptv_live_tune_phase_label(tune->phase),
                  tune->phase_elapsed_milliseconds / 1000u,
                  (tune->phase_elapsed_milliseconds % 1000u) / 100u,
                  tune->total_elapsed_milliseconds / 1000u,
                  (tune->total_elapsed_milliseconds % 1000u) / 100u);
-}
-
-static unsigned int tune_progress_step(const MiniIptvTuneTelemetry *tune) {
-    MiniIptvTunePhase phase;
-
-    if (!tune) return 0;
-    phase = tune->phase == MINIIPTV_TUNE_PHASE_FAILED
-        ? tune->failure_phase : tune->phase;
-    if (phase <= MINIIPTV_TUNE_PHASE_IDLE) return 0;
-    if (phase >= MINIIPTV_TUNE_PHASE_READY) return 8;
-    return (unsigned int)phase;
 }
 
 static const char *stage_error_text(int result) {
@@ -634,6 +632,7 @@ static Vid_live_drawer_result live_drawer_hid(const Hid_info *key) {
 
 static void live_drawer_draw(uint32_t color, uint32_t back_color) {
     Draw_image_data pixel = Draw_get_empty_image();
+    Sem_state system_state = {0};
     char names[MINIIPTV_MAX_CHANNELS][MINIIPTV_NAME_MAX];
     ChannelSessionState session[MINIIPTV_MAX_CHANNELS];
     MiniIptvScanStatus scan[MINIIPTV_MAX_CHANNELS];
@@ -648,6 +647,7 @@ static void live_drawer_draw(uint32_t color, uint32_t back_color) {
 
     (void)color;
     (void)back_color;
+    Sem_get_state(&system_state);
     LightLock_Lock(&app.lock);
     count = app.playlist.count;
     active = app.selected;
@@ -680,6 +680,11 @@ static void live_drawer_draw(uint32_t color, uint32_t back_color) {
     snprintf(line, sizeof(line), "LIVE  CH %02lu",
              (unsigned long)(active + 1u));
     Draw_c(line, 12, 32, 9.5f, UI_ORANGE);
+    snprintf(line, sizeof(line), "BAT %u%%%s", system_state.battery_level,
+             system_state.is_charging ? "+" : "");
+    Draw_align_c(line, 225, 32, 8.5f,
+                 system_state.is_charging ? UI_ORANGE : UI_MINT,
+                 DRAW_X_ALIGN_RIGHT, DRAW_Y_ALIGN_CENTER, 82, 12);
 
     for (i = page_start; i < page_end; i++) {
         float y = 48.0f + (float)(i - page_start) * 18.0f;
@@ -1540,8 +1545,9 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
                          DRAW_Y_ALIGN_CENTER, 400, 12);
             Draw_set_refresh_needed(true);
         } else if (state == LIVE_APP_LOADING) {
-            unsigned int progress_step = tune_progress_step(&tune);
-            float progress_width = (float)progress_step * 36.0f;
+            unsigned int progress_permille =
+                miniiptv_live_tune_progress_permille(&tune);
+            float progress_width = 288.0f * (float)progress_permille / 1000.0f;
             Draw_texture(&pixel, 0xD0121110u, 34, 70, 332, 118);
             snprintf(line, sizeof(line), "TUNING  CH %02lu",
                      (unsigned long)(selected + 1u));
@@ -1556,10 +1562,8 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
             Draw_texture(&pixel, UI_PANEL, 54, 160, 292, 10);
             Draw_texture(&pixel, UI_ORANGE, 56, 162,
                          progress_width, 6);
-            for (i = 1; i < 8; i++)
-                Draw_texture(&pixel, UI_INK, 55 + (float)i * 36,
-                             161, 1, 8);
-            snprintf(line, sizeof(line), "STEP %u OF 8", progress_step);
+            snprintf(line, sizeof(line), "SIGNAL LOCK // %u.%u%%",
+                     progress_permille / 10u, progress_permille % 10u);
             Draw_align_c(line, 0, 177, 8.5f, UI_CREAM,
                          DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 400, 12);
             Draw_align_c("D-PAD BROWSE   A SELECT   B CANCEL", 0, 199, 9.0f,

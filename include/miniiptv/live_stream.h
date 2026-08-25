@@ -50,6 +50,8 @@ typedef struct {
     unsigned int total_elapsed_milliseconds;
     size_t initial_segment_received_bytes;
     size_t initial_segment_reported_bytes;
+    unsigned int initial_segments_completed;
+    unsigned int initial_segments_target;
     int result;
     int phase_active;
 } MiniIptvTuneTelemetry;
@@ -113,6 +115,8 @@ void miniiptv_live_tune_segment_progress(size_t received_bytes,
                                          size_t reported_bytes);
 void miniiptv_live_tune_get_telemetry(MiniIptvTuneTelemetry *telemetry);
 const char *miniiptv_live_tune_phase_label(MiniIptvTunePhase phase);
+unsigned int miniiptv_live_tune_progress_permille(
+    const MiniIptvTuneTelemetry *telemetry);
 const char *miniiptv_live_producer_state_label(MiniIptvProducerState state);
 
 #endif

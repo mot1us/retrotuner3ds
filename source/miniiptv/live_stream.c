@@ -378,6 +378,18 @@ void miniiptv_live_tune_segment_progress(size_t received_bytes,
     LightLock_Unlock(&tune_timeline.lock);
 }
 
+static void tune_segment_plan(unsigned int completed, unsigned int target) {
+    if (!tune_timeline.initialized) return;
+    LightLock_Lock(&tune_timeline.lock);
+    if (tune_timeline.value.phase == MINIIPTV_TUNE_PHASE_INITIAL_SEGMENT) {
+        tune_timeline.value.initial_segments_completed = completed;
+        tune_timeline.value.initial_segments_target = target;
+        tune_timeline.value.initial_segment_received_bytes = 0;
+        tune_timeline.value.initial_segment_reported_bytes = 0;
+    }
+    LightLock_Unlock(&tune_timeline.lock);
+}
+
 void miniiptv_live_tune_get_telemetry(MiniIptvTuneTelemetry *telemetry) {
     uint64_t now;
     uint64_t end;
@@ -398,6 +410,45 @@ void miniiptv_live_tune_get_telemetry(MiniIptvTuneTelemetry *telemetry) {
     telemetry->total_elapsed_milliseconds =
         tune_elapsed_milliseconds(end, tune_timeline.tune_started_ms);
     LightLock_Unlock(&tune_timeline.lock);
+}
+
+unsigned int miniiptv_live_tune_progress_permille(
+    const MiniIptvTuneTelemetry *telemetry) {
+    MiniIptvTunePhase phase;
+    uint64_t segment_permille = 0;
+    uint64_t staged_permille;
+    unsigned int target;
+
+    if (!telemetry) return 0;
+    phase = telemetry->phase == MINIIPTV_TUNE_PHASE_FAILED
+        ? telemetry->failure_phase : telemetry->phase;
+    switch (phase) {
+        case MINIIPTV_TUNE_PHASE_OLD_STREAM_CLEANUP: return 30;
+        case MINIIPTV_TUNE_PHASE_ROOT_MANIFEST: return 70;
+        case MINIIPTV_TUNE_PHASE_MEDIA_MANIFEST: return 120;
+        case MINIIPTV_TUNE_PHASE_INITIAL_SEGMENT:
+            target = telemetry->initial_segments_target
+                ? telemetry->initial_segments_target : 1u;
+            if (telemetry->initial_segment_reported_bytes > 0) {
+                segment_permille =
+                    (uint64_t)telemetry->initial_segment_received_bytes * 1000u /
+                    telemetry->initial_segment_reported_bytes;
+                if (segment_permille > 1000u) segment_permille = 1000u;
+            }
+            staged_permille =
+                ((uint64_t)telemetry->initial_segments_completed * 1000u +
+                 segment_permille) / target;
+            if (staged_permille > 1000u) staged_permille = 1000u;
+            return 120u + (unsigned int)(staged_permille * 730u / 1000u);
+        case MINIIPTV_TUNE_PHASE_PLAYER_OPEN: return 890;
+        case MINIIPTV_TUNE_PHASE_MVD_INIT: return 940;
+        case MINIIPTV_TUNE_PHASE_FIRST_FRAME: return 980;
+        case MINIIPTV_TUNE_PHASE_READY: return 1000;
+        case MINIIPTV_TUNE_PHASE_FAILED:
+        case MINIIPTV_TUNE_PHASE_IDLE:
+        case MINIIPTV_TUNE_PHASE_COUNT:
+        default: return 0;
+    }
 }
 
 static unsigned long measured_bandwidth_locked(void) {
@@ -1422,7 +1473,7 @@ int miniiptv_live_stream_start(const MiniIptvChannel *channel,
         goto failure;
     }
     miniiptv_live_tune_phase_begin(MINIIPTV_TUNE_PHASE_INITIAL_SEGMENT);
-    miniiptv_live_tune_segment_progress(0, 0);
+    tune_segment_plan(0, (unsigned int)selected);
     for (size_t i = first; i < first + selected; i++) {
         size_t bytes = 0;
         const HlsSegment *audio_segment = NULL;
@@ -1457,6 +1508,8 @@ int miniiptv_live_stream_start(const MiniIptvChannel *channel,
         initial_info->segments_staged++;
         initial_info->bytes_staged += bytes;
         initial_info->duration_staged += media.segments[i].duration;
+        tune_segment_plan((unsigned int)initial_info->segments_staged,
+                          (unsigned int)selected);
     }
     miniiptv_live_tune_phase_complete(MINIIPTV_TUNE_PHASE_INITIAL_SEGMENT);
     result = cancellation_result();

@@ -5,10 +5,14 @@ versioning while the player remains experimental.
 
 ## [Unreleased]
 
-- Carry the eight-stage tune meter through FFmpeg open, MVD initialization,
-  and first-frame presentation instead of leaving the deck frozen at stage 4.
-- Add an allocation-free stereo PCM peak meter to the live lower screen. It
-  samples audio already converted for DSP output and expires stale readings.
+- Weight tune progress by measured startup work and advance continuously within
+  each initial HLS segment before the short FFmpeg/MVD/first-frame tail.
+- Replace the early-saturating reserve bar with a fixed 24-second segmented
+  scale, adaptive target marker, and explicit 6 MiB ring occupancy.
+- Calm the allocation-free PCM activity display into one smoothed mono meter,
+  add lower-screen battery percentage, and remove duplicate live-state labels.
+- Prevent RetroTuner D-pad navigation from reaching the upstream player's LCD
+  brightness shortcuts while leaving standalone-player controls unchanged.
 - Separate the lower-screen loading cursor from the active tune. Browsing no
   longer cancels network/decoder setup; only `A` commits a different station.
 - Replace the arbitrary loading sweep with truthful eight-stage tune progress,

@@ -8,6 +8,7 @@
 #include <stdlib.h>
 
 #include "miniiptv/live_stream.h"
+#include "miniiptv/stream_limits.h"
 #include "miniiptv/telemetry_log.h"
 #include "system/menu.h"
 #include "system/sem.h"
@@ -99,7 +100,8 @@
 #define MINIIPTV_COLOR_MINT					(uint32_t)(0xFFB6B9B9)
 #define MINIIPTV_COLOR_CYAN					(uint32_t)(0xFFD2B56C)
 #define MINIIPTV_COLOR_SHADOW					(uint32_t)(0xFF1B1917)
-#define MINIIPTV_BUFFER_METER_MS			(uint32_t)(8000)
+#define MINIIPTV_BUFFER_METER_MS			(uint32_t)(24000)
+#define MINIIPTV_BUFFER_METER_SEGMENTS		(uint32_t)(24)
 #define MINIIPTV_MEMORY_SAMPLE_INTERVAL_MS	(uint64_t)(5000)
 #define MINIIPTV_DETAILS_HIDDEN				(uint8_t)(0)
 #define MINIIPTV_DETAILS_PIPELINE			(uint8_t)(1)
@@ -812,6 +814,7 @@ static bool vid_miniptv_channel_drawer_open = false;
 static bool vid_live_startup_timeout_latched = false;
 static Util_memory_stats vid_miniptv_memory_stats = { 0, };
 static uint64_t vid_miniptv_memory_sample_ms = 0;
+static uint16_t vid_miniptv_audio_meter_display = 0;
 
 static void Vid_reset_live_diagnostics(void);
 static void Vid_check_live_startup_timeout(void);
@@ -819,16 +822,20 @@ static void Vid_check_live_startup_timeout(void);
 static void Vid_draw_miniiptv_top_bar(void)
 {
 	Draw_image_data pixel = Draw_get_empty_image();
-	bool on_air = miniiptv_live_stream_is_active();
+	bool active = miniiptv_live_stream_is_active();
+	bool on_air = active && __atomic_load_n(&vid_player.has_presented_frame,
+		__ATOMIC_ACQUIRE);
 
 	Draw_texture(&pixel, MINIIPTV_COLOR_INK, 0, 0, 400, 15);
 	Draw_texture(&pixel, MINIIPTV_COLOR_CYAN, 0, 14, 400, 1);
 	Draw_c("RETRO TUNER", 6, 1, 9.5f, MINIIPTV_COLOR_CREAM);
-	Draw_align_c(on_air ? "LIVE TELEVISION" : "CHANNELS", 94, 0, 9.0f,
+	Draw_align_c(on_air ? "LIVE TELEVISION" :
+		(active ? "SIGNAL SEARCH" : "CHANNELS"), 94, 0, 9.0f,
 		MINIIPTV_COLOR_CREAM, DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER,
 		212, 13);
-	Draw_align_c(on_air ? "ON AIR" : "STANDBY", 320, 0, 9.0f,
-		on_air ? MINIIPTV_COLOR_MINT : MINIIPTV_COLOR_CYAN,
+	Draw_align_c(on_air ? "ON AIR" : (active ? "TUNING" : "STANDBY"),
+		320, 0, 9.0f,
+		on_air ? MINIIPTV_COLOR_MINT : MINIIPTV_COLOR_ORANGE,
 		DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 74, 13);
 }
 
@@ -846,22 +853,6 @@ static const char* Vid_live_audio_state_label(Vid_live_audio_state state)
 		case VID_LIVE_AUDIO_SCANNING:
 		default:							return "SCAN";
 	}
-}
-
-static unsigned int Vid_live_tune_progress_step(
-	const MiniIptvTuneTelemetry* tune)
-{
-	MiniIptvTunePhase phase;
-
-	if(!tune)
-		return 0;
-	phase = tune->phase == MINIIPTV_TUNE_PHASE_FAILED
-		? tune->failure_phase : tune->phase;
-	if(phase <= MINIIPTV_TUNE_PHASE_IDLE)
-		return 0;
-	if(phase >= MINIIPTV_TUNE_PHASE_READY)
-		return 8;
-	return (unsigned int)phase;
 }
 
 /* Sample one out of every eight already-converted PCM frames. This is a
@@ -908,7 +899,7 @@ static void Vid_update_live_audio_peak(const uint8_t* pcm,
 		(uint32_t)osGetTime(), __ATOMIC_RELEASE);
 }
 
-static void Vid_draw_miniiptv_live_overlay(void)
+static void Vid_draw_miniiptv_live_overlay(const Sem_state* system_state)
 {
 	Draw_image_data pixel = Draw_get_empty_image();
 	MiniIptvLiveInfo live_info = { 0, };
@@ -922,16 +913,20 @@ static void Vid_draw_miniiptv_live_overlay(void)
 	unsigned long read_kib = 0;
 	unsigned long underruns = 0;
 	int live_error = 0;
-	uint32_t bar_width = 0;
-	uint32_t audio_left_width = 0;
-	uint32_t audio_right_width = 0;
-	uint32_t buffer_color = MINIIPTV_COLOR_MINT;
+	uint32_t reserve_segments = 0;
+	uint32_t reserve_goal_ms = 8000;
+	uint32_t reserve_goal_x = 16;
+	uint32_t audio_meter_width = 0;
+	uint16_t raw_audio_peak = 0;
 	unsigned long effective_bandwidth = 0;
 	const char* state_text = "TUNING";
 	const char* rating_text = "CHECKING BAND";
 	uint32_t state_color = MINIIPTV_COLOR_ORANGE;
 	char line[128] = { 0, };
+	char battery_text[24] = { 0, };
 	uint64_t now_ms = osGetTime();
+	uint8_t battery_level = system_state ? system_state->battery_level : 0;
+	bool charging = system_state ? system_state->is_charging : false;
 
 	if(vid_miniptv_memory_sample_ms == 0
 	|| now_ms < vid_miniptv_memory_sample_ms
@@ -1080,67 +1075,92 @@ static void Vid_draw_miniiptv_live_overlay(void)
 			rating_text = "HIGH-BAND SIGNAL";
 	}
 
-	bar_width = (uint32_t)(((uint64_t)live_info.buffered_milliseconds * 276u)
-		/ MINIIPTV_BUFFER_METER_MS);
-	if(bar_width > 276u)
-		bar_width = 276u;
-	audio_left_width = (uint32_t)(((uint64_t)diagnostics.audio_peak_left *
-		262u) / 24576u);
-	audio_right_width = (uint32_t)(((uint64_t)diagnostics.audio_peak_right *
-		262u) / 24576u);
-	if(audio_left_width > 262u)
-		audio_left_width = 262u;
-	if(audio_right_width > 262u)
-		audio_right_width = 262u;
-	/* This is only the compressed network ring. FFmpeg packets, decoded MVD
-	 * frames, and speaker buffers are downstream and intentionally excluded.
-	 * Color it against the real refill target instead of arbitrary seconds. */
-	if((live_error != 0 &&
-	   live_error != MINIIPTV_STAGE_DISCONTINUITY) ||
-	   live_info.rebuffering || buffered == 0)
-		buffer_color = DEF_DRAW_RED;
-	else if(live_error == MINIIPTV_STAGE_DISCONTINUITY)
-		buffer_color = MINIIPTV_COLOR_ORANGE;
-	else if(live_info.rebuffer_target_bytes > 0
-	&& buffered < live_info.rebuffer_target_bytes)
-		buffer_color = MINIIPTV_COLOR_ORANGE;
+	/* The reserve scale is always 0..24 seconds. Unlike the old auto-saturating
+	 * bar, a full meter now has one stable meaning. The marker shows the current
+	 * adaptive target; the KiB line below exposes physical ring occupancy. */
+	reserve_segments = (uint32_t)(((uint64_t)live_info.buffered_milliseconds *
+		MINIIPTV_BUFFER_METER_SEGMENTS) / MINIIPTV_BUFFER_METER_MS);
+	if(reserve_segments > MINIIPTV_BUFFER_METER_SEGMENTS)
+		reserve_segments = MINIIPTV_BUFFER_METER_SEGMENTS;
+	if(live_info.shadow.desired_reserve_ms > 0)
+		reserve_goal_ms = live_info.shadow.desired_reserve_ms;
+	reserve_goal_x = 16u + (uint32_t)(((uint64_t)
+		(reserve_goal_ms > MINIIPTV_BUFFER_METER_MS
+			? MINIIPTV_BUFFER_METER_MS : reserve_goal_ms) * 276u) /
+		MINIIPTV_BUFFER_METER_MS);
+	raw_audio_peak = diagnostics.audio_peak_left > diagnostics.audio_peak_right
+		? diagnostics.audio_peak_left : diagnostics.audio_peak_right;
+	if(raw_audio_peak > vid_miniptv_audio_meter_display)
+		vid_miniptv_audio_meter_display = (uint16_t)(
+			((uint32_t)vid_miniptv_audio_meter_display +
+			 (uint32_t)raw_audio_peak * 3u) / 4u);
+	else
+		vid_miniptv_audio_meter_display = (uint16_t)(
+			(uint32_t)vid_miniptv_audio_meter_display * 7u / 8u);
+	audio_meter_width = (uint32_t)(((uint64_t)vid_miniptv_audio_meter_display *
+		226u) / 24576u);
+	if(audio_meter_width > 226u)
+		audio_meter_width = 226u;
 
 	Draw_texture(&pixel, MINIIPTV_COLOR_INK, 0, 0, 320, 240);
 	Draw_texture(&pixel, MINIIPTV_COLOR_CYAN, 12, 12, 296, 2);
-	Draw_c("LIVE", 14, 21, 13.0f, MINIIPTV_COLOR_CREAM);
-	Draw_align_c(state_text, 220, 21, 9.5f, state_color,
-		DRAW_X_ALIGN_RIGHT, DRAW_Y_ALIGN_CENTER, 86, 14);
+	Draw_c("RECEIVER", 14, 21, 12.0f, MINIIPTV_COLOR_CREAM);
+	snprintf(battery_text, sizeof(battery_text), "BAT %u%%%s",
+		battery_level, charging ? "+" : "");
+	Draw_align_c(battery_text, 210, 21, 9.5f,
+		charging ? MINIIPTV_COLOR_ORANGE : MINIIPTV_COLOR_MINT,
+		DRAW_X_ALIGN_RIGHT, DRAW_Y_ALIGN_CENTER, 96, 14);
 
 	Draw_c("NOW RECEIVING", 14, 51, 8.5f, MINIIPTV_COLOR_MINT);
 	snprintf(line, sizeof(line), "%.38s", live_info.channel_name);
 	Draw_c(line, 14, 68, 14.0f, MINIIPTV_COLOR_CREAM);
+	Draw_c(state_text, 14, 90, 8.0f, state_color);
 	Draw_align_c(rating_text, 204, 90, 8.0f,
 		strcmp(rating_text, "LOW-BAND SIGNAL") == 0
 			? MINIIPTV_COLOR_MINT : MINIIPTV_COLOR_ORANGE,
 		DRAW_X_ALIGN_RIGHT, DRAW_Y_ALIGN_CENTER, 96, 12);
 
-	Draw_c("NETWORK RESERVE", 14, 112, 8.5f, MINIIPTV_COLOR_CREAM);
-	Draw_texture(&pixel, MINIIPTV_COLOR_SHADOW, 14, 127, 280, 7);
-	Draw_texture(&pixel, buffer_color, 16, 129, bar_width, 3);
+	Draw_c("NETWORK RESERVE // 24 SEC SCALE", 14, 108, 8.0f,
+		MINIIPTV_COLOR_CREAM);
+	Draw_texture(&pixel, MINIIPTV_COLOR_SHADOW, 14, 122, 280, 10);
+	for(uint32_t i = 0; i < MINIIPTV_BUFFER_METER_SEGMENTS; i++)
+	{
+		uint32_t segment_end_ms = (i + 1u) * 1000u;
+		uint32_t segment_color = MINIIPTV_COLOR_MINT;
+		if(segment_end_ms <= reserve_goal_ms / 3u)
+			segment_color = DEF_DRAW_RED;
+		else if((uint64_t)segment_end_ms <=
+			((uint64_t)reserve_goal_ms * 2u) / 3u)
+			segment_color = MINIIPTV_COLOR_ORANGE;
+		if(i < reserve_segments)
+			Draw_texture(&pixel, segment_color,
+				16.0f + (float)i * 11.5f, 124, 9.5f, 6);
+	}
+	Draw_texture(&pixel, MINIIPTV_COLOR_CREAM, (float)reserve_goal_x,
+		120, 1, 14);
 	if(live_info.rebuffering)
-		snprintf(line, sizeof(line), "REFILLING  //  %u.%u SEC HELD",
+		snprintf(line, sizeof(line), "REFILL %u.%us // GOAL %u.%us",
 			live_info.buffered_milliseconds / 1000u,
-			(live_info.buffered_milliseconds % 1000u) / 100u);
+			(live_info.buffered_milliseconds % 1000u) / 100u,
+			(unsigned int)(reserve_goal_ms / 1000u),
+			(unsigned int)((reserve_goal_ms % 1000u) / 100u));
 	else
-		snprintf(line, sizeof(line), "%u.%u SEC READY",
-		live_info.buffered_milliseconds / 1000u,
-		(live_info.buffered_milliseconds % 1000u) / 100u);
-	Draw_align_c(line, 14, 140, 8.5f, MINIIPTV_COLOR_CREAM,
+		snprintf(line, sizeof(line), "READY %u.%us // GOAL %u.%us",
+			live_info.buffered_milliseconds / 1000u,
+			(live_info.buffered_milliseconds % 1000u) / 100u,
+			(unsigned int)(reserve_goal_ms / 1000u),
+			(unsigned int)((reserve_goal_ms % 1000u) / 100u));
+	Draw_align_c(line, 14, 135, 8.0f, MINIIPTV_COLOR_CREAM,
 		DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 280, 14);
-	Draw_c("AUDIO LEVEL", 14, 155, 8.0f, MINIIPTV_COLOR_CREAM);
-	Draw_c("L", 14, 168, 8.0f, MINIIPTV_COLOR_MINT);
-	Draw_texture(&pixel, MINIIPTV_COLOR_SHADOW, 28, 168, 266, 5);
-	Draw_texture(&pixel, MINIIPTV_COLOR_MINT, 30, 170,
-		audio_left_width, 1);
-	Draw_c("R", 14, 178, 8.0f, MINIIPTV_COLOR_MINT);
-	Draw_texture(&pixel, MINIIPTV_COLOR_SHADOW, 28, 178, 266, 5);
-	Draw_texture(&pixel, MINIIPTV_COLOR_MINT, 30, 180,
-		audio_right_width, 1);
+	snprintf(line, sizeof(line), "RING %lu / %lu KiB",
+		(unsigned long)(buffered / 1024u),
+		(unsigned long)(MINIIPTV_STREAM_RING_CAPACITY_BYTES / 1024u));
+	Draw_align_c(line, 14, 149, 7.5f, MINIIPTV_COLOR_CYAN,
+		DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 280, 12);
+	Draw_c("AUDIO", 14, 166, 7.5f, MINIIPTV_COLOR_CREAM);
+	Draw_texture(&pixel, MINIIPTV_COLOR_SHADOW, 64, 168, 230, 5);
+	Draw_texture(&pixel, MINIIPTV_COLOR_CYAN, 66, 170,
+		audio_meter_width, 1);
 
 	if(vid_miniptv_detail_page != MINIIPTV_DETAILS_HIDDEN)
 	{
@@ -1567,7 +1587,7 @@ void Vid_hid(const Hid_info* key)
 
 		//Execute functions if conditions are satisfied.
 		//Check for control screen brightness first.
-		if(HID_BRIGHTNESS_UP_PRE_CFM(*key))
+		if(!vid_embedded_test_mode && HID_BRIGHTNESS_UP_PRE_CFM(*key))
 		{
 			bool is_new_range = false;//Used by UPDATE_RANGE and CONFIRMED macro.
 
@@ -1576,7 +1596,7 @@ void Vid_hid(const Hid_info* key)
 			if(HID_BRIGHTNESS_UP_CFM(*key))
 				Vid_increase_screen_brightness();
 		}
-		else if(HID_BRIGHTNESS_DOWN_PRE_CFM(*key))
+		else if(!vid_embedded_test_mode && HID_BRIGHTNESS_DOWN_PRE_CFM(*key))
 		{
 			bool is_new_range = false;//Used by UPDATE_RANGE and CONFIRMED macro.
 
@@ -2427,6 +2447,7 @@ static void Vid_reset_live_diagnostics(void)
 		__ATOMIC_RELEASE);
 	__atomic_store_n(&vid_player.live_audio_peak_left, 0, __ATOMIC_RELEASE);
 	__atomic_store_n(&vid_player.live_audio_peak_right, 0, __ATOMIC_RELEASE);
+	vid_miniptv_audio_meter_display = 0;
 	__atomic_store_n(&vid_player.live_audio_tracks, 0, __ATOMIC_RELEASE);
 	__atomic_store_n(&vid_player.live_audio_state, VID_LIVE_AUDIO_SCANNING,
 		__ATOMIC_RELEASE);
@@ -3009,13 +3030,14 @@ void Vid_main(void)
 						MiniIptvTuneTelemetry startup_tune = { 0, };
 						MiniIptvLiveInfo startup_info = { 0, };
 						char startup_line[128] = { 0, };
-						unsigned int progress_step;
+						unsigned int progress_permille;
 						float progress_width;
 
 						miniiptv_live_tune_get_telemetry(&startup_tune);
 						miniiptv_live_stream_get_info(&startup_info);
-						progress_step = Vid_live_tune_progress_step(&startup_tune);
-						progress_width = (float)progress_step * 36.0f;
+						progress_permille =
+							miniiptv_live_tune_progress_permille(&startup_tune);
+						progress_width = 288.0f * (float)progress_permille / 1000.0f;
 						Draw_texture(&pixel, MINIIPTV_COLOR_INK, 0,
 							vid_player.is_full_screen ? 0 : 15, 400,
 							vid_player.is_full_screen ? 240 : 225);
@@ -3034,12 +3056,9 @@ void Vid_main(void)
 							54, 154, 292, 10);
 						Draw_texture(&pixel, MINIIPTV_COLOR_ORANGE,
 							56, 156, progress_width, 6);
-						for(unsigned int progress_mark = 1;
-							progress_mark < 8; progress_mark++)
-							Draw_texture(&pixel, MINIIPTV_COLOR_INK,
-								55 + (float)progress_mark * 36, 155, 1, 8);
 						snprintf(startup_line, sizeof(startup_line),
-							"STEP %u OF 8", progress_step);
+							"SIGNAL LOCK // %u.%u%%",
+							progress_permille / 10u, progress_permille % 10u);
 						Draw_align_c(startup_line, 0, 174, 8.5f,
 							MINIIPTV_COLOR_CREAM, DRAW_X_ALIGN_CENTER,
 							DRAW_Y_ALIGN_CENTER, TOP_SCREEN_WIDTH, 12);
@@ -4134,7 +4153,7 @@ void Vid_main(void)
 					&& vid_live_drawer_draw_hook)
 						vid_live_drawer_draw_hook(color, back_color);
 					else
-						Vid_draw_miniiptv_live_overlay();
+						Vid_draw_miniiptv_live_overlay(&state);
 				}
 
 				//Dialogs must be drawn after the custom idle screen so they remain visible.
