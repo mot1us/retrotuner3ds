@@ -40,6 +40,7 @@ playlist and are responsible for having permission to access its streams.
 | Control | Action |
 | --- | --- |
 | D-pad Up/Down | Choose a channel |
+| D-pad Left/Right | Move one page through the channel deck |
 | A | Tune the selected channel |
 | B | Cancel tuning, or stop playback and return to the channel deck |
 | L / R | Queue the previous or next channel while tuning or playing |

@@ -28,15 +28,15 @@
 #define AUTO_RELOCK_MAX_ATTEMPTS 2u
 #define AUTO_RELOCK_WINDOW_MS 30000ULL
 
-/* Restrained 1990s portable-TV palette (ABGR8888). */
-#define UI_INK 0xFF0F0D0Bu
-#define UI_PANEL 0xFF282420u
-#define UI_CREAM 0xFFD8E4E8u
-#define UI_ORANGE 0xFF369AD8u
-#define UI_MINT 0xFFC2C777u
-#define UI_PINK 0xFF5A5AC8u
-#define UI_CYAN 0xFFC4B678u
-#define UI_SHADOW 0xFF151311u
+/* Minimal 1990s portable-TV palette (ABGR8888). */
+#define UI_INK 0xFF121110u
+#define UI_PANEL 0xFF2C2926u
+#define UI_CREAM 0xFFE8EBEDu
+#define UI_ORANGE 0xFF4AA6E3u
+#define UI_MINT 0xFFB6B9B9u
+#define UI_PINK 0xFF4F4FD5u
+#define UI_CYAN 0xFFD2B56Cu
+#define UI_SHADOW 0xFF1B1917u
 
 typedef enum {
     LIVE_APP_NO_PLAYLIST = 0,
@@ -1143,6 +1143,28 @@ static bool live_hid(const Hid_info *key) {
         Draw_set_refresh_needed(true);
         return true;
     }
+    if (!app.stream_cleanup_pending && !app.worker && !app.worker_reaping &&
+        state != LIVE_APP_LOADING && count &&
+        (DEF_HID_PHY_PR(key->d_left) || DEF_HID_PHY_PR(key->d_right))) {
+        size_t page = app.selected / CHANNELS_PER_PAGE;
+        size_t page_count =
+            (count + CHANNELS_PER_PAGE - 1u) / CHANNELS_PER_PAGE;
+
+        if (DEF_HID_PHY_PR(key->d_left) && page > 0u)
+            app.selected = (page - 1u) * CHANNELS_PER_PAGE;
+        else if (DEF_HID_PHY_PR(key->d_right) && page + 1u < page_count)
+            app.selected = (page + 1u) * CHANNELS_PER_PAGE;
+        else {
+            LightLock_Unlock(&app.lock);
+            return true;
+        }
+        set_status_locked(LIVE_APP_IDLE,
+                          "READY // press A to tune this signal");
+        LightLock_Unlock(&app.lock);
+        miniiptv_live_stream_stop();
+        Draw_set_refresh_needed(true);
+        return true;
+    }
 
     if (DEF_HID_PHY_PR(key->a)) {
         if (state == LIVE_APP_READY) {
@@ -1186,6 +1208,8 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
     size_t i;
     size_t page_start;
     size_t page_end;
+    size_t page_count;
+    size_t page_number;
     PlayerReturnAction return_action;
     bool scan_running;
     bool scan_complete;
@@ -1260,6 +1284,9 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
     page_start = count ? (selected / CHANNELS_PER_PAGE) * CHANNELS_PER_PAGE : 0;
     page_end = page_start + CHANNELS_PER_PAGE;
     if (page_end > count) page_end = count;
+    page_count = count
+        ? (count + CHANNELS_PER_PAGE - 1u) / CHANNELS_PER_PAGE : 0u;
+    page_number = count ? page_start / CHANNELS_PER_PAGE + 1u : 0u;
 
     if (top_screen) {
         if (state == LIVE_APP_LOADING ||
@@ -1271,32 +1298,55 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
                 Draw_texture(&pixel, UI_SHADOW, 0, (float)i, 400, 1);
         }
 
-        Draw_texture(&pixel, UI_ORANGE, 12, 25, 376, 3);
-        Draw_texture(&pixel, UI_CYAN, 24, 43, 82, 2);
-        Draw_texture(&pixel, UI_PINK, 294, 43, 82, 2);
-		Draw_align_c("RETRO TUNER", 0, 31, 18.0f, UI_CREAM,
+        Draw_texture(&pixel,
+                     state == LIVE_APP_ERROR ? UI_PINK :
+                         (state == LIVE_APP_LOADING || scan_running
+                              ? UI_ORANGE : UI_CYAN),
+                     0, 15, 400, 3);
+        Draw_c("RT/3DS", 12, 22, 9.5f, UI_MINT);
+        Draw_align_c(scan_running ? "AUTO SCAN" :
+                         (state == LIVE_APP_LOADING ? "TUNING" :
+                              (state == LIVE_APP_ERROR ? "OFF AIR"
+                                                       : "CHANNEL DECK")),
+                     0, 21, 9.5f, UI_CREAM, DRAW_X_ALIGN_CENTER,
+                     DRAW_Y_ALIGN_CENTER, 400, 13);
+        Draw_align_c(state == LIVE_APP_LOADING ? "LOCKING" :
+                         (scan_running ? "SEARCHING" :
+                              (state == LIVE_APP_ERROR ? "NO SIGNAL"
+                                                       : "STANDBY")),
+                     320, 21, 9.0f,
+                     state == LIVE_APP_ERROR ? UI_PINK : UI_MINT,
+                     DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 72, 13);
+        Draw_align_c("RETRO TUNER 3DS", 0, 42, 18.0f, UI_CREAM,
                      DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 400, 24);
-		Draw_align_c("HANDHELD AIRWAVE RECEIVER // 199X", 0, 61, 11.0f,
-                     UI_CYAN, DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER,
-                     400, 18);
 
-        Draw_texture(&pixel, UI_PANEL, 24, 88, 352, 70);
+        Draw_texture(&pixel, UI_PANEL, 24, 76, 352, 78);
         Draw_c(scan_running && state == LIVE_APP_IDLE
-                   ? "SCANNING AIRWAVES"
-                   : (switching_from_player ? "LIVE CHANNEL HANDOFF"
-                                            : "NOW SELECTING"),
-               38, 98, 10.0f, UI_MINT);
+                   ? "CHECKING SIGNAL"
+                   : (switching_from_player ? "NEXT SIGNAL"
+                                            : "SELECTED SIGNAL"),
+               38, 86, 10.0f,
+               state == LIVE_APP_ERROR ? UI_PINK : UI_CYAN);
         if (scan_running && state == LIVE_APP_IDLE) {
             snprintf(line, sizeof(line), "CH %02lu/%02lu  %.30s",
                      (unsigned long)(scan_current_index + 1),
                      (unsigned long)source_count, scan_channel_name);
-            Draw_align_c(line, 34, 117, 14.0f, UI_CREAM,
+            Draw_align_c(line, 34, 107, 14.0f, UI_CREAM,
                          DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 332, 28);
+            snprintf(line, sizeof(line), "%lu SIGNALS FOUND",
+                     (unsigned long)count);
+            Draw_align_c(line, 34, 137, 9.5f, UI_MINT,
+                         DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 332, 12);
         } else if (count) {
             snprintf(line, sizeof(line), "CH %02lu  %.38s",
                      (unsigned long)(selected + 1), channel_names[selected]);
-            Draw_align_c(line, 34, 117, 16.0f, UI_CREAM,
+            Draw_align_c(line, 34, 106, 16.0f, UI_CREAM,
                          DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 332, 28);
+            snprintf(line, sizeof(line), "PAGE %lu OF %lu // %lu FOUND",
+                     (unsigned long)page_number, (unsigned long)page_count,
+                     (unsigned long)count);
+            Draw_align_c(line, 34, 137, 9.5f, UI_MINT,
+                         DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 332, 12);
         }
 
         if (scan_running && state == LIVE_APP_IDLE) {
@@ -1304,12 +1354,12 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
             snprintf(line, sizeof(line), "%lu FOUND // CHECK %02lu OF %02lu",
                      (unsigned long)count, (unsigned long)scan_index,
                      (unsigned long)source_count);
-            Draw_align_c(line, 0, 169, 11.0f, UI_ORANGE,
+            Draw_align_c(line, 0, 166, 11.0f, UI_ORANGE,
                          DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 400, 16);
-            Draw_texture(&pixel, UI_SHADOW, 74, 190, 252, 10);
+            Draw_texture(&pixel, UI_SHADOW, 74, 186, 252, 10);
             for (i = 0; i < 12; i++)
                 Draw_texture(&pixel, i == phase ? UI_CREAM : UI_CYAN,
-                             78 + (float)i * 20, 192, 14, 6);
+                             78 + (float)i * 20, 188, 14, 6);
             Draw_align_c(count ? "A TUNE FOUND SIGNAL // SCAN PAUSES"
                                : "FOUND STATIONS APPEAR AS THEY ARRIVE",
                          0, 201, 9.0f, UI_MINT, DRAW_X_ALIGN_CENTER,
@@ -1319,19 +1369,19 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
             uint64_t elapsed = osGetTime() - tuning_started_ms;
             unsigned int phase = (unsigned int)((elapsed / 180u) % 12u);
             format_tune_status(line, sizeof(line), &tune);
-            Draw_align_c(line, 0, 169, 11.0f, UI_ORANGE,
+            Draw_align_c(line, 0, 166, 11.0f, UI_ORANGE,
                          DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 400, 16);
-            Draw_texture(&pixel, UI_SHADOW, 74, 190, 252, 10);
+            Draw_texture(&pixel, UI_SHADOW, 74, 186, 252, 10);
             for (i = 0; i < 12; i++)
                 Draw_texture(&pixel, i == phase ? UI_CREAM : UI_ORANGE,
-                             78 + (float)i * 20, 192, 14, 6);
+                             78 + (float)i * 20, 188, 14, 6);
             Draw_align_c("B CANCEL // L/R CHANGE", 0, 201, 9.0f, UI_MINT,
                          DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 400, 10);
             Draw_set_refresh_needed(true);
         } else if (state == LIVE_APP_ERROR) {
             Draw_align_c("NO SIGNAL // A RETRY // B DECK // L/R CHANGE",
-                         0, 174, 12.0f,
-                         DEF_DRAW_RED, DRAW_X_ALIGN_CENTER,
+                         0, 171, 12.0f,
+                         UI_PINK, DRAW_X_ALIGN_CENTER,
                          DRAW_Y_ALIGN_CENTER, 400, 20);
             if (tune.phase == MINIIPTV_TUNE_PHASE_FAILED) {
                 if (has_player_error_diagnostics)
@@ -1346,17 +1396,17 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
                              miniiptv_live_tune_phase_label(tune.failure_phase),
                              tune.total_elapsed_milliseconds / 1000u,
                              (tune.total_elapsed_milliseconds % 1000u) / 100u);
-                Draw_align_c(line, 0, 195, 8.5f, UI_ORANGE,
+                Draw_align_c(line, 0, 194, 8.5f, UI_ORANGE,
                              DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER,
                              400, 12);
             }
         } else if (state == LIVE_APP_NO_PLAYLIST) {
             Draw_align_c("NO PLAYLIST // ADD CHANNELS.M3U", 0, 174, 12.0f,
-                         DEF_DRAW_RED, DRAW_X_ALIGN_CENTER,
+                         UI_PINK, DRAW_X_ALIGN_CENTER,
                          DRAW_Y_ALIGN_CENTER, 400, 20);
         } else if (count) {
-            draw_key_hint(&pixel, "A", "TUNE", 22, 181, 18, UI_PINK);
-            draw_key_hint(&pixel, "D-PAD", "CHANNEL", 113, 181, 46,
+            draw_key_hint(&pixel, "A", "TUNE", 22, 181, 18, UI_CYAN);
+            draw_key_hint(&pixel, "D-PAD", "BROWSE", 113, 181, 46,
                           UI_CYAN);
             draw_key_hint(&pixel, "START", "EXIT", 280, 181, 47,
                           UI_ORANGE);
@@ -1365,8 +1415,8 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
                          UI_ORANGE, DRAW_X_ALIGN_CENTER,
                          DRAW_Y_ALIGN_CENTER, 400, 18);
         }
-		Draw_align_c("PIXEL DECK " RETROTUNER_VERSION " // H264", 0, 211, 9.5f,
-                     UI_CREAM, DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER,
+        Draw_align_c("RETROTUNER " RETROTUNER_VERSION " // H264", 0, 215,
+                     9.0f, UI_MINT, DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER,
                      400, 14);
         return;
     }
@@ -1375,7 +1425,11 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
     for (i = 4; i < 220; i += 8)
         Draw_texture(&pixel, UI_SHADOW, 0, (float)i, 320, 1);
 
-    Draw_texture(&pixel, UI_ORANGE, 8, 8, 304, 3);
+    Draw_texture(&pixel,
+                 state == LIVE_APP_ERROR ? UI_PINK :
+                     (state == LIVE_APP_LOADING || scan_running
+                          ? UI_ORANGE : UI_CYAN),
+                 8, 8, 304, 3);
 
     if (state == LIVE_APP_LOADING && switching_from_player && count > 0) {
         uint64_t elapsed = osGetTime() - tuning_started_ms;
@@ -1411,14 +1465,19 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
         return;
     }
 
-    snprintf(line, sizeof(line), "%s // %lu FOUND // P%lu/%lu",
-             scan_running ? "SCANNING" :
-                 (scan_complete ? "AIRWAVES READY" : "CHANNEL DECK"),
-             (unsigned long)count,
-             (unsigned long)(count ? page_start / CHANNELS_PER_PAGE + 1 : 0),
-             (unsigned long)(count ? (count + CHANNELS_PER_PAGE - 1) /
-                                      CHANNELS_PER_PAGE : 0));
-    Draw_c(line, 14, 16, 13.0f, UI_CREAM);
+    Draw_c(scan_running ? "SCANNING AIRWAVES" :
+               (scan_complete ? "CHANNELS" : "CHANNEL DECK"),
+           14, 16, 12.5f, UI_CREAM);
+    snprintf(line, sizeof(line), "PAGE %lu OF %lu",
+             (unsigned long)page_number, (unsigned long)page_count);
+    Draw_align_c(line, 216, 16, 10.0f, UI_CYAN,
+                 DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 92, 15);
+    if (count) {
+        snprintf(line, sizeof(line), "%lu FOUND // SHOWING %02lu-%02lu",
+                 (unsigned long)count, (unsigned long)(page_start + 1u),
+                 (unsigned long)page_end);
+        Draw_c(line, 14, 31, 9.0f, UI_MINT);
+    }
 
     if (count == 0 && scan_running)
         Draw_align_c("SEARCHING... CHANNELS APPEAR HERE", 10, 91, 11.0f,
@@ -1426,24 +1485,24 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
                      300, 30);
 
     for (i = page_start; i < page_end; i++) {
-        float y = 39 + (float)(i - page_start) * 14;
-        Draw_texture(&pixel, i == selected ? UI_ORANGE : UI_PANEL,
+        float y = 45 + (float)(i - page_start) * 13;
+        Draw_texture(&pixel, i == selected ? UI_CYAN : UI_PANEL,
                      10, y, 300, 12);
         snprintf(line, sizeof(line), "%c %02lu  %.35s",
                  channel_scan_status[i] == MINIIPTV_SCAN_READY ? '*' : '?',
                  (unsigned long)(i + 1), channel_names[i]);
-        Draw_c(line, 17, y + 1, 10.5f,
+        Draw_c(line, 17, y + 1, 10.0f,
                i == selected ? UI_INK : UI_CREAM);
     }
 
     if (state == LIVE_APP_ERROR && has_player_error_diagnostics) {
-        Draw_texture(&pixel, UI_PANEL, 8, 181, 304, 29);
+        Draw_texture(&pixel, UI_PANEL, 8, 178, 304, 32);
         snprintf(line, sizeof(line), "V PKT:%lu DEC:%lu TEX:%lu SHOW:%lu",
                  (unsigned long)player_error_diagnostics.video_packets,
                  (unsigned long)player_error_diagnostics.decoded_frames,
                  (unsigned long)player_error_diagnostics.textures,
                  (unsigned long)player_error_diagnostics.presented_frames);
-        Draw_align_c(line, 12, 182, 8.5f, UI_CYAN,
+        Draw_align_c(line, 12, 180, 8.5f, UI_CYAN,
                      DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 296, 12);
         snprintf(line, sizeof(line), "A %u %s RX:%lu DEC:%lu Q:%lu AE:%lX",
                  player_error_diagnostics.audio_tracks,
@@ -1452,16 +1511,20 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
                  (unsigned long)player_error_diagnostics.audio_frames,
                  (unsigned long)player_error_diagnostics.audio_buffers,
                  (unsigned long)player_error_diagnostics.audio_last_error);
-        Draw_align_c(line, 12, 196, 8.0f, UI_MINT,
+        Draw_align_c(line, 12, 195, 8.0f, UI_MINT,
                      DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 296, 12);
     } else {
-        Draw_texture(&pixel, UI_PANEL, 8, 183, 304, 28);
+        Draw_texture(&pixel, UI_PANEL, 8, 178, 304, 32);
         if (state == LIVE_APP_LOADING)
             format_tune_status(line, sizeof(line), &tune);
-        Draw_align_c(state == LIVE_APP_LOADING ? line : status,
-                     14, 184, 9.5f,
+        else if (count && page_count > 1u && state == LIVE_APP_IDLE)
+            snprintf(line, sizeof(line),
+                     "READY // LEFT/RIGHT PAGE // A TUNE");
+        else
+            snprintf(line, sizeof(line), "%.111s", status);
+        Draw_align_c(line, 14, 181, 9.5f,
                      state == LIVE_APP_ERROR || state == LIVE_APP_NO_PLAYLIST
-                         ? DEF_DRAW_RED : UI_MINT,
+                         ? UI_PINK : UI_MINT,
                      DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 292, 24);
     }
     if (state == LIVE_APP_LOADING) {
@@ -1472,10 +1535,11 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
         draw_key_hint(&pixel, "B", "DECK", 75, 211, 17, UI_MINT);
         draw_key_hint(&pixel, "L/R", "CHANGE", 133, 211, 29, UI_CYAN);
     } else if (count) {
-        draw_key_hint(&pixel, "A", "TUNE", 9, 211, 17, UI_PINK);
-        draw_key_hint(&pixel, "UP/DN", "PICK", 77, 211, 42, UI_CYAN);
+        draw_key_hint(&pixel, "A", "TUNE", 5, 211, 17, UI_CYAN);
+        draw_key_hint(&pixel, "UP/DN", "CH", 58, 211, 37, UI_CYAN);
+        draw_key_hint(&pixel, "LT/RT", "PAGE", 125, 211, 37, UI_CYAN);
     }
-    draw_key_hint(&pixel, "START", "QUIT", 209, 211, 45, UI_ORANGE);
+    draw_key_hint(&pixel, "START", "QUIT", 223, 211, 44, UI_ORANGE);
 }
 
 void MiniIptv_live_app_init(void) {

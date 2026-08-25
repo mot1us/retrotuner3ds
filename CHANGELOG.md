@@ -5,6 +5,9 @@ versioning while the player remains experimental.
 
 ## [Unreleased]
 
+- Clarify the scanned channel deck with explicit page/count labels, one-page
+  D-pad Left/Right navigation, quieter portable-TV styling, and distinct
+  scanning, tuning, ready, and error presentation.
 - Add an incremental manifest-only airwave scan. The app opens with an empty
   discovered deck, admits compatible/metadata-unknown live stations as they
   are checked, and pauses discovery completely while tuning or playing.
