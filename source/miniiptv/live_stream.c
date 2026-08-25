@@ -131,6 +131,8 @@ typedef struct {
     unsigned char *destination;
     size_t capacity;
     size_t total_size;
+    size_t progress_base_size;
+    size_t progress_base_reported;
     bool report_tune_progress;
 } SegmentWriter;
 
@@ -628,9 +630,18 @@ static size_t segment_write_callback(const unsigned char *data, size_t size,
     if (size > writer->capacity - writer->total_size) return 0;
     memcpy(writer->destination + writer->total_size, data, size);
     writer->total_size += size;
-    if (writer->report_tune_progress)
-        miniiptv_live_tune_segment_progress(writer->total_size, 0);
     return size;
+}
+
+static void segment_progress_callback(size_t received_size,
+                                      size_t reported_size,
+                                      void *userdata) {
+    SegmentWriter *writer = userdata;
+    if (!writer || !writer->report_tune_progress) return;
+    miniiptv_live_tune_segment_progress(
+        writer->progress_base_size + received_size,
+        reported_size > 0
+            ? writer->progress_base_reported + reported_size : 0);
 }
 
 static int stream_segment(const HlsSegment *segment,
@@ -667,6 +678,7 @@ static int stream_segment(const HlsSegment *segment,
                                  stream.channel.referrer,
                                  MINIIPTV_SEGMENT_LIMIT,
                                  segment_write_callback, &writer,
+                                 segment_progress_callback, &writer,
                                  curl_should_cancel, NULL, &metrics);
     download_finished = osGetTime();
     download_clock_valid = download_finished >= download_started;
@@ -687,11 +699,15 @@ static int stream_segment(const HlsSegment *segment,
         } else {
             audio_writer.destination = audio_segment_staging;
             audio_writer.capacity = sizeof(audio_segment_staging);
+            audio_writer.report_tune_progress = writer.report_tune_progress;
+            audio_writer.progress_base_size = writer.total_size;
+            audio_writer.progress_base_reported = metrics.reported_size;
             result = network_stream_data(
                 audio_segment->url, stream.channel.user_agent,
                 stream.channel.referrer, STREAM_AUDIO_SEGMENT_LIMIT,
-                segment_write_callback, &audio_writer, curl_should_cancel,
-                NULL, &audio_metrics);
+                segment_write_callback, &audio_writer,
+                segment_progress_callback, &audio_writer,
+                curl_should_cancel, NULL, &audio_metrics);
             if (result == -5) {
                 int cancelled = cancellation_result();
                 if (cancelled != MINIIPTV_STAGE_OK) result = cancelled;

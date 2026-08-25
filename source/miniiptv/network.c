@@ -31,6 +31,8 @@ typedef struct {
 typedef struct {
     MiniIptvStreamWriteFunction write_data;
     void *write_userdata;
+    MiniIptvStreamProgressFunction report_progress;
+    void *progress_userdata;
     MiniIptvCancelFunction should_cancel;
     void *cancel_userdata;
     size_t size;
@@ -111,6 +113,9 @@ static size_t stream_write_callback(char *incoming, size_t size, size_t count,
         return 0;
     output->size += bytes;
     output->observed_size = output->size;
+    if (output->report_progress)
+        output->report_progress(output->size, output->reported_size,
+                                output->progress_userdata);
     return bytes;
 }
 
@@ -127,6 +132,9 @@ static int stream_progress_callback(void *userdata, curl_off_t download_total,
         uint64_t total = (uint64_t)download_total;
         output->reported_size = total > SIZE_MAX ? SIZE_MAX : (size_t)total;
     }
+    if (output->report_progress)
+        output->report_progress(output->size, output->reported_size,
+                                output->progress_userdata);
     if (download_total > 0 &&
         (uint64_t)download_total > (uint64_t)output->maximum_size) {
         output->too_large = 1;
@@ -334,6 +342,8 @@ int network_stream_data(const char *url, const char *user_agent,
                         const char *referrer, size_t maximum_size,
                         MiniIptvStreamWriteFunction write_data,
                         void *write_userdata,
+                        MiniIptvStreamProgressFunction report_progress,
+                        void *progress_userdata,
                         MiniIptvCancelFunction should_cancel,
                         void *cancel_userdata, NetworkStreamMetrics *metrics) {
     CURL *curl = persistent_curl;
@@ -347,6 +357,8 @@ int network_stream_data(const char *url, const char *user_agent,
     memset(&output, 0, sizeof(output));
     output.write_data = write_data;
     output.write_userdata = write_userdata;
+    output.report_progress = report_progress;
+    output.progress_userdata = progress_userdata;
     output.should_cancel = should_cancel;
     output.cancel_userdata = cancel_userdata;
     output.maximum_size = maximum_size;

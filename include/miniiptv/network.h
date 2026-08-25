@@ -16,6 +16,9 @@ typedef struct {
 typedef int (*MiniIptvCancelFunction)(void *userdata);
 typedef size_t (*MiniIptvStreamWriteFunction)(const unsigned char *data,
                                               size_t size, void *userdata);
+typedef void (*MiniIptvStreamProgressFunction)(size_t received_size,
+                                               size_t reported_size,
+                                               void *userdata);
 
 typedef struct {
     size_t received_size;
@@ -53,6 +56,8 @@ int network_stream_data(const char *url, const char *user_agent,
                         const char *referrer, size_t maximum_size,
                         MiniIptvStreamWriteFunction write_data,
                         void *write_userdata,
+                        MiniIptvStreamProgressFunction report_progress,
+                        void *progress_userdata,
                         MiniIptvCancelFunction should_cancel,
                         void *cancel_userdata, NetworkStreamMetrics *metrics);
 void network_response_free(NetworkTextResponse *response);
