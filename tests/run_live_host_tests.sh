@@ -24,6 +24,16 @@ cc -std=c11 -Wall -Wextra -Werror -pedantic \
   -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer \
   -Iinclude \
   source/miniiptv/hls.c \
+  source/miniiptv/channel_scan.c \
+  tests/test_channel_scan.c \
+  -o tests/bin/test_channel_scan_san
+
+ASAN_OPTIONS=detect_leaks=0 tests/bin/test_channel_scan_san
+
+cc -std=c11 -Wall -Wextra -Werror -pedantic \
+  -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer \
+  -Iinclude \
+  source/miniiptv/hls.c \
   source/miniiptv/hls_prefetch.c \
   tests/test_hls_prefetch.c \
   -o tests/bin/test_hls_prefetch_san

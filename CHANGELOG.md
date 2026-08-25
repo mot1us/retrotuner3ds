@@ -5,6 +5,16 @@ versioning while the player remains experimental.
 
 ## [Unreleased]
 
+- Add an incremental manifest-only airwave scan. The app opens with an empty
+  discovered deck, admits compatible/metadata-unknown live stations as they
+  are checked, and pauses discovery completely while tuning or playing.
+- Reject known over-limit resolution/frame-rate sources, encrypted HLS,
+  byte-range/fMP4 layouts, VOD playlists, and offline manifests before any
+  video segment is downloaded or decoder memory is initialized.
+- Replace the busier blue deck treatment with a restrained black/off-white
+  portable-TV palette, subtle static, and live scan progress.
+- Record scanner channel/state transitions in the existing bounded telemetry
+  log without adding URLs or media payloads.
 - Force automatic relocks to rebuild a conservative two-segment startup
   reserve instead of reusing a stale one-segment warm profile from before the
   stream boundary.

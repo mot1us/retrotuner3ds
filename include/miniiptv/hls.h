@@ -17,6 +17,7 @@ typedef struct {
     unsigned long bandwidth;
     unsigned int width;
     unsigned int height;
+    unsigned int frame_rate_millihz;
     char codecs[96];
     char url[MINIIPTV_HLS_URL_MAX];
     char audio_group[64];

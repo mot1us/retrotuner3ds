@@ -23,6 +23,11 @@ typedef struct {
     size_t reported_size;
 } NetworkStreamMetrics;
 
+typedef struct {
+    unsigned int connect_timeout_seconds;
+    unsigned int total_timeout_seconds;
+} NetworkRequestOptions;
+
 int network_init(void);
 void network_exit(void);
 int network_get_text(const char *url, const char *user_agent, const char *referrer,
@@ -34,6 +39,11 @@ int network_get_data_cancelable(const char *url, const char *user_agent,
                                 MiniIptvCancelFunction should_cancel,
                                 void *cancel_userdata,
                                 NetworkTextResponse *response);
+int network_get_data_cancelable_with_options(
+    const char *url, const char *user_agent, const char *referrer,
+    size_t maximum_size, MiniIptvCancelFunction should_cancel,
+    void *cancel_userdata, const NetworkRequestOptions *options,
+    NetworkTextResponse *response);
 int network_download_file(const char *url, const char *user_agent,
                           const char *referrer, size_t maximum_size,
                           const char *output_path,

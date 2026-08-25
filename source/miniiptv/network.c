@@ -170,6 +170,16 @@ int network_get_data_cancelable(const char *url, const char *user_agent,
                                 MiniIptvCancelFunction should_cancel,
                                 void *cancel_userdata,
                                 NetworkTextResponse *response) {
+    return network_get_data_cancelable_with_options(
+        url, user_agent, referrer, maximum_size, should_cancel,
+        cancel_userdata, NULL, response);
+}
+
+int network_get_data_cancelable_with_options(
+    const char *url, const char *user_agent, const char *referrer,
+    size_t maximum_size, MiniIptvCancelFunction should_cancel,
+    void *cancel_userdata, const NetworkRequestOptions *options,
+    NetworkTextResponse *response) {
     CURL *curl;
     CURLcode result;
     CurlBuffer buffer;
@@ -195,9 +205,14 @@ int network_get_data_cancelable(const char *url, const char *user_agent,
     curl_easy_setopt(curl, CURLOPT_URL, url);
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 5L);
-    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 15L);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT,
+                     (long)(options && options->connect_timeout_seconds
+                         ? options->connect_timeout_seconds : 15u));
     curl_easy_setopt(curl, CURLOPT_TIMEOUT,
-                     maximum_size > MINIIPTV_MANIFEST_LIMIT ? 60L : 20L);
+                     (long)(options && options->total_timeout_seconds
+                         ? options->total_timeout_seconds
+                         : (maximum_size > MINIIPTV_MANIFEST_LIMIT
+                            ? 60u : 20u)));
     curl_easy_setopt(curl, CURLOPT_USERAGENT,
         user_agent && *user_agent ? user_agent : "RetroTuner3DS/" RETROTUNER_VERSION);
     if (referrer && *referrer) curl_easy_setopt(curl, CURLOPT_REFERER, referrer);

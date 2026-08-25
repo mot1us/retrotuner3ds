@@ -137,6 +137,18 @@ static void parse_resolution(const char *line, unsigned int *width, unsigned int
     (void)sscanf(value, "%ux%u", width, height);
 }
 
+static unsigned int parse_frame_rate_millihz(const char *line) {
+    const char *value = find_attribute(line, "FRAME-RATE=");
+    char *end;
+    double frame_rate;
+    if (!value) return 0;
+    frame_rate = strtod(value, &end);
+    if (end == value || !isfinite(frame_rate) || frame_rate <= 0.0 ||
+        frame_rate > 1000.0)
+        return 0;
+    return (unsigned int)(frame_rate * 1000.0 + 0.5);
+}
+
 static void parse_codecs(const char *line, char *output, size_t output_size) {
     const char *value = find_attribute(line, "CODECS=\"");
     const char *end;
@@ -277,6 +289,7 @@ int hls_select_stream(const char *manifest, const char *manifest_url, HlsSelecti
     unsigned long lowest_bandwidth = ULONG_MAX;
     unsigned int pending_width = 0;
     unsigned int pending_height = 0;
+    unsigned int pending_frame_rate_millihz = 0;
     char pending_codecs[96] = {0};
     char pending_audio_group[64] = {0};
     struct {
@@ -332,8 +345,10 @@ int hls_select_stream(const char *manifest, const char *manifest_url, HlsSelecti
         else if (strncmp(line, "#EXT-X-STREAM-INF:", 18) == 0) {
             pending_bandwidth = parse_bandwidth(line);
             pending_width = pending_height = 0;
+            pending_frame_rate_millihz = 0;
             pending_codecs[0] = '\0';
             parse_resolution(line, &pending_width, &pending_height);
+            pending_frame_rate_millihz = parse_frame_rate_millihz(line);
             parse_codecs(line, pending_codecs, sizeof(pending_codecs));
             parse_quoted_attribute(line, "AUDIO=\"", pending_audio_group,
                                    sizeof(pending_audio_group));
@@ -347,6 +362,8 @@ int hls_select_stream(const char *manifest, const char *manifest_url, HlsSelecti
                     lowest_bandwidth = pending_bandwidth;
                     selection->width = pending_width;
                     selection->height = pending_height;
+                    selection->frame_rate_millihz =
+                        pending_frame_rate_millihz;
                     copy_bounded(selection->codecs, sizeof(selection->codecs), pending_codecs, strlen(pending_codecs));
                     copy_bounded(selection->audio_group,
                         sizeof(selection->audio_group), pending_audio_group,

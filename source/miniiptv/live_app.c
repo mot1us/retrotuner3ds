@@ -8,6 +8,8 @@
 
 #include "miniiptv/live_session.h"
 #include "miniiptv/live_stream.h"
+#include "miniiptv/channel_scan.h"
+#include "miniiptv/network.h"
 #include "miniiptv/playlist.h"
 #include "miniiptv/telemetry_log.h"
 #include "miniiptv/version.h"
@@ -26,15 +28,15 @@
 #define AUTO_RELOCK_MAX_ATTEMPTS 2u
 #define AUTO_RELOCK_WINDOW_MS 30000ULL
 
-/* Retro broadcast palette (ABGR8888). */
-#define UI_INK 0xFF21160Fu
-#define UI_PANEL 0xFF3C2A1Du
-#define UI_CREAM 0xFFB8EEFFu
-#define UI_ORANGE 0xFF00A8FFu
-#define UI_MINT 0xFF8FEA69u
-#define UI_PINK 0xFF9A4FFFu
-#define UI_CYAN 0xFFFFEB5Du
-#define UI_SHADOW 0xFF120C08u
+/* Restrained 1990s portable-TV palette (ABGR8888). */
+#define UI_INK 0xFF0F0D0Bu
+#define UI_PANEL 0xFF282420u
+#define UI_CREAM 0xFFD8E4E8u
+#define UI_ORANGE 0xFF369AD8u
+#define UI_MINT 0xFFC2C777u
+#define UI_PINK 0xFF5A5AC8u
+#define UI_CYAN 0xFFC4B678u
+#define UI_SHADOW 0xFF151311u
 
 typedef enum {
     LIVE_APP_NO_PLAYLIST = 0,
@@ -53,7 +55,17 @@ typedef enum {
 
 typedef struct {
     LightLock lock;
+    MiniIptvPlaylist source_playlist;
     MiniIptvPlaylist playlist;
+    MiniIptvScanStatus playlist_scan_status[MINIIPTV_MAX_CHANNELS];
+    MiniIptvScanResult scan_results[MINIIPTV_MAX_CHANNELS];
+    size_t scan_index;
+    size_t scan_current_index;
+    Thread scan_worker;
+    bool scan_worker_finished;
+    bool scan_worker_running;
+    bool scan_stop_requested;
+    bool scan_complete;
     MiniIptvChannel pending_channel;
     MiniIptvStageInfo stage_info;
     size_t selected;
@@ -86,6 +98,7 @@ typedef struct {
 static LiveApp app;
 
 static void launch_tune_worker(void);
+static void launch_scan_worker(void);
 
 void MiniIptv_live_app_draw_boot_screen(void) {
     Draw_image_data pixel = Draw_get_empty_image();
@@ -98,11 +111,11 @@ void MiniIptv_live_app_draw_boot_screen(void) {
     Draw_texture(&pixel, UI_PINK, 0, 13, 400, 2);
     Draw_texture(&pixel, UI_CYAN, 0, 13, 126, 2);
     Draw_texture(&pixel, UI_ORANGE, 24, 48, 352, 3);
-    Draw_align_c("RETRO TUNER 3DS", 0, 72, 20.0f, UI_CREAM,
+    Draw_align_c("RETRO TUNER", 0, 72, 20.0f, UI_CREAM,
                  DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 400, 30);
-    Draw_align_c("POCKET BROADCAST SYSTEM // 199X", 0, 111, 11.0f,
+    Draw_align_c("HANDHELD AIRWAVE RECEIVER // 199X", 0, 111, 11.0f,
                  UI_CYAN, DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 400, 18);
-    Draw_align_c("WARMING SIGNAL DECK...", 0, 163, 11.0f, UI_MINT,
+    Draw_align_c("WARMING RECEIVER...", 0, 163, 11.0f, UI_MINT,
                  DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 400, 18);
 
     Draw_screen_ready(DRAW_SCREEN_BOTTOM, UI_INK);
@@ -249,6 +262,197 @@ static int tune_should_cancel(void *unused) {
     cancel = app.exit_requested || app.cancel_to_deck || app.queued_tune;
     LightLock_Unlock(&app.lock);
     return cancel;
+}
+
+static int scan_should_cancel(void *unused) {
+    bool cancel;
+    (void)unused;
+    LightLock_Lock(&app.lock);
+    cancel = app.exit_requested || app.scan_stop_requested;
+    LightLock_Unlock(&app.lock);
+    return cancel;
+}
+
+static void scan_worker_main(void *unused) {
+    const NetworkRequestOptions scan_options = {4u, 6u};
+    (void)unused;
+
+    LightLock_Lock(&app.lock);
+    if (!app.network_ready && !app.exit_requested &&
+        !app.scan_stop_requested) {
+        LightLock_Unlock(&app.lock);
+        if (miniiptv_live_session_init() == 0) {
+            LightLock_Lock(&app.lock);
+            app.network_ready = true;
+            LightLock_Unlock(&app.lock);
+        } else {
+            LightLock_Lock(&app.lock);
+            app.scan_complete = true;
+            if (app.state == LIVE_APP_IDLE)
+                snprintf(app.status, sizeof(app.status),
+                         "RADIO OFFLINE // NETWORK COULD NOT START");
+            LightLock_Unlock(&app.lock);
+        }
+    } else {
+        LightLock_Unlock(&app.lock);
+    }
+
+    for (;;) {
+        MiniIptvChannel channel;
+        MiniIptvScanResult scan_result;
+        NetworkTextResponse root = {0};
+        NetworkTextResponse media = {0};
+        size_t source_index;
+        int fetch_result;
+        int needs_media = 0;
+
+        LightLock_Lock(&app.lock);
+        if (app.exit_requested || app.scan_stop_requested ||
+            !app.network_ready ||
+            app.scan_index >= app.source_playlist.count) {
+            if (app.scan_index >= app.source_playlist.count)
+                app.scan_complete = true;
+            LightLock_Unlock(&app.lock);
+            break;
+        }
+        source_index = app.scan_index;
+        app.scan_current_index = source_index;
+        channel = app.source_playlist.channels[source_index];
+        app.scan_results[source_index].status = MINIIPTV_SCAN_CHECKING;
+        if (app.state == LIVE_APP_IDLE)
+            snprintf(app.status, sizeof(app.status),
+                     "SCANNING CH %02lu/%02lu // %.56s",
+                     (unsigned long)(source_index + 1),
+                     (unsigned long)app.source_playlist.count,
+                     channel.name);
+        LightLock_Unlock(&app.lock);
+        Draw_set_refresh_needed(true);
+
+        memset(&scan_result, 0, sizeof(scan_result));
+        fetch_result = network_get_data_cancelable_with_options(
+            channel.url, channel.user_agent, channel.referrer,
+            MINIIPTV_MANIFEST_LIMIT, scan_should_cancel, NULL,
+            &scan_options, &root);
+        if (fetch_result == 0) {
+            const char *root_url = root.final_url[0]
+                ? root.final_url : channel.url;
+            needs_media = miniiptv_channel_scan_classify_root(
+                root.data, root_url, &scan_result);
+            if (needs_media) {
+                fetch_result = network_get_data_cancelable_with_options(
+                    scan_result.media_url, channel.user_agent,
+                    channel.referrer, MINIIPTV_MANIFEST_LIMIT,
+                    scan_should_cancel, NULL, &scan_options, &media);
+                if (fetch_result == 0) {
+                    const char *media_url = media.final_url[0]
+                        ? media.final_url : scan_result.media_url;
+                    miniiptv_channel_scan_classify_media(
+                        media.data, media_url, &scan_result);
+                }
+            }
+        }
+        if (fetch_result != 0) {
+            memset(&scan_result, 0, sizeof(scan_result));
+            scan_result.status = MINIIPTV_SCAN_OFFLINE;
+            scan_result.detail = fetch_result;
+        }
+        network_response_free(&media);
+        network_response_free(&root);
+
+        LightLock_Lock(&app.lock);
+        if (app.exit_requested || app.scan_stop_requested) {
+            LightLock_Unlock(&app.lock);
+            break;
+        }
+        app.scan_results[source_index] = scan_result;
+        if ((scan_result.status == MINIIPTV_SCAN_READY ||
+             scan_result.status == MINIIPTV_SCAN_UNKNOWN) &&
+            app.playlist.count < MINIIPTV_MAX_CHANNELS) {
+            size_t found_index = app.playlist.count++;
+            app.playlist.channels[found_index] = channel;
+            app.playlist_scan_status[found_index] = scan_result.status;
+        }
+        app.scan_index = source_index + 1;
+        if (app.scan_index >= app.source_playlist.count)
+            app.scan_complete = true;
+        if (app.state == LIVE_APP_IDLE) {
+            if (app.scan_complete)
+                snprintf(app.status, sizeof(app.status),
+                         "AIRWAVES READY // * VERIFIED // ? TUNE CHECK");
+            else
+                snprintf(app.status, sizeof(app.status),
+                         "%s // %lu FOUND // SCANNING %02lu/%02lu",
+                         miniiptv_channel_scan_status_label(
+                             scan_result.status),
+                         (unsigned long)app.playlist.count,
+                         (unsigned long)app.scan_index,
+                         (unsigned long)app.source_playlist.count);
+        }
+        LightLock_Unlock(&app.lock);
+        Draw_set_refresh_needed(true);
+    }
+
+    LightLock_Lock(&app.lock);
+    app.scan_worker_running = false;
+    app.scan_worker_finished = true;
+    LightLock_Unlock(&app.lock);
+    Draw_set_refresh_needed(true);
+    threadExit(0);
+}
+
+static void stop_scan_worker(void) {
+    Thread worker;
+    LightLock_Lock(&app.lock);
+    app.scan_stop_requested = true;
+    worker = app.scan_worker;
+    app.scan_worker = NULL;
+    LightLock_Unlock(&app.lock);
+    if (worker) {
+        threadJoin(worker, UINT64_MAX);
+        threadFree(worker);
+    }
+    LightLock_Lock(&app.lock);
+    app.scan_worker_running = false;
+    app.scan_worker_finished = false;
+    LightLock_Unlock(&app.lock);
+}
+
+static void reap_scan_worker_if_finished(void) {
+    Thread worker = NULL;
+    LightLock_Lock(&app.lock);
+    if (app.scan_worker && app.scan_worker_finished) {
+        worker = app.scan_worker;
+        app.scan_worker = NULL;
+        app.scan_worker_finished = false;
+    }
+    LightLock_Unlock(&app.lock);
+    if (worker) {
+        threadJoin(worker, UINT64_MAX);
+        threadFree(worker);
+    }
+}
+
+static void launch_scan_worker(void) {
+    Thread worker;
+    LightLock_Lock(&app.lock);
+    if (app.exit_requested || app.scan_complete || app.scan_worker ||
+        app.worker || app.worker_reaping || app.stream_cleanup_pending ||
+        app.awaiting_player_return || app.state != LIVE_APP_IDLE ||
+        app.scan_index >= app.source_playlist.count) {
+        LightLock_Unlock(&app.lock);
+        return;
+    }
+    app.scan_stop_requested = false;
+    app.scan_worker_finished = false;
+    worker = threadCreate(scan_worker_main, NULL, 64 * 1024,
+                          DEF_THREAD_PRIORITY_NORMAL, 1, false);
+    app.scan_worker = worker;
+    app.scan_worker_running = worker != NULL;
+    if (!worker)
+        snprintf(app.status, sizeof(app.status),
+                 "SCANNER COULD NOT START // PRESS A TO USE FOUND STATIONS");
+    LightLock_Unlock(&app.lock);
+    Draw_set_refresh_needed(true);
 }
 
 static bool recoverable_stream_boundary_error(int result) {
@@ -518,6 +722,10 @@ static bool prepare_selected_tune_locked(void) {
 
 static void launch_tune_worker(void) {
     Thread worker;
+
+    /* The scanner and player deliberately share one curl handle and one small
+     * Wi-Fi pipe. Fully stop manifest discovery before staging video. */
+    stop_scan_worker();
 
     LightLock_Lock(&app.lock);
     if (app.exit_requested) {
@@ -962,6 +1170,7 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
     Draw_image_data pixel = Draw_get_empty_image();
     MiniIptvTuneTelemetry tune = {0};
     char channel_names[MINIIPTV_MAX_CHANNELS][MINIIPTV_NAME_MAX];
+    MiniIptvScanStatus channel_scan_status[MINIIPTV_MAX_CHANNELS];
     LiveAppState state;
     size_t count;
     size_t selected;
@@ -978,24 +1187,35 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
     size_t page_start;
     size_t page_end;
     PlayerReturnAction return_action;
+    bool scan_running;
+    bool scan_complete;
+    size_t scan_index;
+    size_t scan_current_index;
+    size_t source_count;
+    char scan_channel_name[MINIIPTV_NAME_MAX];
+    MiniIptvScanStatus current_scan_status;
 
     (void)color;
     (void)back_color;
 
     reap_worker_if_finished();
+    reap_scan_worker_if_finished();
     LightLock_Lock(&app.lock);
     return_action = update_player_return_locked();
     LightLock_Unlock(&app.lock);
     process_player_return_action(return_action);
+    launch_scan_worker();
 
     /* Snapshot after processing a playback return. Otherwise one stale deck
      * or error frame is drawn between the player and the relocking animation,
      * making a controlled decoder rebuild look like a failed channel. */
     LightLock_Lock(&app.lock);
     count = app.playlist.count;
-    for (i = 0; i < count; i++)
+    for (i = 0; i < count; i++) {
         snprintf(channel_names[i], sizeof(channel_names[i]), "%s",
                  app.playlist.channels[i].name);
+        channel_scan_status[i] = app.playlist_scan_status[i];
+    }
     state = app.state;
     selected = app.selected;
     tuning_started_ms = app.tuning_started_ms;
@@ -1006,20 +1226,34 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
     player_error_diagnostics = app.player_error_diagnostics;
     has_player_error_diagnostics = app.has_player_error_diagnostics;
     snprintf(status, sizeof(status), "%s", app.status);
+    scan_running = app.scan_worker_running;
+    scan_complete = app.scan_complete;
+    scan_index = app.scan_index;
+    scan_current_index = app.scan_current_index;
+    source_count = app.source_playlist.count;
+    current_scan_status = source_count
+        ? app.scan_results[scan_current_index].status
+        : MINIIPTV_SCAN_UNCHECKED;
+    snprintf(scan_channel_name, sizeof(scan_channel_name), "%s",
+             source_count
+                 ? app.source_playlist.channels[scan_current_index].name : "");
     LightLock_Unlock(&app.lock);
     miniiptv_live_tune_get_telemetry(&tune);
     if (top_screen) {
         MiniIptvTelemetrySample log_sample = {0};
-        log_sample.channel_name = count ? channel_names[selected] : "";
-        log_sample.app_state = live_app_state_label(state);
-        log_sample.tune_phase =
-            miniiptv_live_tune_phase_label(tune.phase);
+        log_sample.channel_name = scan_running ? scan_channel_name
+            : (count ? channel_names[selected] : "");
+        log_sample.app_state = scan_running && state == LIVE_APP_IDLE
+            ? "SCANNING" : live_app_state_label(state);
+        log_sample.tune_phase = scan_running
+            ? miniiptv_channel_scan_status_label(current_scan_status)
+            : miniiptv_live_tune_phase_label(tune.phase);
         log_sample.shadow_state = "";
         log_sample.producer_state = "";
-        log_sample.last_error = player_error_code
-            ? (int64_t)(int32_t)player_error_code
-            : (int64_t)tune.result;
-        log_sample.periodic = state == LIVE_APP_LOADING;
+        log_sample.last_error = scan_running ? 0
+            : (player_error_code ? (int64_t)(int32_t)player_error_code
+                                 : (int64_t)tune.result);
+        log_sample.periodic = state == LIVE_APP_LOADING || scan_running;
         miniiptv_telemetry_log_record(osGetTime(), &log_sample);
     }
 
@@ -1028,7 +1262,8 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
     if (page_end > count) page_end = count;
 
     if (top_screen) {
-        if (state == LIVE_APP_LOADING)
+        if (state == LIVE_APP_LOADING ||
+            (state == LIVE_APP_IDLE && scan_running))
             draw_tuning_static(&pixel, osGetTime());
         else {
             Draw_texture(&pixel, UI_INK, 0, 15, 400, 225);
@@ -1039,23 +1274,48 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
         Draw_texture(&pixel, UI_ORANGE, 12, 25, 376, 3);
         Draw_texture(&pixel, UI_CYAN, 24, 43, 82, 2);
         Draw_texture(&pixel, UI_PINK, 294, 43, 82, 2);
-		Draw_align_c("RETRO TUNER 3DS", 0, 31, 18.0f, UI_CREAM,
+		Draw_align_c("RETRO TUNER", 0, 31, 18.0f, UI_CREAM,
                      DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 400, 24);
-		Draw_align_c("POCKET BROADCAST SYSTEM // 199X", 0, 61, 11.0f,
+		Draw_align_c("HANDHELD AIRWAVE RECEIVER // 199X", 0, 61, 11.0f,
                      UI_CYAN, DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER,
                      400, 18);
 
         Draw_texture(&pixel, UI_PANEL, 24, 88, 352, 70);
-        Draw_c(switching_from_player ? "LIVE CHANNEL HANDOFF" : "NOW SELECTING",
+        Draw_c(scan_running && state == LIVE_APP_IDLE
+                   ? "SCANNING AIRWAVES"
+                   : (switching_from_player ? "LIVE CHANNEL HANDOFF"
+                                            : "NOW SELECTING"),
                38, 98, 10.0f, UI_MINT);
-        if (count) {
+        if (scan_running && state == LIVE_APP_IDLE) {
+            snprintf(line, sizeof(line), "CH %02lu/%02lu  %.30s",
+                     (unsigned long)(scan_current_index + 1),
+                     (unsigned long)source_count, scan_channel_name);
+            Draw_align_c(line, 34, 117, 14.0f, UI_CREAM,
+                         DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 332, 28);
+        } else if (count) {
             snprintf(line, sizeof(line), "CH %02lu  %.38s",
                      (unsigned long)(selected + 1), channel_names[selected]);
             Draw_align_c(line, 34, 117, 16.0f, UI_CREAM,
                          DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 332, 28);
         }
 
-        if (state == LIVE_APP_LOADING) {
+        if (scan_running && state == LIVE_APP_IDLE) {
+            unsigned int phase = (unsigned int)((osGetTime() / 160u) % 12u);
+            snprintf(line, sizeof(line), "%lu FOUND // CHECK %02lu OF %02lu",
+                     (unsigned long)count, (unsigned long)scan_index,
+                     (unsigned long)source_count);
+            Draw_align_c(line, 0, 169, 11.0f, UI_ORANGE,
+                         DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 400, 16);
+            Draw_texture(&pixel, UI_SHADOW, 74, 190, 252, 10);
+            for (i = 0; i < 12; i++)
+                Draw_texture(&pixel, i == phase ? UI_CREAM : UI_CYAN,
+                             78 + (float)i * 20, 192, 14, 6);
+            Draw_align_c(count ? "A TUNE FOUND SIGNAL // SCAN PAUSES"
+                               : "FOUND STATIONS APPEAR AS THEY ARRIVE",
+                         0, 201, 9.0f, UI_MINT, DRAW_X_ALIGN_CENTER,
+                         DRAW_Y_ALIGN_CENTER, 400, 10);
+            Draw_set_refresh_needed(true);
+        } else if (state == LIVE_APP_LOADING) {
             uint64_t elapsed = osGetTime() - tuning_started_ms;
             unsigned int phase = (unsigned int)((elapsed / 180u) % 12u);
             format_tune_status(line, sizeof(line), &tune);
@@ -1094,12 +1354,16 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
             Draw_align_c("NO PLAYLIST // ADD CHANNELS.M3U", 0, 174, 12.0f,
                          DEF_DRAW_RED, DRAW_X_ALIGN_CENTER,
                          DRAW_Y_ALIGN_CENTER, 400, 20);
-        } else {
+        } else if (count) {
             draw_key_hint(&pixel, "A", "TUNE", 22, 181, 18, UI_PINK);
             draw_key_hint(&pixel, "D-PAD", "CHANNEL", 113, 181, 46,
                           UI_CYAN);
             draw_key_hint(&pixel, "START", "EXIT", 280, 181, 47,
                           UI_ORANGE);
+        } else {
+            Draw_align_c("NO COMPATIBLE SIGNALS FOUND", 0, 178, 11.0f,
+                         UI_ORANGE, DRAW_X_ALIGN_CENTER,
+                         DRAW_Y_ALIGN_CENTER, 400, 18);
         }
 		Draw_align_c("PIXEL DECK " RETROTUNER_VERSION " // H264", 0, 211, 9.5f,
                      UI_CREAM, DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER,
@@ -1147,18 +1411,26 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
         return;
     }
 
-    snprintf(line, sizeof(line), "CHANNEL DECK // %lu STATIONS // P%lu/%lu",
+    snprintf(line, sizeof(line), "%s // %lu FOUND // P%lu/%lu",
+             scan_running ? "SCANNING" :
+                 (scan_complete ? "AIRWAVES READY" : "CHANNEL DECK"),
              (unsigned long)count,
              (unsigned long)(count ? page_start / CHANNELS_PER_PAGE + 1 : 0),
              (unsigned long)(count ? (count + CHANNELS_PER_PAGE - 1) /
                                       CHANNELS_PER_PAGE : 0));
     Draw_c(line, 14, 16, 13.0f, UI_CREAM);
 
+    if (count == 0 && scan_running)
+        Draw_align_c("SEARCHING... CHANNELS APPEAR HERE", 10, 91, 11.0f,
+                     UI_MINT, DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER,
+                     300, 30);
+
     for (i = page_start; i < page_end; i++) {
         float y = 39 + (float)(i - page_start) * 14;
         Draw_texture(&pixel, i == selected ? UI_ORANGE : UI_PANEL,
                      10, y, 300, 12);
-        snprintf(line, sizeof(line), "%02lu  %.39s",
+        snprintf(line, sizeof(line), "%c %02lu  %.35s",
+                 channel_scan_status[i] == MINIIPTV_SCAN_READY ? '*' : '?',
                  (unsigned long)(i + 1), channel_names[i]);
         Draw_c(line, 17, y + 1, 10.5f,
                i == selected ? UI_INK : UI_CREAM);
@@ -1199,7 +1471,7 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
         draw_key_hint(&pixel, "A", "RETRY", 9, 211, 17, UI_PINK);
         draw_key_hint(&pixel, "B", "DECK", 75, 211, 17, UI_MINT);
         draw_key_hint(&pixel, "L/R", "CHANGE", 133, 211, 29, UI_CYAN);
-    } else {
+    } else if (count) {
         draw_key_hint(&pixel, "A", "TUNE", 9, 211, 17, UI_PINK);
         draw_key_hint(&pixel, "UP/DN", "PICK", 77, 211, 42, UI_CYAN);
     }
@@ -1216,37 +1488,47 @@ void MiniIptv_live_app_init(void) {
     telemetry_result = miniiptv_telemetry_log_open(
         TELEMETRY_LOG, RETROTUNER_VERSION, osGetTime());
 
-	if (playlist_load_file(USER_PLAYLIST, &app.playlist) != 0) {
+	if (playlist_load_file(USER_PLAYLIST, &app.source_playlist) != 0 ||
+        app.source_playlist.count == 0) {
 		set_status_locked(LIVE_APP_NO_PLAYLIST,
 						  "ADD /3ds/retrotuner3ds/channels.m3u");
     } else {
         set_status_locked(LIVE_APP_IDLE,
             telemetry_result == 0
-                ? "READY // TELEMETRY LOG ON // press A to tune"
-                : "READY // LOG OFF (SD WRITE FAILED) // press A to tune");
+                ? "SCANNING AIRWAVES // TELEMETRY LOG ON"
+                : "SCANNING AIRWAVES // LOG OFF (SD WRITE FAILED)");
     }
 
     Vid_set_idle_hooks(live_hid, live_draw);
     Vid_set_live_error_hook(player_error);
     Vid_set_live_channel_hook(player_channel_request);
+    launch_scan_worker();
 }
 
 void MiniIptv_live_app_exit(void) {
     Thread worker = NULL;
+    Thread scan_worker = NULL;
     bool network_ready;
 
     LightLock_Lock(&app.lock);
     app.exit_requested = true;
+    app.scan_stop_requested = true;
     app.pending_channel_step = 0;
     app.switching_from_player = false;
     worker = app.worker;
     app.worker = NULL;
+    scan_worker = app.scan_worker;
+    app.scan_worker = NULL;
     LightLock_Unlock(&app.lock);
 
     Vid_set_live_error_hook(NULL);
     Vid_set_live_channel_hook(NULL);
     Vid_set_idle_hooks(NULL, NULL);
     miniiptv_live_stream_request_stop();
+    if (scan_worker) {
+        threadJoin(scan_worker, UINT64_MAX);
+        threadFree(scan_worker);
+    }
     if (worker) {
         threadJoin(worker, UINT64_MAX);
         threadFree(worker);

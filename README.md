@@ -13,7 +13,8 @@ It has only been tested on that model; other 3DS-family systems are unverified.
 - Live, continuous HLS playback—segments are streamed into a bounded memory
   ring rather than downloading an entire program first.
 - Hardware-accelerated H.264 decoding on the tested New Nintendo 3DS.
-- Up to 64 channels from a user-provided `channels.m3u` file, shown in pages.
+- An incremental "airwave" scan of up to 64 user-provided channels. Stations
+  appear as their small HLS manifests pass compatibility checks.
 - Automatic selection of the lowest advertised HLS rendition.
 - Retro dual-screen channel deck, buffering state, and stream diagnostics.
 - A bounded diagnostics log for hardware buffer testing.
@@ -48,6 +49,14 @@ playlist and are responsible for having permission to access its streams.
 After a no-signal or player error, use `A` to retry, `B` to return to the
 channel deck, or `L`/`R` to try the adjacent signal.
 
+At launch, RetroTuner3DS starts with an empty deck and checks channels in M3U
+order. `*` means the master playlist explicitly advertises a supported size
+and frame rate; `?` means the HLS layout passed but the server did not publish
+enough metadata to know until tuning. You may tune any discovered station
+without waiting for the scan to finish. Discovery pauses completely during
+playback and resumes after returning to the deck, so it cannot compete with
+the live stream for the New 3DS Wi-Fi connection.
+
 ## Hardware telemetry
 
 Each app launch writes:
@@ -57,7 +66,7 @@ Each app launch writes:
 The prior launch is retained as `telemetry-prev.csv`, so an accidental relaunch
 does not immediately erase the hardware run we need to inspect.
 
-During tuning and playback, the file records monotonic elapsed time, channel
+During scanning, tuning, and playback, the file records monotonic elapsed time, channel
 name, pipeline state, compressed-ring depth, segment delivery timing, shadow
 buffer recommendations, applied startup lag, warm/cold profile state,
 live-window sequence resynchronizations, underruns, and errors. Normal
@@ -119,6 +128,14 @@ total deadline and remains cancelable, so a stalled URL cannot trap the channel
 deck. This compatibility filtering does not guarantee that every URL in a
 playlist will play.
 
+The launch scan is deliberately cheaper than a full tune. It fetches only the
+root playlist and, when needed, its selected media playlist with a short
+timeout. It never downloads a video segment or initializes FFmpeg/MVD. Known
+sources above 640x480 or 30.5 fps, encrypted HLS, byte-range/fMP4 layouts, VOD
+playlists, malformed manifests, and offline URLs are left out of the deck.
+Direct media playlists often omit resolution metadata, so `?` stations still
+receive the authoritative codec/resolution and segment-size checks when tuned.
+
 It does **not** transcode video. The 3DS can scale a decoded frame for its
 screen, but scaling does not reduce the work required to decode a 720p or
 1080p source. A channel must already publish a rendition the console can keep
@@ -127,7 +144,7 @@ up with.
 ## How it works
 
 ```text
-M3U channel list
+M3U source list → manifest-only airwave scan → discovered station deck
       ↓
 HLS master/media playlist → lowest compatible rendition
       ↓

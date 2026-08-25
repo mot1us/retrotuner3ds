@@ -21,8 +21,22 @@ static void test_peak_bandwidth_is_not_average_bandwidth(void) {
     assert(selection.bandwidth == 500000);
     assert(selection.width == 480);
     assert(selection.height == 270);
+    assert(selection.frame_rate_millihz == 0);
     assert(strcmp(selection.url,
                   "https://example.test/live/actually-low.m3u8") == 0);
+}
+
+static void test_frame_rate_is_parsed(void) {
+    static const char manifest[] =
+        "#EXTM3U\n"
+        "#EXT-X-STREAM-INF:BANDWIDTH=500000,RESOLUTION=480x270,"
+        "FRAME-RATE=29.970,CODECS=\"avc1.42c01e,mp4a.40.2\"\n"
+        "live.m3u8\n";
+    HlsSelection selection;
+
+    assert(hls_select_stream(manifest, "https://example.test/master.m3u8",
+                             &selection) == 0);
+    assert(selection.frame_rate_millihz == 29970u);
 }
 
 static void test_incompatible_low_variant_is_skipped(void) {
@@ -179,6 +193,7 @@ static void test_url_resolution(void) {
 int main(void) {
     test_peak_bandwidth_is_not_average_bandwidth();
     test_incompatible_low_variant_is_skipped();
+    test_frame_rate_is_parsed();
     test_separate_audio_rendition_is_resolved();
     test_media_playlist_flags_and_window();
     test_program_date_time_is_attached_to_next_segment();

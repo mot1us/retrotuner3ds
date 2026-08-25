@@ -5,16 +5,23 @@ renderer from Video player for 3DS.
 
 ## Control path
 
-`live_app.c` owns the channel deck, reads the user's M3U file, starts a network
-worker, and hands a ready stream to the player. It also detects the player's
-return and tears down the live session before another channel is selected.
+`live_app.c` owns separate source and discovered channel decks. A sequential
+scanner reads only HLS manifests, adds compatible or metadata-unknown live
+stations to the discovered deck, and hands a selected station to the tuning
+worker. The scanner is canceled and joined before tuning; it resumes only
+after playback has fully returned to the deck. This preserves a single owner
+for the persistent curl handle and avoids competing for the New 3DS Wi-Fi
+connection. The app also detects the player's return and tears down the live
+session before another channel is selected.
 
 ## HLS path
 
-1. `playlist.c` parses at most 32 M3U entries with bounded names and URLs.
+1. `playlist.c` parses at most 64 M3U entries with bounded names and URLs.
 2. `network.c` performs bounded HTTP(S) requests with TLS verification,
    redirects, timeouts, and response-size caps.
-3. `hls.c` parses master and media playlists and resolves relative URLs.
+3. `hls.c` parses master and media playlists, including advertised resolution
+   and frame rate, and resolves relative URLs. `channel_scan.c` classifies
+   these manifests without downloading media segments.
 4. `live_stream.c` selects the lowest advertised rendition and downloads live
    MPEG-TS segments on a producer thread. Initial tuning passes its already
    parsed media playlist to that producer, avoiding an immediate duplicate
