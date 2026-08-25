@@ -52,6 +52,8 @@ typedef struct {
 	uint32_t audio_frames;
 	uint32_t audio_buffers;
 	uint32_t audio_last_error;
+	uint16_t audio_peak_left;
+	uint16_t audio_peak_right;
 	uint8_t audio_tracks;
 	Vid_live_audio_state audio_state;
 	bool presented;

@@ -599,6 +599,9 @@ typedef struct
 	volatile uint32_t live_audio_frames;			//Live audio frames decoded successfully.
 	volatile uint32_t live_audio_buffers;			//Live audio buffers queued to DSP.
 	volatile uint32_t live_audio_last_error;		//Last live audio pipeline error.
+	volatile uint32_t live_audio_level_updated_ms;	//Timestamp of the latest PCM peak sample.
+	volatile uint16_t live_audio_peak_left;			//Latest left/mono PCM peak.
+	volatile uint16_t live_audio_peak_right;			//Latest right PCM peak.
 	volatile uint8_t live_audio_tracks;				//Audio tracks reported by FFmpeg demux.
 	volatile Vid_live_audio_state live_audio_state;	//Live audio initialization state.
 	uint64_t previous_ts;							//Time stamp for last every-100ms-graph update.
@@ -845,6 +848,66 @@ static const char* Vid_live_audio_state_label(Vid_live_audio_state state)
 	}
 }
 
+static unsigned int Vid_live_tune_progress_step(
+	const MiniIptvTuneTelemetry* tune)
+{
+	MiniIptvTunePhase phase;
+
+	if(!tune)
+		return 0;
+	phase = tune->phase == MINIIPTV_TUNE_PHASE_FAILED
+		? tune->failure_phase : tune->phase;
+	if(phase <= MINIIPTV_TUNE_PHASE_IDLE)
+		return 0;
+	if(phase >= MINIIPTV_TUNE_PHASE_READY)
+		return 8;
+	return (unsigned int)phase;
+}
+
+/* Sample one out of every eight already-converted PCM frames. This is a
+ * display-only peak meter: no allocation, FFT, extra decode pass, or DSP read
+ * is involved. The latest block replaces the prior reading so silence and
+ * stopped audio do not masquerade as activity. */
+static void Vid_update_live_audio_peak(const uint8_t* pcm,
+	uint32_t frames, uint8_t channels)
+{
+	const int16_t* samples = (const int16_t*)pcm;
+	uint32_t left_peak = 0;
+	uint32_t right_peak = 0;
+
+	if(!pcm || frames == 0 || channels == 0)
+		return;
+	if(channels > 2)
+		channels = 2;
+	for(uint32_t frame = 0; frame < frames; frame += 8)
+	{
+		int32_t left = samples[frame * channels];
+		uint32_t left_abs = left < 0 ? (uint32_t)(-left) : (uint32_t)left;
+		if(left_abs > left_peak)
+			left_peak = left_abs;
+		if(channels > 1)
+		{
+			int32_t right = samples[frame * channels + 1];
+			uint32_t right_abs = right < 0
+				? (uint32_t)(-right) : (uint32_t)right;
+			if(right_abs > right_peak)
+				right_peak = right_abs;
+		}
+	}
+	if(channels == 1)
+		right_peak = left_peak;
+	if(left_peak > UINT16_MAX)
+		left_peak = UINT16_MAX;
+	if(right_peak > UINT16_MAX)
+		right_peak = UINT16_MAX;
+	__atomic_store_n(&vid_player.live_audio_peak_left,
+		(uint16_t)left_peak, __ATOMIC_RELEASE);
+	__atomic_store_n(&vid_player.live_audio_peak_right,
+		(uint16_t)right_peak, __ATOMIC_RELEASE);
+	__atomic_store_n(&vid_player.live_audio_level_updated_ms,
+		(uint32_t)osGetTime(), __ATOMIC_RELEASE);
+}
+
 static void Vid_draw_miniiptv_live_overlay(void)
 {
 	Draw_image_data pixel = Draw_get_empty_image();
@@ -860,6 +923,8 @@ static void Vid_draw_miniiptv_live_overlay(void)
 	unsigned long underruns = 0;
 	int live_error = 0;
 	uint32_t bar_width = 0;
+	uint32_t audio_left_width = 0;
+	uint32_t audio_right_width = 0;
 	uint32_t buffer_color = MINIIPTV_COLOR_MINT;
 	unsigned long effective_bandwidth = 0;
 	const char* state_text = "TUNING";
@@ -882,6 +947,16 @@ static void Vid_draw_miniiptv_live_overlay(void)
 		&underruns, &live_error);
 	miniiptv_live_tune_get_telemetry(&tune);
 	Vid_query_live_diagnostics(&diagnostics);
+	{
+		uint32_t level_updated_ms = __atomic_load_n(
+			&vid_player.live_audio_level_updated_ms, __ATOMIC_ACQUIRE);
+		if(level_updated_ms == 0 ||
+			(uint32_t)now_ms - level_updated_ms > 250u)
+		{
+			diagnostics.audio_peak_left = 0;
+			diagnostics.audio_peak_right = 0;
+		}
+	}
 	(void)read_kib;
 	log_sample.channel_name = live_info.channel_name;
 	log_sample.app_state = "PLAYBACK";
@@ -1009,6 +1084,14 @@ static void Vid_draw_miniiptv_live_overlay(void)
 		/ MINIIPTV_BUFFER_METER_MS);
 	if(bar_width > 276u)
 		bar_width = 276u;
+	audio_left_width = (uint32_t)(((uint64_t)diagnostics.audio_peak_left *
+		262u) / 24576u);
+	audio_right_width = (uint32_t)(((uint64_t)diagnostics.audio_peak_right *
+		262u) / 24576u);
+	if(audio_left_width > 262u)
+		audio_left_width = 262u;
+	if(audio_right_width > 262u)
+		audio_right_width = 262u;
 	/* This is only the compressed network ring. FFmpeg packets, decoded MVD
 	 * frames, and speaker buffers are downstream and intentionally excluded.
 	 * Color it against the real refill target instead of arbitrary seconds. */
@@ -1049,6 +1132,15 @@ static void Vid_draw_miniiptv_live_overlay(void)
 		(live_info.buffered_milliseconds % 1000u) / 100u);
 	Draw_align_c(line, 14, 140, 8.5f, MINIIPTV_COLOR_CREAM,
 		DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 280, 14);
+	Draw_c("AUDIO LEVEL", 14, 155, 8.0f, MINIIPTV_COLOR_CREAM);
+	Draw_c("L", 14, 168, 8.0f, MINIIPTV_COLOR_MINT);
+	Draw_texture(&pixel, MINIIPTV_COLOR_SHADOW, 28, 168, 266, 5);
+	Draw_texture(&pixel, MINIIPTV_COLOR_MINT, 30, 170,
+		audio_left_width, 1);
+	Draw_c("R", 14, 178, 8.0f, MINIIPTV_COLOR_MINT);
+	Draw_texture(&pixel, MINIIPTV_COLOR_SHADOW, 28, 178, 266, 5);
+	Draw_texture(&pixel, MINIIPTV_COLOR_MINT, 30, 180,
+		audio_right_width, 1);
 
 	if(vid_miniptv_detail_page != MINIIPTV_DETAILS_HIDDEN)
 	{
@@ -2331,6 +2423,10 @@ static void Vid_reset_live_diagnostics(void)
 	__atomic_store_n(&vid_player.live_audio_frames, 0, __ATOMIC_RELEASE);
 	__atomic_store_n(&vid_player.live_audio_buffers, 0, __ATOMIC_RELEASE);
 	__atomic_store_n(&vid_player.live_audio_last_error, 0, __ATOMIC_RELEASE);
+	__atomic_store_n(&vid_player.live_audio_level_updated_ms, 0,
+		__ATOMIC_RELEASE);
+	__atomic_store_n(&vid_player.live_audio_peak_left, 0, __ATOMIC_RELEASE);
+	__atomic_store_n(&vid_player.live_audio_peak_right, 0, __ATOMIC_RELEASE);
 	__atomic_store_n(&vid_player.live_audio_tracks, 0, __ATOMIC_RELEASE);
 	__atomic_store_n(&vid_player.live_audio_state, VID_LIVE_AUDIO_SCANNING,
 		__ATOMIC_RELEASE);
@@ -2360,6 +2456,10 @@ void Vid_query_live_diagnostics(Vid_live_diagnostics* diagnostics)
 		&vid_player.live_audio_buffers, __ATOMIC_ACQUIRE);
 	diagnostics->audio_last_error = __atomic_load_n(
 		&vid_player.live_audio_last_error, __ATOMIC_ACQUIRE);
+	diagnostics->audio_peak_left = __atomic_load_n(
+		&vid_player.live_audio_peak_left, __ATOMIC_ACQUIRE);
+	diagnostics->audio_peak_right = __atomic_load_n(
+		&vid_player.live_audio_peak_right, __ATOMIC_ACQUIRE);
 	diagnostics->audio_tracks = __atomic_load_n(
 		&vid_player.live_audio_tracks, __ATOMIC_ACQUIRE);
 	diagnostics->audio_state = __atomic_load_n(
@@ -2902,20 +3002,48 @@ void Vid_main(void)
 					image_width[eye], image_height[eye], image_crop_x_start[eye_crop], image_crop_x_end[eye_crop], image_crop_y_start[eye_crop], image_crop_y_end[eye_crop]);
 					Util_sync_unlock(&vid_player.texture_init_free_lock);
 				}
-				else if(vid_embedded_test_mode && !__atomic_load_n(
-					&vid_player.has_presented_frame, __ATOMIC_ACQUIRE))
-				{
-					Draw_image_data pixel = Draw_get_empty_image();
-					Draw_texture(&pixel, MINIIPTV_COLOR_INK, 0,
-						vid_player.is_full_screen ? 0 : 15, 400,
-						vid_player.is_full_screen ? 240 : 225);
-					Draw_align_c("TUNING", 0, 96, 15.0f,
-						MINIIPTV_COLOR_MINT, DRAW_X_ALIGN_CENTER,
-						DRAW_Y_ALIGN_CENTER, TOP_SCREEN_WIDTH, 24);
-					Draw_align_c("PREPARING VIDEO", 0, 126,
-						9.0f, MINIIPTV_COLOR_CREAM, DRAW_X_ALIGN_CENTER,
-						DRAW_Y_ALIGN_CENTER, TOP_SCREEN_WIDTH, 18);
-				}
+					else if(vid_embedded_test_mode && !__atomic_load_n(
+						&vid_player.has_presented_frame, __ATOMIC_ACQUIRE))
+					{
+						Draw_image_data pixel = Draw_get_empty_image();
+						MiniIptvTuneTelemetry startup_tune = { 0, };
+						MiniIptvLiveInfo startup_info = { 0, };
+						char startup_line[128] = { 0, };
+						unsigned int progress_step;
+						float progress_width;
+
+						miniiptv_live_tune_get_telemetry(&startup_tune);
+						miniiptv_live_stream_get_info(&startup_info);
+						progress_step = Vid_live_tune_progress_step(&startup_tune);
+						progress_width = (float)progress_step * 36.0f;
+						Draw_texture(&pixel, MINIIPTV_COLOR_INK, 0,
+							vid_player.is_full_screen ? 0 : 15, 400,
+							vid_player.is_full_screen ? 240 : 225);
+						Draw_align_c("TUNING", 0, 66, 15.0f,
+							MINIIPTV_COLOR_MINT, DRAW_X_ALIGN_CENTER,
+							DRAW_Y_ALIGN_CENTER, TOP_SCREEN_WIDTH, 24);
+						Draw_align_c(startup_info.channel_name, 34, 94,
+							12.0f, MINIIPTV_COLOR_CREAM, DRAW_X_ALIGN_CENTER,
+							DRAW_Y_ALIGN_CENTER, 332, 24);
+						snprintf(startup_line, sizeof(startup_line), "%s",
+							miniiptv_live_tune_phase_label(startup_tune.phase));
+						Draw_align_c(startup_line, 0, 128, 9.5f,
+							MINIIPTV_COLOR_MINT, DRAW_X_ALIGN_CENTER,
+							DRAW_Y_ALIGN_CENTER, TOP_SCREEN_WIDTH, 16);
+						Draw_texture(&pixel, MINIIPTV_COLOR_SHADOW,
+							54, 154, 292, 10);
+						Draw_texture(&pixel, MINIIPTV_COLOR_ORANGE,
+							56, 156, progress_width, 6);
+						for(unsigned int progress_mark = 1;
+							progress_mark < 8; progress_mark++)
+							Draw_texture(&pixel, MINIIPTV_COLOR_INK,
+								55 + (float)progress_mark * 36, 155, 1, 8);
+						snprintf(startup_line, sizeof(startup_line),
+							"STEP %u OF 8", progress_step);
+						Draw_align_c(startup_line, 0, 174, 8.5f,
+							MINIIPTV_COLOR_CREAM, DRAW_X_ALIGN_CENTER,
+							DRAW_Y_ALIGN_CENTER, TOP_SCREEN_WIDTH, 12);
+					}
 
 				//Draw subtitles.
 				if(subtitle_index < SUBTITLE_BUFFERS)
@@ -6890,6 +7018,9 @@ void Vid_decode_thread(void* arg)
 										else
 											vid_player.sub_state = (Vid_player_sub_state)(vid_player.sub_state & ~PLAYER_SUB_STATE_TOO_BIG);
 									}
+									if(miniiptv_live_stream_is_active())
+										Vid_update_live_audio_peak(parameters.converted,
+											parameters.out_samples, parameters.out_ch);
 
 									//Add audio to speaker buffer, wait up to 250ms.
 									for(uint8_t i = 0; i < 125; i++)

@@ -61,6 +61,12 @@ screen cursor. The in-progress tune is left alone until `A` explicitly confirms
 a different station. RetroTuner also keeps idle sleep disabled while running
 and restores the console's prior sleep permission when it exits.
 
+The top tune meter follows eight actual pipeline stages through manifest and
+segment acquisition, FFmpeg open, MVD initialization, and first-frame output.
+During playback, the lower screen includes a lightweight stereo peak meter
+sampled from PCM already being sent to the 3DS DSP; it does not perform an FFT
+or an additional audio decode pass.
+
 At launch, RetroTuner3DS starts with an empty deck and checks channels in M3U
 order. `*` means the master playlist explicitly advertises a supported size
 and frame rate; `?` means the HLS layout passed but the server did not publish

@@ -5,6 +5,10 @@ versioning while the player remains experimental.
 
 ## [Unreleased]
 
+- Carry the eight-stage tune meter through FFmpeg open, MVD initialization,
+  and first-frame presentation instead of leaving the deck frozen at stage 4.
+- Add an allocation-free stereo PCM peak meter to the live lower screen. It
+  samples audio already converted for DSP output and expires stale readings.
 - Separate the lower-screen loading cursor from the active tune. Browsing no
   longer cancels network/decoder setup; only `A` commits a different station.
 - Replace the arbitrary loading sweep with truthful eight-stage tune progress,
