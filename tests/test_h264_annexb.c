@@ -263,9 +263,16 @@ static void test_parameter_guard(void) {
     assert(miniiptv_h264_parameter_guard_check(
                &guard, changed_sps, sizeof(changed_sps)) ==
            MINIIPTV_H264_PARAMETER_CHANGED);
+    /* A rejected transition must not replace the established safe baseline. */
+    assert(guard.sps_count == 1 && guard.pps_count == 1);
+    assert(miniiptv_h264_parameter_guard_check(
+               &guard, repeated, sizeof(repeated)) == MINIIPTV_H264_OK);
     assert(miniiptv_h264_parameter_guard_check(
                &guard, changed_pps, sizeof(changed_pps)) ==
            MINIIPTV_H264_PARAMETER_CHANGED);
+    assert(guard.sps_count == 1 && guard.pps_count == 1);
+    assert(miniiptv_h264_parameter_guard_check(
+               &guard, repeated, sizeof(repeated)) == MINIIPTV_H264_OK);
 
     miniiptv_h264_parameter_guard_reset(&guard);
     assert(miniiptv_h264_parameter_guard_check(

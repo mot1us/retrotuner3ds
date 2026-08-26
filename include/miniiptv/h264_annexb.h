@@ -71,10 +71,9 @@ int miniiptv_h264_annexb_next_nal(const uint8_t *annexb,
                                   size_t annexb_size, size_t *cursor,
                                   const uint8_t **nal, size_t *nal_size);
 
-/* Optional strict diagnostic helper: record exactly one SPS/PPS baseline,
- * reject any distinct set, and reject VCL data until both parameter types are
- * known. Input must be Annex-B. This is not used by live playback because
- * ordinary broadcasts may repeat or bundle parameter sets. */
+/* Strict MVD safety helper: record exactly one SPS/PPS baseline, accept
+ * identical repetitions, reject any distinct set, and reject VCL data until
+ * both parameter types are known. Input must be Annex-B. */
 void miniiptv_h264_parameter_guard_reset(
     MiniIptvH264ParameterGuard *guard);
 int miniiptv_h264_parameter_guard_check(

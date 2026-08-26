@@ -5,6 +5,12 @@ versioning while the player remains experimental.
 
 ## [Unreleased]
 
+- Reject changed or malformed live H.264 parameter sets before submitting the
+  access unit to Nintendo's MVD hardware decoder.
+- Treat skipped HLS media sequences as decoder boundaries and perform a clean,
+  bounded relock instead of concatenating them into the active MVD session.
+- Keep the live A/V timestamp-epoch correction behind the new decoder safety
+  gates.
 - Rebase live audio/video synchronization onto the first presented frame so
   MPEG-TS feeds with unrelated absolute timestamp epochs do not decode hundreds
   of frames only to drop every texture after the first picture.

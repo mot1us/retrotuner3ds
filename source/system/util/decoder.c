@@ -90,6 +90,11 @@ static bool util_mvd_video_decoder_should_skip_process_nal_unit = false;
  * decoder-level backstop so no caller can feed another packet after failure. */
 static bool util_mvd_video_decoder_poisoned = false;
 static uint32_t util_mvd_video_decoder_poison_error = DEF_ERR_UNSAFE_VIDEO_STREAM;
+/* Nintendo's MVD sysmodule is not process-isolated from malformed live H.264:
+ * an unexpected SPS/PPS transition can abort the service and halt the whole
+ * console. Lock the first valid codec configuration for each MVD session and
+ * reject any incompatible access unit before it crosses the IPC boundary. */
+static MiniIptvH264ParameterGuard util_mvd_video_parameter_guard = { 0, };
 static uint8_t util_mvd_video_decoder_current_cached_pts_index = 0;
 static uint8_t util_mvd_video_decoder_next_cached_pts_index = 0;
 static uint8_t* util_mvd_video_decoder_packet = NULL;
@@ -900,6 +905,7 @@ uint32_t Util_decoder_mvd_init(uint8_t session)
 	util_mvd_video_decoder_should_skip_process_nal_unit = false;
 	util_mvd_video_decoder_poisoned = false;
 	util_mvd_video_decoder_poison_error = DEF_ERR_UNSAFE_VIDEO_STREAM;
+	miniiptv_h264_parameter_guard_reset(&util_mvd_video_parameter_guard);
 
 	/* Lazily allocate the per-session Annex-B packet scratch buffer. */
 	if(!util_mvd_video_decoder_packet)
@@ -2147,6 +2153,15 @@ uint32_t Util_decoder_mvd_decode(uint8_t session)
 				util_mvd_video_decoder_packet_size, &normalized_size);
 			if(normalization_result != MINIIPTV_H264_OK || normalized_size > UINT32_MAX)
 				goto ffmpeg_api_failed;
+			normalization_result = miniiptv_h264_parameter_guard_check(
+				&util_mvd_video_parameter_guard,
+				util_mvd_video_decoder_packet, normalized_size);
+			if(normalization_result != MINIIPTV_H264_OK)
+			{
+				DEF_LOG_FORMAT("Unsafe H.264 extradata transition: %" PRIi32,
+					normalization_result);
+				goto unsafe_stream;
+			}
 			/* Preserve the proven rc7 contract: submit the normalized parameter
 			 * block as one MVD input and let the service parse it. Some live feeds
 			 * legitimately repeat or bundle parameter sets. */
@@ -2185,6 +2200,15 @@ uint32_t Util_decoder_mvd_decode(uint8_t session)
 	if(normalization_result != MINIIPTV_H264_OK || normalized_size == 0 ||
 		normalized_size > UINT32_MAX)
 		goto ffmpeg_api_failed;
+	normalization_result = miniiptv_h264_parameter_guard_check(
+		&util_mvd_video_parameter_guard, util_mvd_video_decoder_packet,
+		normalized_size);
+	if(normalization_result != MINIIPTV_H264_OK)
+	{
+		DEF_LOG_FORMAT("Unsafe H.264 access unit: %" PRIi32,
+			normalization_result);
+		goto unsafe_stream;
+	}
 
 	if(!util_mvd_video_decoder_should_skip_process_nal_unit)
 	{
@@ -2361,6 +2385,17 @@ uint32_t Util_decoder_mvd_decode(uint8_t session)
 	Util_decoder_mvd_free_unbound_output(session, buffer_num);
 	av_packet_free(&util_video_decoder_packet[session][0]);
 	return DEF_ERR_FFMPEG_RETURNED_NOT_SUCCESS;
+
+	unsafe_stream:
+	util_mvd_video_decoder_poisoned = true;
+	util_mvd_video_decoder_poison_error = DEF_ERR_UNSAFE_VIDEO_STREAM;
+	util_video_decoder_packet_ready[session][0] = false;
+	av_packet_free(&util_video_decoder_packet[session][0]);
+	/* MVD may already own the configured output surface even though the unsafe
+	 * access unit was never submitted. Keep it alive until mvdstdExit(). */
+	if(!output_bound_to_mvd)
+		Util_decoder_mvd_free_unbound_output(session, buffer_num);
+	return DEF_ERR_UNSAFE_VIDEO_STREAM;
 
 	nintendo_inflight_failed:
 	util_mvd_video_decoder_poisoned = true;
@@ -3060,6 +3095,7 @@ static void Util_decoder_mvd_exit(uint8_t session)
 	mvdstdExit();
 	util_mvd_video_decoder_poisoned = false;
 	util_mvd_video_decoder_poison_error = DEF_ERR_UNSAFE_VIDEO_STREAM;
+	miniiptv_h264_parameter_guard_reset(&util_mvd_video_parameter_guard);
 	util_mvd_video_decoder_available_raw_image[session] = 0;
 	util_mvd_video_decoder_raw_image_ready_index[session] = 0;
 	util_mvd_video_decoder_raw_image_current_index[session] = 0;

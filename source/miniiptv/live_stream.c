@@ -1265,13 +1265,20 @@ static void producer_main(void *unused) {
                 media.segments[i].sequence > stream.last_sequence + 1u)
                 sequence_gap = true;
             if (sequence_gap) {
-                /* A sliding live window can legitimately advance past us
-                 * while the New 3DS is downloading a slow segment. MPEG-TS
-                 * HLS segments begin on independently decodable boundaries,
-                 * so resume at the next available segment instead of turning
-                 * an ordinary forward skip into a terminal -11. Explicit
-                 * EXT-X-DISCONTINUITY tags remain fail-closed above because
-                 * they can signal a codec or timestamp-domain change. */
+                /* Never splice non-contiguous transport segments into an
+                 * initialized MVD session. A skipped sequence can cross an
+                 * unadvertised encoder/timestamp boundary, and an MVD fault
+                 * can halt the console rather than only this application.
+                 * Stop before committing new bytes; the app performs a
+                 * bounded clean relock with a fresh decoder instance. */
+                LightLock_Lock(&stream.lock);
+                stream.sequence_resyncs++;
+                stream.last_error = MINIIPTV_STAGE_DISCONTINUITY;
+                stream.boundary_reason = MINIIPTV_BOUNDARY_DISCONTINUITY;
+                stream.stop_requested = true;
+                stream.producer_state = MINIIPTV_PRODUCER_ERROR;
+                LightLock_Unlock(&stream.lock);
+                break;
             }
             LightLock_Lock(&stream.lock);
             stream.producer_state = MINIIPTV_PRODUCER_SEGMENT;
@@ -1315,11 +1322,6 @@ static void producer_main(void *unused) {
                 break;
             }
             consecutive_oversize_skips = 0;
-            if (sequence_gap) {
-                LightLock_Lock(&stream.lock);
-                stream.sequence_resyncs++;
-                LightLock_Unlock(&stream.lock);
-            }
             added = true;
         }
         if (!used_seed) {
