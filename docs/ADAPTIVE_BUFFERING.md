@@ -1,148 +1,102 @@
-# Adaptive buffering plan
+# Buffering
 
-## Why the current meter can stay low
+Buffering on the New 3DS is a balancing act. We want enough live data ready to
+ride out Wi-Fi hiccups, but we cannot keep downloading forever or hand partial
+segments to the decoder.
 
-The 6 MiB ring is a capacity limit, not a promise that six MiB of live data
-exists. The producer already downloads every published segment until that ring
-approaches 5 MiB. At the live edge it must wait for the broadcaster to publish
-the next segment, so increasing the allocation alone cannot create more
-reserve.
+## The 6 MiB ring
 
-The current three-second target applies only after a real empty-ring underrun.
-It does not hold playback at three seconds during normal operation. That is
-intentional: proactively pausing a healthy low reserve would manufacture a
-visible stall.
+The player has one fixed 6 MiB ring for compressed HLS data. The network thread
+writes complete MPEG-TS segments into it and FFmpeg reads them from the other
+side.
 
-## Measurements
+Six MiB is the maximum capacity, not a promise that six MiB will always be
+available. At the live edge, the producer sometimes has to wait for the station
+to publish its next segment. Making the ring larger would not create data that
+does not exist yet.
 
-The controller will update these integer EWMAs after each complete segment:
+The producer also pauses near the high-water mark so it cannot overwrite unread
+data. None of this memory grows with viewing time.
+
+## Why a full reserve can still freeze
+
+The reserve meter only describes compressed network data waiting for FFmpeg.
+It does not prove that video frames are leaving MVD or that audio buffers are
+reaching the DSP.
+
+A channel can therefore show a healthy green reserve while the picture is
+frozen because of a decoder, timestamp, texture, or format problem. Telemetry
+keeps network, video, and audio counters separate for exactly this reason.
+
+## Starting a channel
+
+A first tune is treated as cold. It normally starts two published segments
+behind the newest one and stages two complete segments before handing the
+stream to FFmpeg. That costs a little startup time but gives the decoder a real
+reserve instead of immediately chasing the broadcaster.
+
+The app remembers up to 32 small channel profiles for the current session. A
+profile stores only a hash and numeric measurements—never the URL. After enough
+good samples, tuning that channel again can use:
+
+- one segment for a proven healthy feed;
+- two segments for a cold or ordinary feed;
+- up to three segments of live-edge lag for a marginal feed.
+
+The profile disappears when the app closes.
+
+## What gets measured
+
+After each complete segment, the controller updates integer moving averages for:
 
 ```text
-content bitrate = segment bytes * 8000 / media duration ms
-network bitrate = segment bytes * 8000 / download time ms
-headroom        = media duration ms / download time ms
-commit gap      = this commit time - previous commit time
+content rate  = segment bytes / media duration
+network rate  = segment bytes / download time
+headroom      = media duration / download time
+delivery gap  = time between completed segments
+jitter        = variation in that delivery gap
 ```
 
-It will also track commit-gap deviation, recent underruns, total stall time,
-largest segment, media-playlist polls with no new segment, and ring minima.
-Network reserve and decoder stalls remain separate signals.
+It also tracks real empty-ring underruns, time spent stalled, largest segment,
+playlist polls that found nothing new, and the lowest observed reserve.
 
-## Rollout
+Headroom is the easiest number to read. `2.0x` means that sample downloaded
+twice as fast as playback consumes it. Values near or below `1.0x` mean the
+channel cannot reliably keep up at that moment.
 
-### rc9.7: shadow controller
+## Recovering from an underrun
 
-- Calculate `COLD`, `HEALTHY`, `AT RISK`, `MARGINAL`, `REFILL`, and
-  `UNSUSTAINABLE` states in a fixed-size, integer-only helper without changing
-  playback.
-- Display headroom, delivery-gap jitter, desired reserve, and recommended
-  live-edge lag on a clearly labelled `SHADOW` page.
-- Compare the recommendations with five-minute hardware tests.
+The player only enters refill mode after the compressed ring actually reaches
+zero. It does not pause a working stream just because the meter looks low.
 
-The shadow helper has no clock, lock, allocator, network access, or decoder
-dependency. The live-stream owner supplies timestamps and validated segment
-samples while holding its existing lock. Failed or partial downloads are never
-sampled, and time spent deliberately paused at the ring high-water mark is
-excluded from the following delivery-gap sample.
+An isolated underrun waits for one complete segment. If another happens within
+90 seconds, the player asks for a deeper target based on two recent segments or
+the controller's recommendation. That target is capped at 3 MiB, and the wait
+is bounded between 2.5 and 8 seconds. If the broadcaster has not published
+enough data by then, playback resumes with whatever complete data is safely
+available.
 
-`SELECT` cycles the shadow page, existing pipeline diagnostics, and a clean
-view. A shadow recommendation is telemetry only in rc9.7: it does not alter the
-one-segment initial tune, three-second refill, 5 MiB high-water mark, 6 MiB
-ring, or 4 MiB atomic segment cap.
+After a discontinuity or other clean decoder relock, the player always rebuilds
+a conservative two-segment reserve. It does not trust the warm profile from the
+old decoder session.
 
-### rc9.8: bounded hardware telemetry
+## What this is not
 
-- Write the shadow and pipeline snapshots to a replace-on-launch CSV once per
-  second.
-- Flush on channel changes, underruns, errors, and a ten-second fallback
-  interval so a failure loses little context.
-- Cap the file at 512 KiB and keep all URLs and media payloads out of it.
-- Use real multi-channel sessions to validate the shadow recommendations
-  before they control playback.
+This is adaptive buffering, not adaptive-bitrate playback. RetroTuner3DS can
+choose the lowest rendition advertised when it first tunes, but it does not
+switch renditions while MVD is active.
 
-### rc9.9: adaptive start depth
+It also does not transcode. If a station only offers a heavy 720p or 1080p
+feed, changing the buffer cannot make that video cheap enough for the New 3DS.
 
-- Keep downloading exactly one complete initial segment.
-- Start one published segment behind the newest for healthy channels, two for
-  cold or marginal channels, and three after repeated underruns.
-- Never select across an HLS discontinuity.
+## Limits we do not move
 
-Implemented in rc9.9. A cold channel begins two segments behind. After at least
-three validated segment samples, teardown saves the shadow recommendation in a
-fixed 32-entry, session-only profile table. Returning to that channel applies
-its one-, two-, or three-segment lag while the producer uses the already parsed
-media playlist to catch up concurrently with FFmpeg and MVD initialization.
-The applied lag and warm/cold profile state are included in telemetry.
+- The ring stays at 6 MiB.
+- An individual video or combined A/V segment stays capped at 4 MiB.
+- Only complete, validated MPEG-TS segments are published to FFmpeg.
+- Encryption, byte ranges, fMP4, cancellation, and format-boundary checks stay
+  in place.
+- There is still only one producer, one FFmpeg consumer, and one MVD session.
 
-Starting farther behind adds broadcast latency rather than download work. It
-also gives the producer already-published segments to fetch while FFmpeg and
-MVD initialize, which is the best available way to build reserve entirely on
-the New 3DS.
-
-### rc9.11: adaptive recovery
-
-- Resume after one complete segment for an isolated underrun.
-- After another underrun within 90 seconds, try to collect two segments.
-- If the second segment has not been published, resume with one after a bounded
-  wait of at most the target duration plus two seconds, capped at eight seconds.
-
-The desired reserve will be derived from segment duration, commit-gap jitter,
-download headroom, and recent underruns, then clamped to 2.5--12 seconds and
-128 KiB--3 MiB.
-
-Implemented in rc9.11. The reader still enters recovery only after the
-compressed ring reaches a real zero-byte underrun. An isolated underrun waits
-for one complete segment; another within 90 seconds requests the larger of two
-recent segments or the shadow controller's desired reserve, capped at 3 MiB.
-If the deeper target is not available, readable complete data is released
-after the target duration plus two seconds, bounded to 2.5--8 seconds.
-
-### rc9.16: cold reserve and boundary recovery
-
-- Cold or previously marginal tunes stage two complete segments; a proven
-  healthy warm profile with no underruns may retain the one-segment startup.
-- Transient manifest and initial-segment requests receive two bounded retries
-  inside the existing tune deadline.
-- Explicit discontinuities and detected format changes still stop the active
-  decoder. The app then permits at most two full teardown-and-relock attempts
-  in a 30-second window.
-- At most two consecutive oversized live segments may be skipped. Atomic
-  staging remains capped at 4 MiB and repeated oversize is terminal.
-
-### rc9.17: boundary-aware relock reserve
-
-- Automatic relocks always stage two complete segments. A healthy warm profile
-  from before a discontinuity cannot select the one-segment fast path for the
-  replacement decoder session.
-- Startup network retry spacing is 250 ms then 1 second, still bounded by two
-  retries and the existing 30-second total tune deadline.
-- Telemetry distinguishes the boundary detected by the old stream from the
-  reason used to start the new decoder and counts automatic relocks.
-- The player drains safe buffered media under an orange `RELOCK` state, then
-  transitions directly to animated tuning while FFmpeg/MVD is fully rebuilt.
-
-## Session profiles
-
-A fixed 32-entry table retains measurements and a recommended lag for each
-channel during the current app session. It stores only a 64-bit channel-key
-hash plus numeric measurements, requires only a few KiB of ordinary RAM, writes
-nothing to the SD card, and never logs channel URLs. Persistence can be
-considered only after the recommendations prove useful on hardware.
-
-## Safety invariants
-
-- Keep the 6 MiB ordinary-RAM ring and 4 MiB atomic segment staging limit.
-- Publish only complete, validated MPEG-TS segments.
-- Preserve sequence, discontinuity, cancellation, and tune-timeout checks.
-- Keep one producer, one FFmpeg consumer, one MVD instance, and serialized
-  teardown.
-- Never switch rendition while MVD is active; this is buffering adaptation,
-  not transcoding or adaptive-bitrate playback.
-- Keep `B`, `L`, and `R` responsive during tuning and refill waits.
-
-## Acceptance targets
-
-- No regression on proven low-bitrate channels.
-- At least 50% fewer visible stalls on marginal channels in five-minute tests.
-- No additional linear-memory allocation.
-- Bounded startup/recovery waits and no crash across ten rapid channel changes.
+The goal is smoother playback inside known-safe limits, not getting every HLS
+channel on the internet to play.

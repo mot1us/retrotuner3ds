@@ -1,23 +1,27 @@
-# Development guide
+# Development
 
-## Open in VS Code
+RetroTuner3DS is normal C code until it reaches Nintendo-specific services.
+Most parsing, buffering, and safety logic can be tested on a desktop. MVD,
+Citro3D, audio timing, Wi-Fi behavior, and final teardown still need a real New
+3DS.
 
-Open `RetroTuner3DS.code-workspace`. The workspace starts terminals in the project
-root and supplies the devkitPro environment used by this Mac.
+## Open it in VS Code
 
-Useful VS Code commands:
+Open `RetroTuner3DS.code-workspace`. Its terminal starts in the project root
+with the devkitPro environment used by this Mac.
 
-- **Terminal → New Terminal** opens a shell ready for Git and devkitARM.
-- **Terminal → Run Build Task** builds `retrotuner3ds.3dsx`.
-- **Terminal → Run Task → RetroTuner3DS: Host tests** runs the sanitizer suite.
-- **Source Control** shows the same staged/unstaged changes as `git status`.
+Useful commands:
 
-The recommended C/C++ extension is optional; it provides navigation and
-diagnostics but does not replace the devkitARM compiler.
+- **Terminal -> Run Build Task** builds `retrotuner3ds.3dsx`.
+- **Terminal -> Run Task -> RetroTuner3DS: Host tests** runs the sanitizer tests.
+- **Source Control** shows the same changes as `git status` and `git diff`.
 
-## Daily Git flow
+The recommended C/C++ extension is optional. It helps with navigation, but the
+devkitARM compiler is still the source of truth.
 
-Start new work from the latest tested `main`:
+## A normal change
+
+Start from the latest tested `main`:
 
 ```sh
 git switch main
@@ -34,120 +38,94 @@ git diff
 make 3dsx -j4
 ```
 
-Commit a focused result:
+Then commit and push the branch:
 
 ```sh
 git add path/to/changed/files
-git commit -m "fix: describe the behavior"
+git commit -m "fix: describe the change"
 git push -u origin HEAD
 ```
 
-Open a pull request into `main`. For playback work, record desktop test results
-and the real-hardware result separately. A pull request can remain open while a
-`.3dsx` candidate is being tested.
+Open a pull request into `main`. Playback changes should report desktop tests
+and New 3DS results separately. It is fine to leave a pull request open while a
+hardware build is being tested.
 
-## Live diagnostics
+## Reading the diagnostics
 
-The pipeline detail page uses compact counters:
+The on-device pipeline page answers one useful question: where did progress
+stop?
 
-- `V packet>decode>texture>draw` identifies the first video stage that stopped.
-- `A<tracks>:state demux>frame>queue` separates FFmpeg audio discovery,
-  decoding, and DSP output.
-- `P` is the producer state (`LIST`, `FETCH`, `EDGE`, `FULL`, or `ERROR`).
-- `C:H` means the 60-second rendition cache skipped the root master request;
-  the media playlist and complete initial segment were still downloaded.
+- `V packet>decode>texture>draw` follows video from FFmpeg to the screen.
+- `A<tracks>:state demux>frame>queue` follows audio to the DSP queue.
+- `P` is the producer state: `LIST`, `FETCH`, `EDGE`, `FULL`, or `ERROR`.
+- `C:H` means a recent master selection was reused. The media playlist and
+  initial segments were still downloaded fresh.
 
-These counters are diagnostic only and do not relax the MVD, segment-size,
-whole-segment, or teardown safety boundaries.
+The buffer page shows delivery headroom, segment timing, jitter, desired
+reserve, current live-edge lag, and underruns. These measurements now guide
+session-only startup and refill decisions. They never change the fixed memory,
+segment, codec, or decoder limits.
 
-During playback, `telemetry.csv` also records memory headroom every five
-seconds. `heap_used_bytes/heap_total_bytes` covers the fixed ordinary heap;
-`linear_free_bytes/linear_total_bytes` covers the larger linear allocator used
-by video, FFmpeg, and larger wrapped allocations; `app_region_total_bytes`
-identifies the process memory layout. The sampler reads allocator counters and
-never allocates test blocks.
+`telemetry.csv` records the same pipeline data plus memory headroom. The useful
+video columns are `video_packets`, `video_decoded_frames`, `video_textures`, and
+`video_presented_frames`. Audio has matching demux, frame, queue, and error
+counters. A full network ring with a flat presentation count points downstream
+of the network.
 
-The CSV's `video_packets`, `video_decoded_frames`, `video_textures`, and
-`video_presented_frames` columns locate a downstream video stall. Audio uses
-`audio_tracks`, `audio_state`, `audio_demux_packets`, `audio_frames`,
-`audio_buffers`, and `audio_last_error`. These are existing atomic counters;
-logging them adds no decoder-thread work.
+Player errors preserve their last video and audio snapshot. The snapshot is
+cleared on the next tune so it cannot be confused with a different channel.
 
-The rc9.7 `SHADOW` page reports what a future adaptive-buffer controller would
-choose while leaving the actual player unchanged:
+## Hardware reports
 
-- `H` is segment media time divided by download time (`2.0x` means the network
-  delivered that sample twice as fast as playback consumes it).
-- `WANT` is the calculated reserve target and `LAG` is the suggested number of
-  published HLS segments to stay behind the live edge.
-- `SEG`, `GAP`, and `JIT` are smoothed media duration, complete-segment delivery
-  gap, and delivery-gap deviation.
-- `U90` counts real empty-ring underruns in the recent 90-second window.
+A useful test report includes:
 
-Press `SELECT` to cycle shadow telemetry, pipeline diagnostics, and a clean
-view. Every value is numeric telemetry copied under the stream lock; it does
-not change the rc9.7 tune, ring, or decoder behavior.
+- the exact build or commit;
+- the channel name, but not private URLs or tokens;
+- time to first frame;
+- how long it played before a stall or failure;
+- whether audio, video, or both stopped;
+- the matching `telemetry.csv` and, after a crash, the Luma dump.
 
-Player failures return to a dedicated error panel that preserves the final
-video and audio snapshot on separate readable rows. This snapshot is cleared
-when a new tune begins, so it cannot be mistaken for the next station.
-
-Live startup may leave one validated texture queued while the inherited player
-is in `BUFFERING`. Because the two-slot texture ring has one usable pending
-slot, waiting for the normal two-frame refill threshold at that point would
-deadlock presentation. The live-only startup path therefore uses the existing
-buffering-complete notification when that first texture is ready. Drawing it
-restores the normal refill policy; no decoder or memory limits are changed.
+Testing the same URL in VLC is also helpful. It proves the source is currently
+alive, but not that its codec, segment layout, or resolution is safe for MVD.
 
 ## Working with Codex
 
-A productive request usually names the outcome and supplies the latest hardware
-observation, for example:
+The easiest requests name the result, the latest hardware observation, and the
+Git boundary. For example:
 
-> Fix B so one press returns from playback during buffering. Run host tests and
-> build a hardware-test package, but do not merge until I test it.
+> Fix B so one press returns from buffering. Run the host tests and build a
+> hardware package, but let me test it before anything reaches main.
 
-Codex can inspect and edit the same working tree, run tests, prepare focused
-commits, and summarize the exact hardware checks needed. You can review every
-change in VS Code's Source Control view before it is committed or pushed.
-
-Useful checkpoints to request are:
-
-- “Show me the diff before committing.”
-- “Commit this fix but do not push it.”
-- “Push this branch and prepare a pull request.”
-- “Tag the hardware-tested build and prepare a release.”
+You can review every edit in VS Code before it is committed. Useful checkpoints
+are “show me the diff,” “commit but do not push,” and “this passed hardware;
+merge it to main.”
 
 ## Remotes
 
-- `origin` is the public `mot1us/retrotuner3ds` repository.
-- `upstream` is the original Video player for 3DS repository and is configured
-  fetch-only to avoid accidental pushes.
+- `origin` is `mot1us/retrotuner3ds`.
+- `upstream` is the original Video player for 3DS repository and is fetch-only.
 
-To inspect upstream changes without merging them:
+To inspect upstream without merging it:
 
 ```sh
 git fetch upstream
 git log --oneline --left-right main...upstream/main
 ```
 
-## Public release package
+## Public release packages
 
-Only package a commit after its release candidate has passed real New 3DS
-hardware testing. The packaging script exports the committed Git tree into a
-temporary directory, tests and builds that clean snapshot, and refuses to
-include playlists:
+Only package a commit after its candidate has passed real hardware testing.
+The script exports a clean committed tree, runs tests, builds the `.3dsx`, and
+refuses to include playlists:
 
 ```sh
-./scripts/package-release.sh 0.5.1-rc9.20
+./scripts/package-release.sh 0.5.1-rc9.28
 ```
 
-The argument must exactly match `RETROTUNER_VERSION` in
-`include/miniiptv/version.h`; update that one definition before preparing a
-different candidate or final release.
+The argument must match `RETROTUNER_VERSION` in
+`include/miniiptv/version.h`. Output goes to the ignored `dist/` directory with
+a SHA-256 file and an unpacked drop-in folder.
 
-The ZIP, its SHA-256 file, and the unpacked drop-in folder are written under
-the ignored `dist/` directory. Public packages never include `channels.m3u`;
-each user supplies that file on their own SD card. Private hardware-test
-packages belong outside the repository and must not be attached to a public
-release.
+Public packages never contain `channels.m3u`. Keep private hardware playlists
+and test packages outside the repository.

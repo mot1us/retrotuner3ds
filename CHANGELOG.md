@@ -1,293 +1,110 @@
 # Changelog
 
-All notable changes to RetroTuner3DS are recorded here. The project uses semantic
-versioning while the player remains experimental.
+This is the useful summary of what changed. The individual release-candidate
+experiments and hardware-test fixes are still available in the Git history.
 
 ## [Unreleased]
 
-- Reject changed or malformed live H.264 parameter sets before submitting the
-  access unit to Nintendo's MVD hardware decoder.
-- Treat skipped HLS media sequences as decoder boundaries and perform a clean,
-  bounded relock instead of concatenating them into the active MVD session.
-- Keep the live A/V timestamp-epoch correction behind the new decoder safety
-  gates.
-- Rebase live audio/video synchronization onto the first presented frame so
-  MPEG-TS feeds with unrelated absolute timestamp epochs do not decode hundreds
-  of frames only to drop every texture after the first picture.
-- Remove the abandoned SD-card cached-excerpt prefetch/session path while
-  retaining its shared stream result types for the bounded live producer.
-- Increase stream-reserve and battery legibility, clarify that the reserve is
-  input data rather than decoder health, reduce duplicated tuning labels, and
-  keep no-signal static animating at its intended cadence.
-- Weight tune progress by measured startup work and advance continuously within
-  each initial HLS segment before the short FFmpeg/MVD/first-frame tail.
-- Replace the early-saturating reserve bar with a fixed 24-second segmented
-  scale, adaptive target marker, and explicit 6 MiB ring occupancy.
-- Calm the allocation-free PCM activity display into one smoothed mono meter,
-  add lower-screen battery percentage, and remove duplicate live-state labels.
-- Prevent RetroTuner D-pad navigation from reaching the upstream player's LCD
-  brightness shortcuts while leaving standalone-player controls unchanged.
-- Separate the lower-screen loading cursor from the active tune. Browsing no
-  longer cancels network/decoder setup; only `A` commits a different station.
-- Replace the arbitrary loading sweep with truthful eight-stage tune progress,
-  and soften the animated static with smaller marks and slower updates.
-- Give each `SELECT` diagnostics page the full bottom screen with substantially
-  larger pipeline and adaptive-buffer labels and values.
-- Prevent idle sleep while RetroTuner is running and restore the console's
-  previous sleep permission during normal shutdown.
-- Hold the expanding-static boot sequence on screen long enough to read as an
-  intentional television warm-up instead of a one-frame horizontal flash.
-- Keep tune progress exclusively on the top screen; the lower display remains
-  a larger, higher-contrast station list during startup and channel changes.
-- Paint the full 240-pixel bottom framebuffer, eliminating the inherited white
-  strip, and restore restrained cyan/orange tuning accents to the minimal UI.
-- Add a non-destructive live channel drawer: `B` shows the station list on the
-  bottom screen while the current video continues above; confirming a different
-  station then enters the existing serialized teardown and handoff.
-- Replace the colored startup frame with an allocation-free expanding-static
-  television aperture that remains responsive while inherited video services
-  initialize.
-- Rebuild the deck, tuning, failure, and live OSD around a minimal monochrome
-  1990s portable-TV presentation, with quieter status text and no inherited
-  bottom-screen player chrome.
-- Unify the channel deck and live player around a restrained portable-TV
-  palette with clearer station, scan, tune, playback, and failure hierarchy.
-- Open live playback in a clean viewer by default. `SELECT` still exposes the
-  shadow-buffer and pipeline pages needed for hardware diagnostics.
-- Mark stations played or failed during the current app session while keeping
-  every discovered station retryable; scan verification markers remain
-  visible for untried channels.
-- Replace the default live KiB/underrun readout with a human-readable reserve
-  in seconds and clearer playback/channel-switch controls. Telemetry retains
-  the full engineering measurements.
-- Clarify the scanned channel deck with explicit page/count labels, one-page
-  D-pad Left/Right navigation, quieter portable-TV styling, and distinct
-  scanning, tuning, ready, and error presentation.
-- Add an incremental manifest-only airwave scan. The app opens with an empty
-  discovered deck, admits compatible/metadata-unknown live stations as they
-  are checked, and pauses discovery completely while tuning or playing.
-- Reject known over-limit resolution/frame-rate sources, encrypted HLS,
-  byte-range/fMP4 layouts, VOD playlists, and offline manifests before any
-  video segment is downloaded or decoder memory is initialized.
-- Replace the busier blue deck treatment with a restrained black/off-white
-  portable-TV palette, subtle static, and live scan progress.
-- Record scanner channel/state transitions in the existing bounded telemetry
-  log without adding URLs or media payloads.
-- Force automatic relocks to rebuild a conservative two-segment startup
-  reserve instead of reusing a stale one-segment warm profile from before the
-  stream boundary.
-- Identify HLS discontinuities, playlist regressions, decoder format changes,
-  and repeated oversized segments separately in hardware telemetry, including
-  a session relock counter.
-- Replace the visible boundary error/deck flash with an orange relock state and
-  the animated tuning transition while FFmpeg/MVD is rebuilt.
-- Back off transient startup network retries by 250 ms and then 1 second while
-  preserving the existing two-retry and 30-second tune bounds.
-- Add bounded clean relocking after explicit HLS discontinuities, playlist
-  regressions, or player-detected format boundaries. Every relock fully tears
-  down FFmpeg/MVD before opening the fresh signal.
-- Skip at most two consecutive oversized producer segments without growing the
-  4 MiB atomic staging limit; repeated oversize remains a terminal safety
-  failure and every skip is logged.
-- Retry transient manifest and initial-segment network failures inside the
-  existing 30-second tune deadline.
-- Stage two complete segments on cold/marginal tunes while retaining the
-  one-segment path for proven healthy warm profiles.
-- Rotate the prior hardware run to `telemetry-prev.csv` instead of immediately
-  overwriting it on app launch.
-- Qualify a revised private TVS hardware-test deck around seven feeds proven on
-  New 3DS and six replacement feeds preflighted at 360p-class H.264/AAC with
-  comfortably sub-limit MPEG-TS segments. Public packages remain playlist-free.
-- Recover from ordinary forward HLS media-sequence gaps when a slow client
-  falls behind a sliding live window. Explicit `EXT-X-DISCONTINUITY` markers
-  and playlist regressions still fail closed before changed media reaches the
-  decoder.
-- Record producer sequence resynchronizations in `telemetry.csv` so hardware
-  tests can distinguish a recovered live-window skip from a decoder failure.
-- Load only the Basic Latin font block used by the interface and keep the
-  RetroTuner boot frame refreshed while the inherited video system starts.
-- Raise the user playlist limit from 32 to 64 channels.
-- Detect HLS `EXT-X-MEDIA` audio groups and, when video and AAC arrive as
-  separate aligned MPEG-TS renditions, combine them into one bounded transport
-  stream before the existing FFmpeg/MVD pipeline. Unsafe or unalignable tables
-  fail closed instead of changing decoder state.
-- Extend useful telemetry duration without increasing its 512 KiB ceiling:
-  sample every two seconds for the first minute after launch/channel changes,
-  then every ten seconds, while retaining immediate state, error, underrun,
-  and channel events.
-- Render lightweight animated television snow on the top screen while a
-  signal is tuning or switching.
-- Preserve producer-side HLS failures on the error deck after playback exits,
-  instead of silently replacing them with the ordinary off-air status.
-- Keep decoder recovery conservative: downstream texture stalls remain a
-  logged compatibility failure rather than forcing unsafe decoder reuse.
-- Replace the inherited white startup/status-bar frame with a RetroTuner boot
-  screen, and log FFmpeg, MVD, texture, presentation, and audio counters for
-  diagnosing full-network-ring stalls.
-- Apply bounded adaptive underrun recovery: one segment after an isolated
-  underrun, a larger two-segment/desired-reserve target after a repeat within
-  90 seconds, and a 2.5--8 second fallback when the deeper reserve is not yet
-  published.
-- Add low-frequency, allocation-free memory telemetry for the application
-  region, ordinary heap, and linear heap; also preserve signed player errors in
-  the CSV diagnostics.
-- Add session-only adaptive startup depth: cold channels begin two published
-  segments behind live, while measured repeat tunes apply a one-, two-, or
-  three-segment lag without increasing the one-segment blocking download.
-- Record the applied startup lag and warm/cold profile state in telemetry, and
-  stop classifying normal user-initiated cancellation as an error.
-- Add a replace-on-launch telemetry.csv with periodic playback samples and
-  immediate channel, underrun, and error events. The logger buffers 8 KiB in
-  ordinary RAM, flushes at bounded intervals, contains no stream URLs, and
-  stops at 512 KiB without affecting playback behavior.
-- Add an observation-only adaptive-buffer controller that measures segment
-  delivery headroom, delivery-gap jitter, reserve pressure, and real refill
-  stalls without changing startup, playback, or recovery behavior.
-- Add a dedicated, readable shadow-controller telemetry page to the live deck;
-  `SELECT` cycles shadow metrics, pipeline diagnostics, and a clean view.
-- Break the live first-frame circular wait once one validated texture is
-  already queued: resume through the existing buffering-complete notification,
-  present it, then restore the ordinary MVD refill threshold.
-- Enlarge the player-failure snapshot to two dedicated video/audio rows.
-- Render player-failure diagnostics on dedicated video and audio rows instead
-  of clipping the counters after a long single-line error message.
-- Preserve the first live texture through the draw-stage A/V wait gate as well
-  as the conversion-stage drop gate, then restore normal synchronization.
-- Bound player setup, MVD initialization, and post-MVD first-frame waits and
-  return through serialized decoder teardown instead of leaving a station
-  permanently on a startup phase. A ready first texture receives a short draw
-  grace at the first-frame boundary.
-- Report live video progress, audio discovery/decode/output flow, producer
-  state, and rendition-cache hits without exposing station URLs.
-- Cache four recent master-rendition selections for 60 seconds so a repeat
-  tune can skip one root-manifest request while still fetching a fresh media
-  playlist and one complete MPEG-TS segment.
-- Establish the first decoded live frame as the A/V clock baseline before
-  normal catch-up dropping, preventing streams with large absolute MPEG-TS
-  timestamps from remaining on `SAFE VIDEO CHECK` while audio plays.
-- Seed the producer with the media playlist already parsed during initial
-  tuning instead of immediately requesting the same manifest again; complete
-  segment staging and the bounded ring remain unchanged.
-- Show the active startup phase and elapsed timing while tuning so manifest,
-  initial-segment, player-probe, decoder, and first-frame delays can be
-  distinguished on hardware.
-- Let `B` return to the deck and `L`/`R` change signals directly from a
-  no-signal or player-error state, without requiring `A` to retry first.
-- Keep the live status badge stable during ordinary raw-frame refills and hide
-  the inherited `Processing video 0/100%` pulse while preserving true network
-  rebuffer warnings.
-- Keep queued live audio running through brief decoder-only video refills when
-  the compressed network ring is healthy, reducing pause/resume audio chop
-  without allocating more decoder or stream memory.
-- Bound the entire initial tune to 30 seconds and make manifest downloads
-  cancelable, preventing a dead signal from leaving the deck stuck on
-  `RETUNING`.
-- Let `B` cancel an in-progress tune and let D-pad or `L`/`R` queue exactly one
-  replacement signal without overlapping stream teardown.
-- Keep blocking stream joins outside the app lock and reap completed tuning
-  workers before channel handoff, fixing a permanent retune race.
-- Restore a 5 MiB producer high-water mark in the 6 MiB ring to give working
-  low-bitrate channels more network headroom.
-- Add sanitizer-backed M3U and HLS parser coverage, including 32-channel
-  limits, quoted metadata, rendition selection, encryption tags, and URL
-  resolution.
-- Select HLS renditions by exact peak `BANDWIDTH` instead of accidentally
-  treating `AVERAGE-BANDWIDTH` as the peak value.
-- Build public release archives from a clean committed snapshot and refuse to
-  package playlists, local media, or generated application binaries.
-- Remove the obsolete embedded reference-clip entry point.
-- Keep live hardware decode behind an H.264/YUV420P, 640x480, 30.5 fps
-  preflight after two matching MVD service crash dumps; unsupported streams do
-  not fall back to software video decoding.
-- Restore the proven whole normalized H.264 access-unit submission path after
-  rc9's experimental per-NAL parameter guard rejected ordinary broadcasts.
-- Accept MVD's `0x17000` success status from `MVDSTD_SetConfig`; rc9 mistakenly
-  surfaced that successful configuration as a fatal player error.
-- Stage each HLS segment atomically so failed or truncated HTTP transfers never
-  expose partial transport-stream data to FFmpeg/MVD.
-- Use one 4 MiB ceiling for prefetch and live atomic segment staging, with
-  URL-free received/content-length diagnostics when that cap is exceeded.
-- Bound stalled MVD render waits, keep registered output surfaces alive until
-  service exit, use the matching allocator for linear memory, and join every
-  live worker before freeing shared state.
-- Order START shutdown as producer cancellation, player-thread join, decoder
-  close, then stream and network teardown.
-- Stop cleanly at HLS discontinuities or unsafe media-sequence changes.
-- Fix the inherited 48-frame restart threshold that left the three-slot MVD
-  queue permanently stuck at 4.17% on video-only or unsupported-audio feeds.
-- Replace blank startup textures with a dark animated signal-lock screen.
-- Keep channel changes in a dedicated current-to-next handoff view while the
-  existing one-decoder teardown barrier runs.
-- Relabel the meter as compressed `NETWORK RESERVE` and color it against the
-  real refill target; decoded video and audio queues are downstream of it.
-- Prepare the project for public GitHub development.
-- Add repository documentation, issue forms, and host-test automation.
-- Standardize the build output as `retrotuner3ds.3dsx`.
-- Make `B` a latched, high-priority return-to-channels action during playing,
-  pausing, buffering, and player error states.
-- Route live-playback failures into the Pixel Deck status panel instead of the
-  inherited modal error screen.
-- Close the idle handoff race so a tuned channel starts from one `A` press.
-- Show concise tuning errors with retry guidance on the channel deck.
-- Validate one complete MPEG-TS segment before player handoff so tuning reaches
-  a usable first frame instead of exposing a blank player screen.
-- Replace the inherited status bar with a matching Pixel Deck signal strip.
-- Center the RetroTuner3DS banner and color-code button labels separately from
-  their actions for clearer controls.
-- Estimate playable buffer time from measured segment bitrate and display
-  buffer health in seconds instead of treating every stream alike.
-- Restore the proven three-second recovery target and only block after a real
-  empty-ring underrun; the proactive low-water pause caused healthy feeds to
-  stall prematurely.
-- Show source bitrate, measured network throughput, buffer time, download time,
-  and real underrun counts for useful hardware diagnostics.
-- Add animated tuning progress with elapsed time.
-- Expand playlists to 32 stations with a ten-row paged channel deck.
-- Add `L`/`R` live channel switching through the same full teardown path as
-  returning to the deck, so two decoders or stream buffers never coexist.
-- Remove bundled stations; users now supply
-  `sd:/3ds/retrotuner3ds/channels.m3u` themselves.
-- Rename the public project, application, and binary to RetroTuner3DS.
+### Live TV
+
+- Added continuous HLS playback through a fixed 6 MiB compressed-data ring.
+- Added an opening manifest scan that fills the channel list as compatible or
+  still-unknown stations are found.
+- Raised the user playlist limit to 64 channels and removed all bundled
+  stations from public builds.
+- Select the lowest advertised HLS rendition and reuse recent master selections
+  without reusing stale media playlists.
+- Added support for aligned HLS feeds that publish H.264 video and AAC audio in
+  separate MPEG-TS renditions.
+
+### Buffering and playback
+
+- Cold channels now start with two complete segments. Healthy repeat tunes can
+  use a faster session-only profile, while marginal channels can begin farther
+  behind the live edge.
+- Added bounded refill behavior for real empty-ring underruns and deeper
+  recovery after repeated stalls.
+- Added a fixed 24-second network-reserve display, adaptive target marker, ring
+  occupancy, and a small PCM activity meter.
+- Established the first presented live frame as the A/V clock baseline. This
+  fixes streams whose audio and video arrive with unrelated absolute MPEG-TS
+  timestamps.
+- Kept queued audio running through brief video-only refills when compressed
+  network data is still healthy.
+
+### Channel deck and controls
+
+- Reworked the interface into a simpler 1990s handheld-TV style with animated
+  static, a clearer tune sequence, readable errors, and cleaner playback.
+- Added a live channel drawer. Press `B` to browse on the bottom screen while
+  the current station keeps playing above.
+- Made `B`, `L`, and `R` work during tuning, buffering, playback, and errors
+  without starting overlapping decoder sessions.
+- Separated browsing from the active tune: moving the cursor does not switch
+  channels until `A` confirms it.
+- Blocked inherited D-pad brightness shortcuts inside RetroTuner and disabled
+  idle sleep while the app is open.
+
+### Diagnostics
+
+- Added `telemetry.csv` with buffer, network, video, audio, memory, relock,
+  underrun, and error data. The previous launch is kept separately.
+- Added readable on-device pipeline and buffering pages while keeping the
+  normal player view clean.
+- Added truthful weighted tune progress so long segment downloads no longer
+  look like a frozen four-step animation.
+- Made player failures preserve the last video/audio snapshot and the original
+  producer error.
+
+### Safety and stability
+
+- Keep every segment atomic: incomplete or oversized HTTP responses never
+  reach FFmpeg or MVD.
+- Reject unsupported codecs, layouts, resolutions above 640x480, and known
+  frame rates above 30.5 fps before hardware decode.
+- Validate live H.264 parameter sets and fail closed when they change or become
+  malformed.
+- Treat HLS discontinuities, sequence gaps, playlist regressions, and detected
+  format changes as decoder boundaries. Recovery fully tears down FFmpeg/MVD
+  before a bounded clean relock.
+- Bound manifest requests, player setup, MVD initialization, first-frame waits,
+  render waits, retries, and the complete initial tune.
+- Fixed several teardown and channel-handoff races that could leave a worker,
+  stream buffer, or MVD surface alive too long.
+- Removed the abandoned SD-card cached-clip path and the obsolete embedded
+  reference clip.
+
+### Project
+
+- Added sanitizer-backed host tests for M3U/HLS parsing, URL resolution,
+  MPEG-TS combining, H.264 normalization, buffering decisions, network limits,
+  and telemetry.
+- Added clean-tree release packaging with checksums and hard checks that prevent
+  playlists, stream URLs, media, and generated binaries from entering public
+  source or release packages.
+- Added pinned third-party source revisions, retained license texts, development
+  notes, and hardware-report templates.
 
 ## [0.5.0] - 2026-08-22
 
-### Added
-
-- Retro Pixel Deck channel-selection interface.
-- Six screened low-bitrate starter channels.
-- On-device display of the selected rendition, buffer level, downloads,
-  underruns, and errors.
-- A compatibility indicator for streams near the New 3DS sweet spot.
-
-### Changed
-
-- Start tuning with one `A` press and request autoplay during player handoff.
-- Keep the lower-screen dashboard available during playback.
-- Hide inherited player controls until explicitly requested.
-- Purge stream and decoder resources when leaving a channel.
+- Added the first Retro Pixel Deck channel interface.
+- Added live buffer and stream diagnostics.
+- Started tearing down stream and decoder state when leaving a channel.
 
 ## [0.4.0] - 2026-08-22
 
-### Added
-
-- Continuous HLS playback through a bounded 6 MiB ring buffer.
-- Producer/consumer rebuffering with low- and high-water marks.
-- New 3DS MVD H.264 hardware decoding through the established player pipeline.
-
-### Verified
-
-- TVS Turbo played continuously on real New 3DS hardware for several minutes,
-  with only occasional brief rebuffering.
+- Added continuous HLS playback through the first bounded ring-buffer design.
+- Connected live H.264 to the New 3DS MVD hardware decoder.
+- Played TVS Turbo for several minutes on real hardware with brief buffering.
 
 ## [0.2.0] - 2026-08-22
 
-- Added bounded HLS playlist parsing, segment staging, and sanitizer-backed
-  host tests.
+- Added bounded HLS parsing, segment staging, and the first host tests.
 
 ## [0.1.0] - 2026-08-22
 
-- Proved networking, MPEG-TS demux, one-frame MVD decoding, and playback of an
-  embedded reference clip on New 3DS hardware.
+- Proved networking, MPEG-TS demux, one-frame MVD decode, and playback of a
+  local reference clip on a New 3DS.
 
 [Unreleased]: https://github.com/mot1us/retrotuner3ds/compare/v0.5.0...HEAD
 [0.5.0]: https://github.com/mot1us/retrotuner3ds/releases/tag/v0.5.0

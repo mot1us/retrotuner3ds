@@ -1,55 +1,58 @@
 # RetroTuner3DS
 
-An experimental low-bitrate M3U/HLS player for the **New Nintendo 3DS**.
-It has only been tested on that model; other 3DS-family systems are unverified.
+RetroTuner3DS started with a simple question: can a New Nintendo 3DS play live
+TV? It turns out it can, as long as the stream is light enough. Give it an M3U
+playlist and it scans for channels the hardware can actually handle.
 
-> [!IMPORTANT]
-> RetroTuner3DS is early homebrew. It works best with low-bitrate H.264/AAC
-> streams at 480p or below. Streams can change or disappear, so an entry that
-> passes the initial scan may still fail during playback.
+This is still an experiment. It has only been tested on a New Nintendo 3DS,
+and some streams will fail even after they pass the first scan. Live channels
+change formats, disappear, and occasionally publish segments that are too much
+for the console.
 
-## Features
+## What works best
 
-- Continuous HLS playback through a bounded 6 MiB compressed-data ring.
-- New 3DS hardware-accelerated H.264 decoding.
-- Fast compatibility scan for up to 64 user-provided channels.
-- Automatic selection of the lowest advertised HLS rendition.
-- Retro dual-screen channel browser and live channel switching.
-- Bounded hardware telemetry for diagnosing buffering and stream failures.
+The sweet spot is H.264 video with AAC audio at 360p and roughly 1 Mbps or
+less. Some 480p streams work too. This is not VLC for the 3DS: the app picks the
+lowest rendition a channel offers, but it cannot turn an HD stream into a cheap
+one on the console.
 
-The most reliable hardware-tested sources are 360p-class H.264/AAC MPEG-TS
-streams below roughly 1 Mbps. RetroTuner3DS does not transcode video.
+RetroTuner3DS currently supports:
+
+- live HLS using MPEG-TS segments;
+- H.264/AVC video and AAC audio;
+- up to 640x480 at a known 30.5 fps or lower;
+- unencrypted streams without byte ranges or fMP4 init maps;
+- playlists with up to 64 channels.
 
 ## Install
 
-1. Copy `retrotuner3ds.3dsx` to:
-   `sd:/3ds/retrotuner3ds/retrotuner3ds.3dsx`
-2. Add your playlist at:
-   `sd:/3ds/retrotuner3ds/channels.m3u`
-3. Launch RetroTuner3DS from the Homebrew Launcher.
+1. Put `retrotuner3ds.3dsx` at
+   `sd:/3ds/retrotuner3ds/retrotuner3ds.3dsx`.
+2. Put your playlist at `sd:/3ds/retrotuner3ds/channels.m3u`.
+3. Open RetroTuner3DS from the Homebrew Launcher.
 
-No channels or stream URLs are included. Users provide their own playlist and
-are responsible for having permission to access its streams.
+No channels or stream URLs are included. Bring your own M3U and make sure you
+have permission to use the streams in it.
 
 ## Controls
 
 | Control | Action |
 | --- | --- |
-| Up / Down | Select a channel |
+| Up / Down | Pick a channel |
 | Left / Right | Change channel-list page |
 | A | Tune or retry |
-| B | Cancel, return to the deck, or toggle the live channel drawer |
+| B | Cancel, go back, or open the channel drawer during playback |
 | L / R | Previous or next channel |
-| Select | Cycle playback diagnostics |
+| Select | Cycle the diagnostic screens |
 | Start | Exit |
 
-The launch scan adds compatible-looking stations as they are discovered. `*`
-means the manifest advertises supported video metadata; `?` means final
-compatibility cannot be known until tuning. `+` marks a station that played in
-the current session and `!` marks a failed startup. Scanning pauses during
-playback so it does not compete with the active stream.
+Channels appear as the opening scan finds them. A `*` means the stream openly
+advertised compatible video details. A `?` means the app needs to tune it
+before it can know for sure. During that session, `+` means a channel played
+and `!` means it failed to start. Nothing is permanently blocked; you can
+always try again.
 
-## Playlist format
+## Playlist example
 
 ```m3u
 #EXTM3U
@@ -57,55 +60,47 @@ playback so it does not compete with the active stream.
 https://example.test/live/index.m3u8
 ```
 
-Extended-M3U `user-agent` and `referrer` attributes are supported for streams
-that legitimately require them.
+Extended-M3U `user-agent` and `referrer` attributes are supported when a
+legitimate stream requires them.
 
-## Stream compatibility
-
-The current player targets:
-
-- live HLS with MPEG-TS segments;
-- H.264/AVC video and AAC audio;
-- unencrypted streams without byte ranges or fMP4 init maps;
-- resolutions up to 640x480 and known frame rates up to 30.5 fps;
-- individual compressed segments no larger than 4 MiB.
-
-The scan is intentionally lightweight: it checks manifests without downloading
-video or starting the decoder. Tuning performs the authoritative codec,
-resolution, segment-size, and hardware checks. Mid-stream format changes are
-handled with a bounded decoder relock or a safe return to the channel deck.
-
-## How it works
+## What the app is doing
 
 ```text
-M3U playlist -> manifest scan -> channel deck
-                                |
-HLS playlist -> lowest compatible rendition
-                                |
-network producer -> bounded ring -> FFmpeg demux/AAC + MVD H.264 -> Citro3D
+M3U playlist -> quick manifest scan -> channel list
+                                      |
+HLS playlist -> lowest safe rendition -> network buffer
+                                      |
+                         FFmpeg + AAC + MVD H.264 -> Citro3D
 ```
 
-The network producer downloads new HLS segments while playback consumes the
-ring. Startup depth and refill behavior adapt from delivery timing observed
-during the current app session. Memory remains bounded, and changing channels
-fully tears down the previous stream and decoder.
+The network thread downloads complete HLS segments into a fixed 6 MiB ring
+while the player reads from the other side. A new channel normally starts with
+two complete segments in reserve. If the same channel is tuned again, the app
+can use what it learned earlier in that session to choose a faster or safer
+starting point.
 
-For technical detail, see [Architecture](docs/ARCHITECTURE.md) and
-[Adaptive buffering](docs/ADAPTIVE_BUFFERING.md).
+The opening scan is deliberately shallow. It reads manifests, not video, so it
+can find stations quickly. The real codec, resolution, segment-size, and MVD
+checks happen when you tune. That is why a channel can appear in the list and
+still fail safely afterward.
+
+The full technical versions live in [Architecture](docs/ARCHITECTURE.md) and
+[Buffering](docs/ADAPTIVE_BUFFERING.md).
 
 ## Telemetry
 
-Diagnostics are written to:
+The app writes diagnostic data to:
 
 ```text
 sd:/3ds/retrotuner3ds/telemetry.csv
 ```
 
-The previous launch is retained as `telemetry-prev.csv`. Logs contain pipeline,
-buffer, timing, relock, underrun, and error data—never stream URLs, video, or
-audio. Logging is capped at 512 KiB and playback continues if logging fails.
+The previous run is kept as `telemetry-prev.csv`. The logs contain timing,
+buffer, decoder, audio, relock, underrun, and error data. They do not contain
+stream URLs, video, or audio. Logging stops at 512 KiB and is never required
+for playback.
 
-## Build and test
+## Building it
 
 Install the devkitPro 3DS toolchain, then run:
 
@@ -114,17 +109,17 @@ make 3dsx -j4
 ./tests/run_live_host_tests.sh
 ```
 
-Development and release details are in [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
-See also [Contributing](CONTRIBUTING.md), [Changelog](CHANGELOG.md), and
-[Roadmap](ROADMAP.md).
+More setup and release notes are in the [development guide](docs/DEVELOPMENT.md).
+You can also read [Contributing](CONTRIBUTING.md), the
+[Changelog](CHANGELOG.md), and the [Roadmap](ROADMAP.md).
 
 ## Safety, credits, and license
 
-RetroTuner3DS is a `.3dsx` homebrew application. It does not modify NAND,
-firmware, boot configuration, Luma configuration, or the title database.
+RetroTuner3DS is a `.3dsx` homebrew app. It does not touch NAND, firmware,
+boot configuration, Luma configuration, or the title database.
 
-It is based on
+The project is built on
 [Video player for 3DS](https://github.com/Core-2-Extreme/Video_player_for_3DS)
-by Core_2_Extreme and is distributed under **GPL-3.0-or-later**. See
-[LICENSE](LICENSE), [Third-party notices](THIRD_PARTY_NOTICES.md), and
-[dependency licenses](LICENSES/README.md).
+by Core_2_Extreme and is released under **GPL-3.0-or-later**. See
+[LICENSE](LICENSE), [Third-party notices](THIRD_PARTY_NOTICES.md), and the
+[bundled dependency licenses](LICENSES/README.md).

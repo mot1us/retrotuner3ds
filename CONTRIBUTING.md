@@ -1,54 +1,54 @@
-# Contributing to RetroTuner3DS
+# Contributing
 
-Thanks for helping make live video on a tiny old handheld a little less
-impossible.
+RetroTuner3DS is a strange little hardware project, so real New 3DS results are
+just as valuable as code. Bug reports, stream compatibility notes, and focused
+pull requests are all welcome.
 
-## Workflow
+## Code changes
 
 1. Fork the repository and branch from `main`.
-2. Use a short branch name such as `fix/rebuffer-loop`,
-   `feature/channel-groups`, or `docs/build-notes`.
-3. Keep commits focused. Preferred subjects are `fix: ...`, `feat: ...`,
-   `docs: ...`, `test: ...`, `build: ...`, or `refactor: ...`.
-4. Run `./tests/run_live_host_tests.sh`.
-5. Build a `.3dsx` when the change touches console code.
-6. Open a pull request and include the hardware and stream test result.
+2. Keep the branch focused: `fix/rebuffer-loop`, `feature/channel-groups`, or
+   something similarly clear.
+3. Run `./tests/run_live_host_tests.sh`.
+4. Build a `.3dsx` if console code changed.
+5. Open a pull request and explain both the desktop and hardware results.
 
-Direct commits to `main` are reserved for repository maintenance. Normal code
-changes should arrive through a pull request, even for maintainers.
+Commit subjects normally start with `fix:`, `feat:`, `docs:`, `test:`,
+`build:`, or `refactor:`. This is a preference, not a reason to reject useful
+work.
 
 ## Hardware reports
 
-Useful reports include:
+Please include what you know:
 
-- exact console model and whether it is a New 3DS-family system;
+- console model;
 - RetroTuner3DS version or commit;
-- stream resolution, bitrate, video/audio codecs, and segment format;
-- approximate time before the problem appeared;
-- buffer, download, underrun, and error values shown by diagnostics;
-- whether the same URL currently plays in VLC.
+- stream resolution, bitrate, codecs, and segment type;
+- time to first frame and time before the problem appeared;
+- whether audio, video, or both failed;
+- whether the same stream currently works in VLC;
+- telemetry or a Luma crash dump when available.
 
-Do not post private credentials, subscription URLs, access tokens, or logs that
-contain them. Prefer a public test stream when reproducing a bug.
+Do not post subscription URLs, credentials, access tokens, or private logs.
+Public test streams are best when somebody else needs to reproduce the issue.
 
-## Compatibility changes
+## Safety changes
 
-The player intentionally rejects HLS features it cannot safely bound yet.
-Changes involving encryption, byte ranges, fMP4, discontinuities, redirects,
-or memory limits need tests for both success and cleanup paths.
+The player rejects HLS layouts it cannot bound safely. Changes involving
+encryption, byte ranges, fMP4, discontinuities, format changes, decoder reuse,
+or memory limits need tests for the failure and cleanup paths—not only the happy
+path.
 
-## Release checklist
+## Before a release
 
 - Host sanitizer tests pass.
 - A clean devkitARM build succeeds.
-- The release candidate is tested on real New 3DS hardware.
-- `CHANGELOG.md` and the version string are updated.
-- `LICENSES/README.md` and retained license texts match every vendored
-  dependency revision.
-- The `.3dsx` checksum is recorded.
-- The release is tagged `vMAJOR.MINOR.PATCH` and uploaded as a GitHub Release.
+- The candidate is tested on a real New 3DS.
+- The version and changelog are current.
+- Bundled dependency notices still match the shipped libraries.
+- The `.3dsx` and release ZIP have SHA-256 checksums.
+- No playlist, stream URL, private media, or generated build file is tracked.
 
 ## License
 
-By contributing, you agree that your contribution is distributed under the
-project's GPL-3.0-or-later license.
+Contributions are distributed under the project's GPL-3.0-or-later license.

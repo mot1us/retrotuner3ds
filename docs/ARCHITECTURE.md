@@ -1,128 +1,137 @@
 # Architecture
 
-RetroTuner3DS combines a small live-stream front end with the proven decoder and
-renderer from Video player for 3DS.
+This page is the technical tour of RetroTuner3DS: where a channel goes after
+you press `A`, how the buffer is kept inside a hard memory limit, and where the
+player decides to give up instead of risking the console.
 
-## Control path
+## The short version
 
-`live_app.c` owns separate source and discovered channel decks. A sequential
-scanner reads only HLS manifests, adds compatible or metadata-unknown live
-stations to the discovered deck, and hands a selected station to the tuning
-worker. The scanner is canceled and joined before tuning; it resumes only
-after playback has fully returned to the deck. This preserves a single owner
-for the persistent curl handle and avoids competing for the New 3DS Wi-Fi
-connection. The app also detects the player's return and tears down the live
-session before another channel is selected.
+```text
+channels.m3u
+    -> manifest-only scan
+    -> discovered channel list
+    -> HLS rendition selection
+    -> complete MPEG-TS segments
+    -> 6 MiB compressed-data ring
+    -> FFmpeg demux and AAC decode
+    -> New 3DS MVD H.264 decode
+    -> Citro3D top-screen output
+```
 
-## HLS path
+The network producer and media player run separately. The ring between them
+absorbs ordinary Wi-Fi and HLS timing swings without letting a stream consume
+unbounded memory.
 
-1. `playlist.c` parses at most 64 M3U entries with bounded names and URLs.
-2. `network.c` performs bounded HTTP(S) requests with TLS verification,
-   redirects, timeouts, and response-size caps.
-3. `hls.c` parses master and media playlists, including advertised resolution
-   and frame rate, and resolves relative URLs. `channel_scan.c` classifies
-   these manifests without downloading media segments.
-4. `live_stream.c` selects the lowest advertised rendition and downloads live
-   MPEG-TS segments on a producer thread. Initial tuning passes its already
-   parsed media playlist to that producer, avoiding an immediate duplicate
-   manifest request. Four successful master selections are cached for 60
-   seconds; a hit skips only the root request and still refreshes the media
-   playlist before staging playback data.
-5. Each segment is first capped and staged in a 4 MiB ordinary-RAM buffer. Only
-   a complete, validated MPEG-TS response is committed to playback.
-6. If the selected master declares a separate audio rendition, matching
-   video/audio segments are aligned by `EXT-X-PROGRAM-DATE-TIME`. A bounded TS
-   combiner adds the AAC elementary stream to the video program map and
-   interleaves remapped audio packets. Layouts that cannot be combined safely
-   are rejected before FFmpeg sees them.
-7. A static 6 MiB BSS ring separates network timing from playback while
-   avoiding scarce linear memory.
-8. A custom FFmpeg input bridge exposes the ring as a streaming media source.
+## Finding channels
 
-An observation-only shadow controller samples complete segment delivery and
-actual ring underruns. It derives integer EWMAs for content rate, network
-headroom, delivery gaps, and gap deviation, then reports a desired reserve and
-live-edge lag. The controller owns no pointers and cannot change playback in
-rc9.7; its state is discarded with the existing stream teardown.
+`live_app.c` owns two lists: everything parsed from the user's M3U and the
+smaller list shown on screen. The scanner checks channels one at a time and
+adds anything that is clearly compatible or cannot yet be ruled out.
 
-The app/draw owner samples that snapshot, never the network or decoder hot
-paths. A small CSV logger buffers 8 KiB in ordinary RAM, uses dense startup and
-sparse steady-state sampling, flushes every ten seconds and on important
-events, and stops at 512 KiB. The current file contains channel names and
-measurements but no URLs or media payloads; the previous launch is rotated to
-`telemetry-prev.csv`. Logging failure is non-fatal and cannot alter stream
-state.
+The scan only downloads manifests. It does not fetch video, open FFmpeg, or
+start MVD. That keeps startup quick, but it also means a `?` channel can still
+fail when the first real segment is inspected.
 
-## Playback path
+Scanning stops before a tune begins and resumes after playback returns to the
+deck. This gives the active channel the New 3DS Wi-Fi connection and keeps one
+clear owner for the persistent curl handle.
 
-FFmpeg demuxes MPEG-TS and AAC. Compatible H.264 packets are normalized by
-`h264_annexb.c` and submitted to the New 3DS MVD hardware decoder as complete
-access units. The inherited player uploads decoded frames through the existing
-Citro3D rendering path and uses the existing audio output path.
+## Tuning and HLS
 
-For a live source, the first decoded video frame establishes the video clock
-before normal A/V catch-up dropping begins. This is necessary because MPEG-TS
-audio and video can arrive with large absolute presentation timestamps; there
-is no valid relative drift calculation until both playback clocks have a
-baseline.
+The path is split across a few small pieces:
 
-RetroTuner3DS scales decoded images for the 400x240 top display, but it does not
-transcode the source. Decode cost therefore still depends on the original
-resolution, profile, frame rate, and bitrate.
+1. `playlist.c` reads up to 64 bounded M3U entries.
+2. `network.c` handles HTTP(S), TLS verification, redirects, cancellation,
+   timeouts, and response-size limits.
+3. `hls.c` parses master and media playlists and resolves relative URLs.
+4. `channel_scan.c` performs the cheap manifest-only compatibility check.
+5. `live_stream.c` selects the lowest advertised rendition and starts the
+   segment producer.
 
-## Memory and failure boundaries
+A successful master selection can be cached for 60 seconds. A cache hit skips
+one root-manifest request, but the media playlist is always refreshed before
+playback starts.
 
-- Stream ring: 6 MiB in ordinary application BSS.
-- Manifest and segment requests have fixed maximum sizes. Video and combined
-  segments use a 4 MiB ceiling; a separate audio segment uses a 1 MiB staging
-  ceiling plus a bounded 4 MiB combine scratch area in ordinary BSS. Failures
-  report received size, server length when known, and the cap without logging
-  the channel URL.
-- Live MVD input is restricted to one H.264/YUV420P track at no more than
-  640x480 and, when reported, no more than 30.5 fps. Unsupported sources fail
-  before `mvdstdInit`.
-- Invalid physical buffers and fatal MVD results trigger serialized teardown.
-  Render waits are bounded, and MVD-registered output surfaces remain allocated
-  until the decoder service exits.
-- The producer pauses at a high-water mark. Cold tunes stage two complete
-  segments; proven healthy warm profiles may stage one. Playback only enters
-  its bounded refill after the network ring actually runs empty.
-- Encrypted, byte-range, and fMP4 playlists are rejected before handoff.
-  Explicit discontinuities, playlist regressions, and detected format changes
-  stop the producer/player before changed media reaches the decoder. The app
-  may perform two bounded clean relocks after full FFmpeg/MVD teardown. An
-  ordinary forward media-sequence gap is treated as a recoverable live-window
-  resynchronization and logged.
-- An established stream may skip at most two consecutive segments above the
-  4 MiB atomic ceiling. A third remains terminal; the ceiling never grows.
-- Stop and channel-change paths request producer cancellation, join the thread,
-  close FFmpeg/MVD resources, and reset the ring.
+Every media segment is downloaded into a 4 MiB staging buffer first. It enters
+the ring only after the request finishes and the MPEG-TS data passes validation.
+FFmpeg never sees a partial download.
 
-## Startup diagnostics
+Some HLS feeds publish video and AAC audio as separate MPEG-TS renditions. If
+their program times line up, `ts_mux.c` combines them into one bounded transport
+stream. If they cannot be matched safely, the channel is rejected.
 
-The tuning UI reports the current startup phase and elapsed time across root
-manifest fetch, optional media-manifest selection, initial complete-segment
-staging, FFmpeg probing, MVD initialization, and first-frame presentation.
-These timings describe where startup latency occurred; they do not bypass the
-whole-segment handoff, memory caps, codec preflight, or serialized teardown
-boundaries above.
+## Playback
 
-During player startup, the live overlay also reports video packets accepted by
-the decoder, MVD output frames, uploaded textures, actual draw completion,
-audio demux/frame/output flow, and producer state. Player open, MVD init, and
-first-frame phases have separate bounded waits. Their timeout path uses the
-ordinary worker-owned abort sequence; it never frees MVD surfaces from the draw
-thread.
+FFmpeg reads the ring through a custom streaming input bridge. It demuxes the
+transport stream and decodes AAC audio. H.264 packets are normalized into
+complete Annex B access units by `h264_annexb.c`, then sent to Nintendo's MVD
+hardware decoder.
 
-After the first frame, `SELECT` cycles a shadow-buffer page, the pipeline page,
-and a clean view. `SHADOW` values are recommendations for later hardware-tested
-releases, not active settings.
+The first presented video frame becomes the live A/V clock baseline. Broadcast
+streams often arrive with large, unrelated absolute timestamps; treating those
+as normal relative playback time can make the player drop every frame after
+the first one.
+
+Decoded video is drawn through the inherited Citro3D renderer. Scaling a frame
+to 400x240 only changes how it is displayed. It does not make a 720p or 1080p
+source cheaper to decode, which is why the source limits matter.
+
+## Buffering
+
+The compressed-data ring is a static 6 MiB block in ordinary application
+memory. It is not linear video memory and it never grows.
+
+A cold tune normally stages two complete segments. The app measures segment
+duration, download time, delivery gaps, jitter, and actual empty-ring
+underruns. Up to 32 channel profiles are kept in memory for the current app
+session. On a later tune, a healthy channel may use a faster one-segment start;
+a marginal channel can begin farther behind the live edge.
+
+If playback truly empties the ring, recovery waits for one complete segment.
+A repeated underrun within 90 seconds asks for a deeper reserve, but the wait
+and target are both bounded. More detail is in [Buffering](ADAPTIVE_BUFFERING.md).
+
+## Format changes and safe failure
+
+Live feeds are not as fixed as local files. A broadcaster can skip forward,
+insert a discontinuity, change H.264 parameters, or replace the stream while
+the app is already decoding it.
+
+RetroTuner3DS does not feed changed media into the active MVD session. Sequence
+gaps, playlist regressions, explicit discontinuities, and unsafe H.264 parameter
+changes end the current decoder session. The app may make up to two clean relock
+attempts after FFmpeg and MVD are fully torn down.
+
+An established stream may skip at most two oversized segments. A third is a
+hard failure. These limits are intentionally conservative; returning to the
+channel deck is better than reusing the decoder in an unknown state.
+
+## Memory and ownership rules
+
+- Compressed ring: 6 MiB in ordinary BSS.
+- Video or combined segment staging: 4 MiB maximum.
+- Separate audio segment staging: 1 MiB maximum.
+- Combined A/V scratch space: 4 MiB in ordinary BSS.
+- Video: one H.264/YUV420P track, at most 640x480 and a known 30.5 fps.
+- One producer, one FFmpeg consumer, and one MVD instance at a time.
+
+Stopping or changing a channel always follows the same order: cancel the
+producer, join its thread, close FFmpeg and MVD, then reset the ring. MVD output
+surfaces stay allocated until the decoder service has actually exited.
+
+## Telemetry
+
+The UI reads copied snapshots rather than touching the network or decoder hot
+paths. `telemetry_log.c` buffers a small CSV in ordinary RAM, writes frequently
+during startup, slows down during steady playback, and stops at 512 KiB.
+
+The log includes channel names and numeric measurements, but never URLs or
+media. A logging failure is non-fatal. The previous run is rotated to
+`telemetry-prev.csv` so one accidental relaunch does not erase the useful test.
 
 ## Tests
 
-Host tests exercise HLS parsing/staging, bounded MPEG-TS audio/video program
-combining, H.264 Annex B normalization, the integer shadow-buffer controller,
-and the bounded CSV logger under AddressSanitizer and UndefinedBehaviorSanitizer.
-Console integration still requires a real New 3DS-family device because MVD
-behavior cannot be faithfully validated by ordinary desktop tests or current
-emulators.
+Desktop sanitizer tests cover playlist and HLS parsing, URL resolution, MPEG-TS
+combining, H.264 normalization, buffer decisions, network limits, and telemetry.
+The final playback path still needs a real New 3DS because ordinary desktop
+tests and current emulators cannot reproduce Nintendo's MVD behavior.
