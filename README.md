@@ -1,8 +1,7 @@
 # RetroTuner3DS
 
-RetroTuner3DS started with a simple question: can a New Nintendo 3DS play live
-TV? It turns out it can, as long as the stream is light enough. Give it an M3U
-playlist and it scans for channels the hardware can actually handle.
+RetroTuner3DS is a low-bitrate M3U/HLS stream player for the New Nintendo 3DS.
+Add an M3U playlist and it scans for compatible channels.
 
 This is still an experiment. It has only been tested on a New Nintendo 3DS,
 and some streams will fail even after they pass the first scan. Live channels
@@ -12,9 +11,8 @@ for the console.
 ## What works best
 
 The sweet spot is H.264 video with AAC audio at 360p and roughly 1 Mbps or
-less. Some 480p streams work too. This is not VLC for the 3DS: the app picks the
-lowest rendition a channel offers, but it cannot turn an HD stream into a cheap
-one on the console.
+less. Some 480p streams work too. The app selects the lowest rendition a
+channel offers, but it does not transcode HD streams.
 
 RetroTuner3DS currently supports:
 
