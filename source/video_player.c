@@ -84,6 +84,9 @@
 #define DEBUG_GRAPH_TEMP_ELEMENTS					(uint16_t)(32)							//Number of temp elements for multi-threaded decoding.
 
 #define QUEUE_OP_TIMEOUT_US							(uint64_t)(DEF_UTIL_MS_TO_US(100))		//Queue operation timeout in us.
+#define VID_INIT_WAIT_TIMEOUT_MS					(uint64_t)(15000)
+#define VID_WORKER_ABORT_TIMEOUT_MS				(uint64_t)(5000)
+#define VID_THREAD_GROUP_JOIN_TIMEOUT_NS			(uint64_t)(DEF_THREAD_WAIT_TIME * 5u)
 
 #define TOP_SCREEN_WIDTH							(uint16_t)(400)							//Top screen width in px.
 #define TOP_SCREEN_HEIGHT							(uint16_t)(240)							//Top screen height in px.
@@ -777,6 +780,9 @@ static uint8_t Vid_get_default_num_of_threads(void);
 static uint32_t Vid_load_settings(void);
 static uint32_t Vid_save_settings(void);
 static void Vid_log_settings(void);
+static bool Vid_abort_worker(Queue_data* queue, Vid_command request,
+	Vid_notification expected);
+static bool Vid_join_thread_handle(Thread* handle, uint64_t timeout_ns);
 //Removed static from these functions because they are implementation for weak functions.
 void frame_worker_thread_start(const void* ptr);
 void frame_worker_thread_end(const void* ptr);
@@ -797,6 +803,8 @@ static Str_data vid_msg[MSG_MAX] = { 0, };
 static Vid_player vid_player = { 0, };
 static bool vid_embedded_test_mode = false;
 static bool vid_embedded_exit_requested = false;
+static bool vid_init_failed = false;
+static bool vid_cleanup_safe = true;
 static Vid_idle_hid_hook vid_idle_hid_hook = NULL;
 static Vid_idle_draw_hook vid_idle_draw_hook = NULL;
 static Vid_init_draw_hook vid_init_draw_hook = NULL;
@@ -820,6 +828,55 @@ static uint16_t vid_miniptv_audio_meter_display = 0;
 
 static void Vid_reset_live_diagnostics(void);
 static void Vid_check_live_startup_timeout(void);
+
+static bool Vid_abort_worker(Queue_data* queue, Vid_command request,
+	Vid_notification expected)
+{
+	uint32_t result = Util_queue_add(queue, request, NULL,
+		QUEUE_OP_TIMEOUT_US, QUEUE_OPTION_SEND_TO_FRONT);
+	uint64_t deadline = osGetTime() + VID_WORKER_ABORT_TIMEOUT_MS;
+
+	if(result != DEF_SUCCESS)
+	{
+		DEF_LOG_RESULT(Util_queue_add, false, result);
+		return false;
+	}
+
+	while(osGetTime() < deadline)
+	{
+		Vid_notification notification = NONE_NOTIFICATION;
+
+		result = Util_queue_get(&vid_player.decode_thread_notification_queue,
+			(uint32_t*)&notification, NULL, QUEUE_OP_TIMEOUT_US);
+		if(result == DEF_SUCCESS && notification == expected)
+			return true;
+	}
+
+	DEF_LOG_STRING("Timed out while aborting a video worker thread.");
+	return false;
+}
+
+static bool Vid_join_thread_handle(Thread* handle, uint64_t timeout_ns)
+{
+	uint32_t result = DEF_SUCCESS;
+
+	if(!handle || !*handle)
+		return true;
+
+	result = threadJoin(*handle, timeout_ns);
+	if(result == DEF_SUCCESS)
+	{
+		threadFree(*handle);
+		*handle = NULL;
+	}
+	else
+	{
+		DEF_LOG_RESULT(threadJoin, false, result);
+		/* Keep the handle and every object it can still reach. Detaching and then
+		 * freeing shared queues/services turns a recoverable timeout into a UAF. */
+	}
+	return result == DEF_SUCCESS;
+}
 
 static void Vid_draw_miniiptv_top_bar(void)
 {
@@ -1261,12 +1318,17 @@ static void Vid_draw_miniiptv_live_overlay(const Sem_state* system_state)
 //Code.
 bool Vid_query_init_flag(void)
 {
-	return vid_player.inited;
+	return __atomic_load_n(&vid_player.inited, __ATOMIC_ACQUIRE);
 }
 
 bool Vid_query_running_flag(void)
 {
 	return __atomic_load_n(&vid_player.main_run, __ATOMIC_ACQUIRE);
+}
+
+bool Vid_query_cleanup_safe(void)
+{
+	return __atomic_load_n(&vid_cleanup_safe, __ATOMIC_ACQUIRE);
 }
 
 void Vid_hid(const Hid_info* key)
@@ -2290,11 +2352,15 @@ uint32_t Vid_load_msg(const char* lang)
 void Vid_init(bool draw)
 {
 	DEF_LOG_STRING("Initializing...");
+	bool init_thread_joined = false;
 	uint32_t result = DEF_ERR_OTHER;
+	uint64_t init_deadline = osGetTime() + VID_INIT_WAIT_TIMEOUT_MS;
 	Sem_state state = { 0, };
 
 	//Reset everything first.
 	memset(&vid_player, 0x00, sizeof(Vid_player));
+	__atomic_store_n(&vid_init_failed, false, __ATOMIC_RELEASE);
+	__atomic_store_n(&vid_cleanup_safe, true, __ATOMIC_RELEASE);
 
 	Sem_get_state(&state);
 	DEF_LOG_RESULT_SMART(result, Util_str_init(&vid_player.status), (result == DEF_SUCCESS), result);
@@ -2313,7 +2379,15 @@ void Vid_init(bool draw)
 		vid_player.init_thread = threadCreate(Vid_init_thread, NULL, DEF_THREAD_STACKSIZE, DEF_THREAD_PRIORITY_NORMAL, 1, false);
 	}
 
-	while(!vid_player.inited)
+	if(!vid_player.init_thread)
+	{
+		DEF_LOG_STRING("Failed to create video-player init thread.");
+		__atomic_store_n(&vid_init_failed, true, __ATOMIC_RELEASE);
+	}
+
+	while(!__atomic_load_n(&vid_player.inited, __ATOMIC_ACQUIRE)
+	&& !__atomic_load_n(&vid_init_failed, __ATOMIC_ACQUIRE)
+	&& osGetTime() < init_deadline)
 	{
 		if(draw)
 			Vid_draw_init_exit_message();
@@ -2325,12 +2399,39 @@ void Vid_init(bool draw)
 		else
 			Util_sleep(20000);
 	}
+	if(!__atomic_load_n(&vid_player.inited, __ATOMIC_ACQUIRE)
+	&& !__atomic_load_n(&vid_init_failed, __ATOMIC_ACQUIRE))
+	{
+		DEF_LOG_STRING("Video-player initialization timed out.");
+		vid_player.thread_run = false;
+		vid_player.thread_suspend = false;
+		__atomic_store_n(&vid_init_failed, true, __ATOMIC_RELEASE);
+	}
 
 	if(!DEF_SEM_MODEL_IS_NEW(state.console_model) || !Util_is_core_available(2))
 		APT_SetAppCpuTimeLimit(10);
 
-	DEF_LOG_RESULT_SMART(result, threadJoin(vid_player.init_thread, DEF_THREAD_WAIT_TIME), (result == DEF_SUCCESS), result);
-	threadFree(vid_player.init_thread);
+	init_thread_joined = Vid_join_thread_handle(&vid_player.init_thread,
+		VID_THREAD_GROUP_JOIN_TIMEOUT_NS);
+	if(!init_thread_joined)
+	{
+		__atomic_store_n(&vid_init_failed, true, __ATOMIC_RELEASE);
+		__atomic_store_n(&vid_cleanup_safe, false, __ATOMIC_RELEASE);
+	}
+
+	if(!__atomic_load_n(&vid_player.inited, __ATOMIC_ACQUIRE)
+	|| __atomic_load_n(&vid_init_failed, __ATOMIC_ACQUIRE))
+	{
+		if(init_thread_joined)
+		{
+			Util_watch_remove(WATCH_HANDLE_VIDEO_PLAYER,
+				&vid_player.status.sequential_id);
+			Util_str_free(&vid_player.status);
+		}
+		Draw_set_refresh_needed(true);
+		DEF_LOG_STRING("Video-player initialization failed.");
+		return;
+	}
 
 	Util_str_clear(&vid_player.status);
 	Vid_resume();
@@ -2565,16 +2666,26 @@ static void Vid_check_live_startup_timeout(void)
 void Vid_exit(bool draw)
 {
 	DEF_LOG_STRING("Exiting...");
-	uint32_t result = DEF_ERR_OTHER;
-	uint64_t join_timeout = vid_embedded_test_mode ? UINT64_MAX
-		: DEF_THREAD_WAIT_TIME;
+	bool exit_thread_joined = false;
+	uint64_t exit_deadline = osGetTime()
+		+ DEF_UTIL_US_TO_MS(DEF_THREAD_WAIT_TIME / 1000);
 
 	/* Stop the global HID dispatcher before exit tears down queues, sync
 	 * objects, and textures used by Vid_hid(). */
 	__atomic_store_n(&vid_player.main_run, false, __ATOMIC_RELEASE);
+	__atomic_store_n(&vid_cleanup_safe, true, __ATOMIC_RELEASE);
 	vid_player.exit_thread = threadCreate(Vid_exit_thread, NULL, DEF_THREAD_STACKSIZE, DEF_THREAD_PRIORITY_NORMAL, 1, false);
+	if(!vid_player.exit_thread)
+	{
+		DEF_LOG_STRING("Failed to create video-player exit thread.");
+		vid_player.thread_run = false;
+		vid_player.thread_suspend = false;
+		__atomic_store_n(&vid_cleanup_safe, false, __ATOMIC_RELEASE);
+		return;
+	}
 
-	while(vid_player.inited)
+	while(__atomic_load_n(&vid_player.inited, __ATOMIC_ACQUIRE)
+	&& osGetTime() < exit_deadline)
 	{
 		if(draw)
 			Vid_draw_init_exit_message();
@@ -2582,8 +2693,15 @@ void Vid_exit(bool draw)
 			Util_sleep(20000);
 	}
 
-	DEF_LOG_RESULT_SMART(result, threadJoin(vid_player.exit_thread, join_timeout), (result == DEF_SUCCESS), result);
-	threadFree(vid_player.exit_thread);
+	exit_thread_joined = Vid_join_thread_handle(&vid_player.exit_thread,
+		VID_THREAD_GROUP_JOIN_TIMEOUT_NS);
+	if(!exit_thread_joined
+	|| !__atomic_load_n(&vid_cleanup_safe, __ATOMIC_ACQUIRE))
+	{
+		__atomic_store_n(&vid_cleanup_safe, false, __ATOMIC_RELEASE);
+		DEF_LOG_STRING("Video-player exit was incomplete; retaining owned state.");
+		return;
+	}
 
 	Util_watch_remove(WATCH_HANDLE_VIDEO_PLAYER, &vid_player.status.sequential_id);
 	Util_str_free(&vid_player.status);
@@ -3090,14 +3208,6 @@ void Vid_main(void)
 			}
 			else
 			{
-				Draw_image_data banner = { .c2d = vid_player.banner[config.is_night], };
-				//Put it in center.
-				double temp_x = (((double)NON_FULL_SCREEN_WIDTH - banner.c2d.subtex->width) / 2);
-				double temp_y = (((double)NON_FULL_SCREEN_HEIGHT - banner.c2d.subtex->height) / 2);
-
-				temp_y += (TOP_SCREEN_HEIGHT - NON_FULL_SCREEN_HEIGHT);
-				Draw_texture(&banner, DEF_DRAW_NO_COLOR, temp_x, temp_y, banner.c2d.subtex->width, banner.c2d.subtex->height);
-
 				if(vid_idle_draw_hook)
 					vid_idle_draw_hook(true, color, back_color);
 				else if(vid_embedded_test_mode)
@@ -3107,13 +3217,28 @@ void Vid_main(void)
 					Draw_align_c("A: play/pause   B: stop   START: exit", 0, 205, 0.5f, color,
 					DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, TOP_SCREEN_WIDTH, 20);
 				}
+				else
+				{
+					Draw_image_data banner = { .c2d = vid_player.banner[config.is_night], };
+					//Put it in center.
+					double temp_x = (((double)NON_FULL_SCREEN_WIDTH - banner.c2d.subtex->width) / 2);
+					double temp_y = (((double)NON_FULL_SCREEN_HEIGHT - banner.c2d.subtex->height) / 2);
+
+					temp_y += (TOP_SCREEN_HEIGHT - NON_FULL_SCREEN_HEIGHT);
+					Draw_texture(&banner, DEF_DRAW_NO_COLOR, temp_x, temp_y, banner.c2d.subtex->width, banner.c2d.subtex->height);
+				}
 			}
 
-			if(vid_player.is_full_screen && vid_player.turn_off_bottom_screen_count > 0 && vid_player.show_full_screen_msg)
+			/* RetroTuner owns its on-screen status. Do not build or draw the
+			 * inherited player's brightness, seek, debug and performance overlays
+			 * underneath it. */
+			if(!vid_embedded_test_mode)
 			{
-				//Display exit full-screen message.
-				Util_str_add(&top_center_msg, vid_msg[MSG_FULL_SCREEN].buffer);
-			}
+				if(vid_player.is_full_screen && vid_player.turn_off_bottom_screen_count > 0 && vid_player.show_full_screen_msg)
+				{
+					//Display exit full-screen message.
+					Util_str_add(&top_center_msg, vid_msg[MSG_FULL_SCREEN].buffer);
+				}
 
 			if(vid_player.show_screen_brightness_until >= current_ts)
 			{
@@ -3198,6 +3323,7 @@ void Vid_main(void)
 
 			if(Util_ram_usage_query_show_flag())
 				Util_ram_usage_draw();
+			}
 
 			if(Draw_is_3d_mode())
 			{
@@ -3245,52 +3371,57 @@ void Vid_main(void)
 				}
 				else
 				{
-					Draw_image_data banner = { .c2d = vid_player.banner[config.is_night], };
-					//Put it in center.
-					double temp_x = (((double)NON_FULL_SCREEN_WIDTH - banner.c2d.subtex->width) / 2);
-					double temp_y = (((double)NON_FULL_SCREEN_HEIGHT - banner.c2d.subtex->height) / 2);
+					if(vid_idle_draw_hook)
+						vid_idle_draw_hook(true, color, back_color);
+					else if(!vid_embedded_test_mode)
+					{
+						Draw_image_data banner = { .c2d = vid_player.banner[config.is_night], };
+						//Put it in center.
+						double temp_x = (((double)NON_FULL_SCREEN_WIDTH - banner.c2d.subtex->width) / 2);
+						double temp_y = (((double)NON_FULL_SCREEN_HEIGHT - banner.c2d.subtex->height) / 2);
 
-					temp_y += (TOP_SCREEN_HEIGHT - NON_FULL_SCREEN_HEIGHT);
-					Draw_texture(&banner, DEF_DRAW_NO_COLOR, temp_x, temp_y, banner.c2d.subtex->width, banner.c2d.subtex->height);
+						temp_y += (TOP_SCREEN_HEIGHT - NON_FULL_SCREEN_HEIGHT);
+						Draw_texture(&banner, DEF_DRAW_NO_COLOR, temp_x, temp_y, banner.c2d.subtex->width, banner.c2d.subtex->height);
+					}
 				}
 
-				if(Util_str_has_data(&top_center_msg))
+				if(!vid_embedded_test_mode && Util_str_has_data(&top_center_msg))
 				{
 					Draw_with_background(&top_center_msg, 0, 20, FONT_SIZE_OSD, DEF_DRAW_WHITE, DRAW_X_ALIGN_CENTER,
 					DRAW_Y_ALIGN_CENTER, 400, 30, DRAW_BACKGROUND_UNDER_TEXT, &background, 0xA0000000);
 				}
 
-				if(Util_str_has_data(&bottom_left_msg))
+				if(!vid_embedded_test_mode && Util_str_has_data(&bottom_left_msg))
 				{
 					Draw_with_background(&bottom_left_msg, 0, 200, FONT_SIZE_OSD, DEF_DRAW_WHITE, DRAW_X_ALIGN_LEFT,
 					DRAW_Y_ALIGN_BOTTOM, 400, 40, DRAW_BACKGROUND_UNDER_TEXT, &background, 0xA0000000);
 				}
 
-				if(Util_str_has_data(&bottom_center_msg))
+				if(!vid_embedded_test_mode && Util_str_has_data(&bottom_center_msg))
 				{
 					Draw_with_background(&bottom_center_msg, 0, 200, FONT_SIZE_OSD, DEF_DRAW_WHITE, DRAW_X_ALIGN_CENTER,
 					DRAW_Y_ALIGN_BOTTOM, 400, 40, DRAW_BACKGROUND_UNDER_TEXT, &background, 0xA0000000);
 				}
 
-				if(Util_log_query_show_flag())
+				if(!vid_embedded_test_mode && Util_log_query_show_flag())
 					Util_log_draw();
 
-				if(config.is_debug)
+				if(!vid_embedded_test_mode && config.is_debug)
 					Draw_debug_info(config.is_night, state.free_ram, state.free_linear_ram);
 
-				if(Util_cpu_usage_query_show_flag())
+				if(!vid_embedded_test_mode && Util_cpu_usage_query_show_flag())
 					Util_cpu_usage_draw();
 
-				if(Util_gpu_usage_query_show_flag())
+				if(!vid_embedded_test_mode && Util_gpu_usage_query_show_flag())
 					Util_gpu_usage_draw();
 
-				if(Util_net_usage_query_show_flag())
+				if(!vid_embedded_test_mode && Util_net_usage_query_show_flag())
 					Util_net_usage_draw();
 
-				if(Util_nvs_usage_query_show_flag())
+				if(!vid_embedded_test_mode && Util_nvs_usage_query_show_flag())
 					Util_nvs_usage_draw();
 
-				if(Util_ram_usage_query_show_flag())
+				if(!vid_embedded_test_mode && Util_ram_usage_query_show_flag())
 					Util_ram_usage_draw();
 			}
 
@@ -3308,6 +3439,27 @@ void Vid_main(void)
 				double current_bar_pos = 0;
 
 				Draw_screen_ready(DRAW_SCREEN_BOTTOM, back_color);
+				if(vid_embedded_test_mode)
+				{
+					/* Standalone mode draws only RetroTuner's deck/diagnostics. The
+					 * former path rendered the entire inherited player UI first and
+					 * immediately painted over it. */
+					if(vid_player.state == PLAYER_STATE_IDLE && vid_idle_draw_hook)
+						vid_idle_draw_hook(false, color, back_color);
+					else if(miniiptv_live_stream_is_active())
+					{
+						if(vid_miniptv_channel_drawer_open
+						&& vid_live_drawer_draw_hook)
+							vid_live_drawer_draw_hook(color, back_color);
+						else
+							Vid_draw_miniiptv_live_overlay(&state);
+					}
+
+					if(Util_err_query_show_flag())
+						Util_err_draw();
+				}
+				else
+				{
 				Draw_c(DEF_VID_VER, 0, 0, FONT_SIZE_VER, DEF_DRAW_GREEN);
 
 				//Draw audio, video and subtitle codec info.
@@ -4152,23 +4304,12 @@ void Vid_main(void)
 				if(Util_expl_query_show_flag())
 					Util_expl_draw();
 
-				if(vid_player.state == PLAYER_STATE_IDLE && vid_idle_draw_hook)
-					vid_idle_draw_hook(false, color, back_color);
-				else if(miniiptv_live_stream_is_active())
-				{
-					if(vid_miniptv_channel_drawer_open
-					&& vid_live_drawer_draw_hook)
-						vid_live_drawer_draw_hook(color, back_color);
-					else
-						Vid_draw_miniiptv_live_overlay(&state);
-				}
-
-				//Dialogs must be drawn after the custom idle screen so they remain visible.
+				//Dialogs must be drawn after the inherited screen so they remain visible.
 				if(Util_err_query_show_flag())
 					Util_err_draw();
 
-				if(!vid_embedded_test_mode)
-					Draw_bot_ui();
+				Draw_bot_ui();
+				}
 			}
 		}
 
@@ -5392,6 +5533,10 @@ void Vid_init_thread(void* arg)
 {
 	(void)arg;
 	DEF_LOG_STRING("Thread started.");
+	bool delay_sync_ready = false;
+	bool queues_ready = true;
+	bool texture_sync_ready = false;
+	bool workers_joined = true;
 	uint32_t result = DEF_ERR_OTHER;
 	Sem_state state = { 0, };
 
@@ -5401,8 +5546,18 @@ void Vid_init_thread(void* arg)
 	Vid_init_variable();
 	Vid_exit_full_screen();
 
-	DEF_LOG_RESULT_SMART(result, Util_sync_create(&vid_player.texture_init_free_lock, SYNC_TYPE_NON_RECURSIVE_MUTEX), (result == DEF_SUCCESS), result);
-	DEF_LOG_RESULT_SMART(result, Util_sync_create(&vid_player.delay_update_lock, SYNC_TYPE_NON_RECURSIVE_MUTEX), (result == DEF_SUCCESS), result);
+	result = Util_sync_create(&vid_player.texture_init_free_lock,
+		SYNC_TYPE_NON_RECURSIVE_MUTEX);
+	texture_sync_ready = result == DEF_SUCCESS;
+	if(!texture_sync_ready)
+		DEF_LOG_RESULT(Util_sync_create, false, result);
+	result = Util_sync_create(&vid_player.delay_update_lock,
+		SYNC_TYPE_NON_RECURSIVE_MUTEX);
+	delay_sync_ready = result == DEF_SUCCESS;
+	if(!delay_sync_ready)
+		DEF_LOG_RESULT(Util_sync_create, false, result);
+	if(!texture_sync_ready || !delay_sync_ready)
+		goto init_failed;
 
 	vid_player.banner_texture_handle = UINT32_MAX;
 	vid_player.control_texture_handle = UINT32_MAX;
@@ -5533,24 +5688,68 @@ void Vid_init_thread(void* arg)
 	}
 
 	Util_str_add(&vid_player.status, "\nInitializing queue...");
-	DEF_LOG_RESULT_SMART(result, Util_queue_create(&vid_player.decode_thread_command_queue, 200), (result == DEF_SUCCESS), result);
-	DEF_LOG_RESULT_SMART(result, Util_queue_create(&vid_player.decode_thread_notification_queue, 100), (result == DEF_SUCCESS), result);
-	DEF_LOG_RESULT_SMART(result, Util_queue_create(&vid_player.read_packet_thread_command_queue, 200), (result == DEF_SUCCESS), result);
-	DEF_LOG_RESULT_SMART(result, Util_queue_create(&vid_player.decode_video_thread_command_queue, 200), (result == DEF_SUCCESS), result);
-	DEF_LOG_RESULT_SMART(result, Util_queue_create(&vid_player.convert_thread_command_queue, 200), (result == DEF_SUCCESS), result);
+	result = Util_queue_create(&vid_player.decode_thread_command_queue, 200);
+	if(result != DEF_SUCCESS)
+	{
+		DEF_LOG_RESULT(Util_queue_create, false, result);
+		queues_ready = false;
+	}
+	result = Util_queue_create(&vid_player.decode_thread_notification_queue, 100);
+	if(result != DEF_SUCCESS)
+	{
+		DEF_LOG_RESULT(Util_queue_create, false, result);
+		queues_ready = false;
+	}
+	result = Util_queue_create(&vid_player.read_packet_thread_command_queue, 200);
+	if(result != DEF_SUCCESS)
+	{
+		DEF_LOG_RESULT(Util_queue_create, false, result);
+		queues_ready = false;
+	}
+	result = Util_queue_create(&vid_player.decode_video_thread_command_queue, 200);
+	if(result != DEF_SUCCESS)
+	{
+		DEF_LOG_RESULT(Util_queue_create, false, result);
+		queues_ready = false;
+	}
+	result = Util_queue_create(&vid_player.convert_thread_command_queue, 200);
+	if(result != DEF_SUCCESS)
+	{
+		DEF_LOG_RESULT(Util_queue_create, false, result);
+		queues_ready = false;
+	}
+	if(!queues_ready)
+		goto init_failed;
 
 	Util_str_add(&vid_player.status, "\nLoading settings...");
-	DEF_LOG_RESULT_SMART(result, Vid_load_settings(), (result == DEF_SUCCESS), result);
+	if(!vid_embedded_test_mode)
+	{
+		DEF_LOG_RESULT_SMART(result, Vid_load_settings(), (result == DEF_SUCCESS), result);
+	}
+	else
+	{
+		/* RetroTuner uses the known-safe defaults from Vid_init_settings(). Old
+		 * video-player settings could otherwise disable audio/HW decode or alter
+		 * buffering without any corresponding control in the standalone UI. */
+		vid_player.disable_audio = false;
+		vid_player.disable_video = false;
+		vid_player.disable_subtitle = true;
+		vid_player.use_hw_decoding = true;
+		vid_player.use_hw_color_conversion = true;
+		vid_player.volume = 100;
+	}
 
 	Util_str_add(&vid_player.status, "\nLoading textures...");
-	vid_player.banner_texture_handle = Draw_get_free_sheet_num();
-	DEF_LOG_RESULT_SMART(result, Draw_load_texture("romfs:/gfx/draw/video_player/banner.t3x",
-	vid_player.banner_texture_handle, vid_player.banner, 0, 2), (result == DEF_SUCCESS), result);
+	if(!vid_embedded_test_mode)
+	{
+		vid_player.banner_texture_handle = Draw_get_free_sheet_num();
+		DEF_LOG_RESULT_SMART(result, Draw_load_texture("romfs:/gfx/draw/video_player/banner.t3x",
+		vid_player.banner_texture_handle, vid_player.banner, 0, 2), (result == DEF_SUCCESS), result);
 
-	vid_player.control_texture_handle = Draw_get_free_sheet_num();
-
-	DEF_LOG_RESULT_SMART(result, Draw_load_texture("romfs:/gfx/draw/video_player/controls.t3x",
-	vid_player.control_texture_handle, vid_player.control, 0, 2), (result == DEF_SUCCESS), result);
+		vid_player.control_texture_handle = Draw_get_free_sheet_num();
+		DEF_LOG_RESULT_SMART(result, Draw_load_texture("romfs:/gfx/draw/video_player/controls.t3x",
+		vid_player.control_texture_handle, vid_player.control, 0, 2), (result == DEF_SUCCESS), result);
+	}
 
 	Util_str_add(&vid_player.status, "\nStarting threads...");
 	vid_player.thread_run = true;
@@ -5570,9 +5769,57 @@ void Vid_init_thread(void* arg)
 		vid_player.read_packet_thread = threadCreate(Vid_read_packet_thread, NULL, DEF_THREAD_STACKSIZE, DEF_THREAD_PRIORITY_REALTIME, 1, false);
 	}
 
-	vid_player.inited = true;
+	if(!vid_player.decode_thread || !vid_player.decode_video_thread
+	|| !vid_player.convert_thread || !vid_player.read_packet_thread)
+	{
+		DEF_LOG_STRING("Failed to create one or more video-player workers.");
+		goto init_failed;
+	}
+
+	/* The synchronous wrapper can cancel an unusually slow initialization.
+	 * Do not publish a late success after that timeout; tear the partial player
+	 * back down while this thread still owns it. */
+	if(__atomic_load_n(&vid_init_failed, __ATOMIC_ACQUIRE))
+		goto init_failed;
+	__atomic_store_n(&vid_player.inited, true, __ATOMIC_RELEASE);
+	if(__atomic_load_n(&vid_init_failed, __ATOMIC_ACQUIRE))
+	{
+		__atomic_store_n(&vid_player.inited, false, __ATOMIC_RELEASE);
+		goto init_failed;
+	}
 
 	DEF_LOG_STRING("Thread exit.");
+	threadExit(0);
+
+	init_failed:
+	vid_player.thread_run = false;
+	vid_player.thread_suspend = false;
+	if(!Vid_join_thread_handle(&vid_player.decode_thread, DEF_THREAD_WAIT_TIME))
+		workers_joined = false;
+	if(!Vid_join_thread_handle(&vid_player.decode_video_thread, DEF_THREAD_WAIT_TIME))
+		workers_joined = false;
+	if(!Vid_join_thread_handle(&vid_player.convert_thread, DEF_THREAD_WAIT_TIME))
+		workers_joined = false;
+	if(!Vid_join_thread_handle(&vid_player.read_packet_thread, DEF_THREAD_WAIT_TIME))
+		workers_joined = false;
+	if(!workers_joined)
+	{
+		__atomic_store_n(&vid_init_failed, true, __ATOMIC_RELEASE);
+		__atomic_store_n(&vid_cleanup_safe, false, __ATOMIC_RELEASE);
+		DEF_LOG_STRING("Init cleanup retained state for a running worker.");
+		threadExit(0);
+	}
+	Util_queue_delete(&vid_player.decode_thread_command_queue);
+	Util_queue_delete(&vid_player.decode_thread_notification_queue);
+	Util_queue_delete(&vid_player.read_packet_thread_command_queue);
+	Util_queue_delete(&vid_player.decode_video_thread_command_queue);
+	Util_queue_delete(&vid_player.convert_thread_command_queue);
+	if(delay_sync_ready)
+		Util_sync_destroy(&vid_player.delay_update_lock);
+	if(texture_sync_ready)
+		Util_sync_destroy(&vid_player.texture_init_free_lock);
+	__atomic_store_n(&vid_init_failed, true, __ATOMIC_RELEASE);
+	DEF_LOG_STRING("Init thread failed.");
 	threadExit(0);
 }
 
@@ -5580,37 +5827,55 @@ void Vid_exit_thread(void* arg)
 {
 	(void)arg;
 	DEF_LOG_STRING("Thread started.");
+	bool workers_joined = true;
 	uint32_t result = DEF_ERR_OTHER;
-	uint64_t join_timeout = vid_embedded_test_mode ? UINT64_MAX
-		: DEF_THREAD_WAIT_TIME;
 
-	vid_player.inited = false;
+	__atomic_store_n(&vid_player.inited, false, __ATOMIC_RELEASE);
 	vid_player.thread_suspend = false;
 	vid_player.is_selecting_audio_track = false;
 	vid_player.is_selecting_subtitle_track = false;
+	miniiptv_live_stream_request_stop();
 
-	DEF_LOG_RESULT_SMART(result, Util_queue_add(&vid_player.decode_thread_command_queue, DECODE_THREAD_SHUTDOWN_REQUEST,
-	NULL, QUEUE_OP_TIMEOUT_US, QUEUE_OPTION_SEND_TO_FRONT), (result == DEF_SUCCESS), result);
+	result = Util_queue_add(&vid_player.decode_thread_command_queue,
+		DECODE_THREAD_SHUTDOWN_REQUEST, NULL, QUEUE_OP_TIMEOUT_US,
+		QUEUE_OPTION_SEND_TO_FRONT);
+	if(result != DEF_SUCCESS)
+	{
+		DEF_LOG_RESULT(Util_queue_add, false, result);
+		/* Let every worker leave its outer loop even if the command queue is
+		 * already unavailable. */
+		vid_player.thread_run = false;
+	}
 
 	//Exit full-screen to avoid bottom LCD blackout.
 	Vid_exit_full_screen();
 
 	Util_str_set(&vid_player.status, "Saving settings...");
-	DEF_LOG_RESULT_SMART(result, Vid_save_settings(), (result == DEF_SUCCESS), result);
+	if(!vid_embedded_test_mode)
+	{
+		DEF_LOG_RESULT_SMART(result, Vid_save_settings(), (result == DEF_SUCCESS), result);
+	}
 
 	Util_str_add(&vid_player.status, "\nExiting threads...");
-	DEF_LOG_RESULT_SMART(result, threadJoin(vid_player.decode_thread, join_timeout), (result == DEF_SUCCESS), result);
-	DEF_LOG_RESULT_SMART(result, threadJoin(vid_player.decode_video_thread, join_timeout), (result == DEF_SUCCESS), result);
-	DEF_LOG_RESULT_SMART(result, threadJoin(vid_player.convert_thread, join_timeout), (result == DEF_SUCCESS), result);
-	DEF_LOG_RESULT_SMART(result, threadJoin(vid_player.read_packet_thread, join_timeout), (result == DEF_SUCCESS), result);
+	if(!Vid_join_thread_handle(&vid_player.decode_thread, DEF_THREAD_WAIT_TIME))
+		workers_joined = false;
+	if(!Vid_join_thread_handle(&vid_player.decode_video_thread, DEF_THREAD_WAIT_TIME))
+		workers_joined = false;
+	if(!Vid_join_thread_handle(&vid_player.convert_thread, DEF_THREAD_WAIT_TIME))
+		workers_joined = false;
+	if(!Vid_join_thread_handle(&vid_player.read_packet_thread, DEF_THREAD_WAIT_TIME))
+		workers_joined = false;
+	if(!workers_joined)
+	{
+		/* Never free queues, locks, textures or decoder buffers while a timed-out
+		 * worker may still hold a reference to them. */
+		__atomic_store_n(&vid_cleanup_safe, false, __ATOMIC_RELEASE);
+		DEF_LOG_STRING("One or more video-player workers did not stop safely.");
+		threadExit(0);
+	}
 	Util_decoder_mvd_release_packet_buffer();
 
 	Util_str_add(&vid_player.status, "\nCleaning up...");
-	threadFree(vid_player.decode_thread);
-	threadFree(vid_player.decode_video_thread);
-	threadFree(vid_player.convert_thread);
-	threadFree(vid_player.read_packet_thread);
-
 	Draw_free_texture(vid_player.banner_texture_handle);
 	Draw_free_texture(vid_player.control_texture_handle);
 
@@ -5708,7 +5973,7 @@ void Vid_exit_thread(void* arg)
 	Util_sync_destroy(&vid_player.texture_init_free_lock);
 	Util_sync_destroy(&vid_player.delay_update_lock);
 
-	vid_player.inited = false;
+	__atomic_store_n(&vid_player.inited, false, __ATOMIC_RELEASE);
 
 	DEF_LOG_STRING("Thread exit.");
 	threadExit(0);
@@ -6265,12 +6530,27 @@ void Vid_decode_thread(void* arg)
 					else
 					{
 						//If currently player state is not idle, abort current playback first.
-						DEF_LOG_RESULT_SMART(result, Util_queue_add(&vid_player.decode_thread_command_queue, DECODE_THREAD_ABORT_REQUEST,
-						NULL, QUEUE_OP_TIMEOUT_US, QUEUE_OPTION_NONE), (result == DEF_SUCCESS), result);
+						result = Util_queue_add(&vid_player.decode_thread_command_queue,
+							DECODE_THREAD_ABORT_REQUEST, NULL, QUEUE_OP_TIMEOUT_US,
+							QUEUE_OPTION_NONE);
+						if(result != DEF_SUCCESS)
+						{
+							DEF_LOG_RESULT(Util_queue_add, false, result);
+							free(new_file);
+							new_file = NULL;
+							break;
+						}
 
 						//Then play new one, pass the received new_file again.
-						DEF_LOG_RESULT_SMART(result, Util_queue_add(&vid_player.decode_thread_command_queue, DECODE_THREAD_PLAY_REQUEST,
-						new_file, QUEUE_OP_TIMEOUT_US, QUEUE_OPTION_NONE), (result == DEF_SUCCESS), result);
+						result = Util_queue_add(&vid_player.decode_thread_command_queue,
+							DECODE_THREAD_PLAY_REQUEST, new_file, QUEUE_OP_TIMEOUT_US,
+							QUEUE_OPTION_NONE);
+						if(result != DEF_SUCCESS)
+						{
+							DEF_LOG_RESULT(Util_queue_add, false, result);
+							free(new_file);
+							new_file = NULL;
+						}
 					}
 
 					break;
@@ -6455,34 +6735,31 @@ void Vid_decode_thread(void* arg)
 						}
 					}
 
-					//Wait for read packet thread (also flush queues).
-					DEF_LOG_RESULT_SMART(result, Util_queue_add(&vid_player.read_packet_thread_command_queue, READ_PACKET_THREAD_ABORT_REQUEST,
-					NULL, QUEUE_OP_TIMEOUT_US, QUEUE_OPTION_NONE), (result == DEF_SUCCESS), result);
-					while(true)
+					if(miniiptv_live_stream_is_active())
+						miniiptv_live_stream_request_stop();
+					/* Flush each worker before freeing decoder and texture state. A failed
+					 * queue write or dead worker used to hang this thread forever. */
+					if(!Vid_abort_worker(&vid_player.read_packet_thread_command_queue,
+						READ_PACKET_THREAD_ABORT_REQUEST,
+						READ_PACKET_THREAD_FINISHED_ABORTING_NOTIFICATION)
+					|| !Vid_abort_worker(&vid_player.convert_thread_command_queue,
+						CONVERT_THREAD_ABORT_REQUEST,
+						CONVERT_THREAD_FINISHED_ABORTING_NOTIFICATION)
+					|| !Vid_abort_worker(&vid_player.decode_video_thread_command_queue,
+						DECODE_VIDEO_THREAD_ABORT_REQUEST,
+						DECODE_VIDEO_THREAD_FINISHED_ABORTING_NOTIFICATION))
 					{
-						result = Util_queue_get(&vid_player.decode_thread_notification_queue, (uint32_t*)&notification, NULL, QUEUE_OP_TIMEOUT_US);
-						if(result == DEF_SUCCESS && notification == READ_PACKET_THREAD_FINISHED_ABORTING_NOTIFICATION)
-							break;
-					}
-
-					//Wait for convert thread (also flush queues).
-					DEF_LOG_RESULT_SMART(result, Util_queue_add(&vid_player.convert_thread_command_queue, CONVERT_THREAD_ABORT_REQUEST,
-					NULL, QUEUE_OP_TIMEOUT_US, QUEUE_OPTION_NONE), (result == DEF_SUCCESS), result);
-					while(true)
-					{
-						result = Util_queue_get(&vid_player.decode_thread_notification_queue, (uint32_t*)&notification, NULL, QUEUE_OP_TIMEOUT_US);
-						if(result == DEF_SUCCESS && notification == CONVERT_THREAD_FINISHED_ABORTING_NOTIFICATION)
-							break;
-					}
-
-					//Wait for video decoding thread (also flush queues).
-					DEF_LOG_RESULT_SMART(result, Util_queue_add(&vid_player.decode_video_thread_command_queue, DECODE_VIDEO_THREAD_ABORT_REQUEST,
-					NULL, QUEUE_OP_TIMEOUT_US, QUEUE_OPTION_NONE), (result == DEF_SUCCESS), result);
-					while(true)
-					{
-						result = Util_queue_get(&vid_player.decode_thread_notification_queue, (uint32_t*)&notification, NULL, QUEUE_OP_TIMEOUT_US);
-						if(result == DEF_SUCCESS && notification == DECODE_VIDEO_THREAD_FINISHED_ABORTING_NOTIFICATION)
-							break;
+						miniiptv_live_stream_request_stop();
+						vid_player.thread_suspend = false;
+						vid_player.thread_run = false;
+						vid_player.state = PLAYER_STATE_IDLE;
+						vid_miniptv_channel_drawer_open = false;
+						__atomic_fetch_add(&vid_playback_return_generation, 1,
+							__ATOMIC_RELEASE);
+						if(vid_live_error_hook)
+							vid_live_error_hook(DEF_ERR_OTHER);
+						DEF_LOG_STRING("Playback abort failed; retaining owned resources.");
+						continue;
 					}
 
 					if(vid_player.num_of_audio_tracks > 0)
@@ -6548,11 +6825,20 @@ void Vid_decode_thread(void* arg)
 							Util_str_free(&temp);
 						}
 
-						//Play next video.
-						DEF_LOG_RESULT_SMART(result, Util_queue_add(&vid_player.decode_thread_command_queue, DECODE_THREAD_PLAY_REQUEST,
-						file_data, QUEUE_OP_TIMEOUT_US, QUEUE_OPTION_NONE), (result == DEF_SUCCESS), result);
-
-						vid_player.state = PLAYER_STATE_PREPARE_PLAYING;
+						//Play next video. The queue takes ownership only on success.
+						result = file_data ? Util_queue_add(
+							&vid_player.decode_thread_command_queue,
+							DECODE_THREAD_PLAY_REQUEST, file_data, QUEUE_OP_TIMEOUT_US,
+							QUEUE_OPTION_NONE) : DEF_ERR_OUT_OF_MEMORY;
+						if(result == DEF_SUCCESS)
+							vid_player.state = PLAYER_STATE_PREPARE_PLAYING;
+						else
+						{
+							DEF_LOG_RESULT(Util_queue_add, false, result);
+							free(file_data);
+							file_data = NULL;
+							vid_player.state = PLAYER_STATE_IDLE;
+						}
 					}
 					else
 					{
@@ -7250,9 +7536,16 @@ void Vid_decode_thread(void* arg)
 						// packet_info, QUEUE_OP_TIMEOUT_US, QUEUE_OPTION_NONE), (result == DEF_SUCCESS), result);
 
 						result = Util_queue_add(&vid_player.decode_video_thread_command_queue, DECODE_VIDEO_THREAD_DECODE_REQUEST,
-						packet_info, QUEUE_OP_TIMEOUT_US, QUEUE_OPTION_NONE);
+							packet_info, QUEUE_OP_TIMEOUT_US, QUEUE_OPTION_NONE);
 						if(result != DEF_SUCCESS)
+						{
 							DEF_LOG_RESULT(Util_queue_add, false, result);
+							is_waiting_video_decoder = false;
+							Util_decoder_skip_video_packet(packet_index,
+								DEF_VID_DECORDER_SESSION_ID);
+							free(packet_info);
+							packet_info = NULL;
+						}
 					}
 					else
 						Util_decoder_skip_video_packet(packet_index, DEF_VID_DECORDER_SESSION_ID);
@@ -8212,8 +8505,15 @@ static void Vid_expl_callback(Str_data* file, Str_data* dir)
 			snprintf(file_data->directory, sizeof(file_data->directory), "%s", dir->buffer);
 	}
 
-	DEF_LOG_RESULT_SMART(result, Util_queue_add(&vid_player.decode_thread_command_queue, DECODE_THREAD_PLAY_REQUEST,
-	file_data, QUEUE_OP_TIMEOUT_US, QUEUE_OPTION_NONE), (result == DEF_SUCCESS), result);
+	result = file_data ? Util_queue_add(&vid_player.decode_thread_command_queue,
+		DECODE_THREAD_PLAY_REQUEST, file_data, QUEUE_OP_TIMEOUT_US,
+		QUEUE_OPTION_NONE) : DEF_ERR_OUT_OF_MEMORY;
+	if(result != DEF_SUCCESS)
+	{
+		DEF_LOG_RESULT(Util_queue_add, false, result);
+		free(file_data);
+		file_data = NULL;
+	}
 }
 
 static void Vid_expl_cancel_callback(void)

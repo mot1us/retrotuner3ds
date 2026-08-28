@@ -102,9 +102,11 @@ gaps, playlist regressions, explicit discontinuities, and unsafe H.264 parameter
 changes end the current decoder session. The app may make up to two clean relock
 attempts after FFmpeg and MVD are fully torn down.
 
-An established stream may skip at most two oversized segments. A third is a
-hard failure. These limits are intentionally conservative; returning to the
-channel deck is better than reusing the decoder in an unknown state.
+An oversized segment ends the current decoder generation. The app does not
+skip it and splice later H.264 data into the same MVD session, because the next
+segment is not guaranteed to be independently decodable. These limits are
+intentionally conservative; returning to the channel deck is better than
+reusing the decoder in an unknown state.
 
 ## Memory and ownership rules
 
@@ -115,9 +117,10 @@ channel deck is better than reusing the decoder in an unknown state.
 - Video: one H.264/YUV420P track, at most 640x480 and a known 30.5 fps.
 - One producer, one FFmpeg consumer, and one MVD instance at a time.
 
-Stopping or changing a channel always follows the same order: cancel the
-producer, join its thread, close FFmpeg and MVD, then reset the ring. MVD output
-surfaces stay allocated until the decoder service has actually exited.
+Stopping or changing a channel first cancels every stream owner. FFmpeg/MVD
+readers and the network producer are joined before the ring or shared services
+are reset. MVD output surfaces stay allocated until the decoder service has
+actually exited.
 
 ## Telemetry
 
@@ -131,7 +134,8 @@ media. A logging failure is non-fatal. The previous run is rotated to
 
 ## Tests
 
-Desktop sanitizer tests cover playlist and HLS parsing, URL resolution, MPEG-TS
-combining, H.264 normalization, buffer decisions, network limits, and telemetry.
-The final playback path still needs a real New 3DS because ordinary desktop
-tests and current emulators cannot reproduce Nintendo's MVD behavior.
+Desktop sanitizer tests cover the platform-neutral playlist, HLS, MPEG-TS,
+H.264, buffer-controller, telemetry, and network-cancellation helpers. CI also
+compiles the complete `.3dsx` with devkitARM. The live thread handoff, FFmpeg/MVD
+integration, rendering, audio timing, and final teardown still need a real New
+3DS.

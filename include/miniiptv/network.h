@@ -47,11 +47,6 @@ int network_get_data_cancelable_with_options(
     size_t maximum_size, MiniIptvCancelFunction should_cancel,
     void *cancel_userdata, const NetworkRequestOptions *options,
     NetworkTextResponse *response);
-int network_download_file(const char *url, const char *user_agent,
-                          const char *referrer, size_t maximum_size,
-                          const char *output_path,
-                          MiniIptvCancelFunction should_cancel,
-                          void *cancel_userdata, size_t *downloaded_size);
 int network_stream_data(const char *url, const char *user_agent,
                         const char *referrer, size_t maximum_size,
                         MiniIptvStreamWriteFunction write_data,

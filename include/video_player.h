@@ -63,6 +63,10 @@ bool Vid_query_init_flag(void);
 
 bool Vid_query_running_flag(void);
 
+/* False only when a timed-out player thread still owns internal resources.
+ * Callers must avoid tearing down shared services in that state. */
+bool Vid_query_cleanup_safe(void);
+
 void Vid_hid(const Hid_info* key);
 
 void Vid_resume(void);

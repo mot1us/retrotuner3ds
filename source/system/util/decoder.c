@@ -47,6 +47,8 @@ static void Util_decoder_mvd_exit(uint8_t session);
 static bool Util_decoder_mvd_reserve_packet(size_t required_size);
 static uint32_t Util_decoder_mvd_process_access_unit(uint8_t* annexb,
 	size_t annexb_size);
+static uint32_t Util_decoder_mvd_take_ready_frame(uint8_t session,
+	AVFrame** frame);
 static void Util_decoder_subtitle_exit(uint8_t session);
 static int Util_decoder_live_stream_read(void *opaque, uint8_t *buffer,
 	int buffer_size);
@@ -2019,20 +2021,87 @@ static uint32_t Util_decoder_mvd_process_access_unit(uint8_t* annexb,
 }
 
 static void Util_decoder_mvd_free_unbound_output(uint8_t session,
-	uint16_t buffer_num)
+	uint16_t buffer_num, AVFrame* expected_frame)
 {
-	AVFrame* frame = util_mvd_video_decoder_raw_image[session][buffer_num];
+	AVFrame* frame = NULL;
 
+	if(session >= DEF_DECODER_MAX_SESSIONS
+	|| buffer_num >= DEF_DECODER_MAX_RAW_IMAGE || !expected_frame)
+		return;
+	LightLock_Lock(&util_mvd_video_decoder_raw_image_mutex[session]);
+	frame = util_mvd_video_decoder_raw_image[session][buffer_num];
+	if(frame != expected_frame)
+	{
+		LightLock_Unlock(&util_mvd_video_decoder_raw_image_mutex[session]);
+		return;
+	}
+	util_mvd_video_decoder_raw_image[session][buffer_num] = NULL;
+	LightLock_Unlock(&util_mvd_video_decoder_raw_image_mutex[session]);
 	if(!frame)
 		return;
 	if(frame->data[0])
 		linearFree(frame->data[0]);
 	frame->data[0] = NULL;
-	av_frame_free(&util_mvd_video_decoder_raw_image[session][buffer_num]);
+	av_frame_free(&frame);
+}
+
+/* Transfer one published MVD frame to the consumer while holding the same
+ * lock used by the producer.  The old code protected only the count update;
+ * the consumer read the count, index and pointer independently and could see
+ * an increment before the frame pointer was visible. */
+static uint32_t Util_decoder_mvd_take_ready_frame(uint8_t session,
+	AVFrame** frame)
+{
+	AVFrame* ready_frame = NULL;
+	uint16_t buffer_num = 0;
+	uint16_t max_raw_image = 0;
+
+	if(!frame || session >= DEF_DECODER_MAX_SESSIONS)
+		return DEF_ERR_INVALID_ARG;
+	*frame = NULL;
+
+	LightLock_Lock(&util_mvd_video_decoder_raw_image_mutex[session]);
+	if(util_mvd_video_decoder_available_raw_image[session] == 0)
+	{
+		LightLock_Unlock(&util_mvd_video_decoder_raw_image_mutex[session]);
+		return DEF_ERR_TRY_AGAIN;
+	}
+
+	max_raw_image = util_mvd_video_decoder_max_raw_image[session];
+	buffer_num = util_mvd_video_decoder_raw_image_ready_index[session];
+	if(max_raw_image == 0 || max_raw_image > DEF_DECODER_MAX_RAW_IMAGE
+	|| buffer_num >= max_raw_image)
+	{
+		LightLock_Unlock(&util_mvd_video_decoder_raw_image_mutex[session]);
+		DEF_LOG_STRING("Invalid MVD ready-frame queue state.");
+		return DEF_ERR_OTHER;
+	}
+
+	ready_frame = util_mvd_video_decoder_raw_image[session][buffer_num];
+	util_mvd_video_decoder_raw_image[session][buffer_num] = NULL;
+	if(buffer_num + 1 < max_raw_image)
+		util_mvd_video_decoder_raw_image_ready_index[session]++;
+	else
+		util_mvd_video_decoder_raw_image_ready_index[session] = 0;
+	util_mvd_video_decoder_available_raw_image[session]--;
+	LightLock_Unlock(&util_mvd_video_decoder_raw_image_mutex[session]);
+
+	/* A published slot must contain both an AVFrame and MVD's linear RGB565
+	 * surface.  Drop a malformed slot instead of dereferencing it. */
+	if(!ready_frame || !ready_frame->data[0])
+	{
+		DEF_LOG_STRING("MVD published an invalid ready frame.");
+		av_frame_free(&ready_frame);
+		return DEF_ERR_OTHER;
+	}
+
+	*frame = ready_frame;
+	return DEF_SUCCESS;
 }
 
 uint32_t Util_decoder_mvd_decode(uint8_t session)
 {
+	AVFrame* output_frame = NULL;
 	bool got_a_frame = false;
 	bool got_a_frame_after_processing_nal_unit = false;
 	bool output_bound_to_mvd = false;
@@ -2058,6 +2127,12 @@ uint32_t Util_decoder_mvd_decode(uint8_t session)
 		//DEF_LOG_STRING("No packets are available!!!!!");
 		goto try_again;
 	}
+	if(!util_video_decoder_packet[session][0]
+	|| !util_video_decoder_context[session][0]
+	|| !util_decoder_format_context[session]
+	|| (util_video_decoder_packet[session][0]->size > 0
+		&& !util_video_decoder_packet[session][0]->data))
+		goto ffmpeg_api_failed;
 	/* Never pass a packet FFmpeg marked corrupt into Nintendo's MVD service.
 	 * Live transport damage is recoverable, so discard only this packet rather
 	 * than poisoning the channel as a permanent format change. */
@@ -2069,13 +2144,29 @@ uint32_t Util_decoder_mvd_decode(uint8_t session)
 	}
 
 	util_mvd_video_decoder_changeable_buffer_size = false;
-	if(util_mvd_video_decoder_available_raw_image[session] + 1 >= util_mvd_video_decoder_max_raw_image[session])
+	LightLock_Lock(&util_mvd_video_decoder_raw_image_mutex[session]);
+	if(util_mvd_video_decoder_max_raw_image[session] == 0
+	|| util_mvd_video_decoder_max_raw_image[session] > DEF_DECODER_MAX_RAW_IMAGE
+	|| util_mvd_video_decoder_raw_image_current_index[session]
+		>= util_mvd_video_decoder_max_raw_image[session])
 	{
-		//DEF_LOG_STRING("Queues are full!!!!!");
+		LightLock_Unlock(&util_mvd_video_decoder_raw_image_mutex[session]);
+		goto queue_state_failed;
+	}
+	if(util_mvd_video_decoder_available_raw_image[session] + 1
+	>= util_mvd_video_decoder_max_raw_image[session])
+	{
+		LightLock_Unlock(&util_mvd_video_decoder_raw_image_mutex[session]);
 		goto try_again;
 	}
 
 	buffer_num = util_mvd_video_decoder_raw_image_current_index[session];
+	if(util_mvd_video_decoder_raw_image[session][buffer_num])
+	{
+		LightLock_Unlock(&util_mvd_video_decoder_raw_image_mutex[session]);
+		goto queue_state_failed;
+	}
+	LightLock_Unlock(&util_mvd_video_decoder_raw_image_mutex[session]);
 	width = util_video_decoder_context[session][0]->width;
 	height = util_video_decoder_context[session][0]->height;
 	if(width % 16 != 0)
@@ -2083,30 +2174,40 @@ uint32_t Util_decoder_mvd_decode(uint8_t session)
 	if(height % 16 != 0)
 		height += 16 - height % 16;
 
-	util_mvd_video_decoder_raw_image[session][buffer_num] = av_frame_alloc();
-	if(!util_mvd_video_decoder_raw_image[session][buffer_num])
+	output_frame = av_frame_alloc();
+	if(!output_frame)
 	{
 		DEF_LOG_RESULT(av_frame_alloc, false, DEF_ERR_FFMPEG_RETURNED_NOT_SUCCESS);
 		goto ffmpeg_api_failed;
 	}
+	LightLock_Lock(&util_mvd_video_decoder_raw_image_mutex[session]);
+	if(util_mvd_video_decoder_raw_image_current_index[session] != buffer_num
+	|| util_mvd_video_decoder_raw_image[session][buffer_num])
+	{
+		LightLock_Unlock(&util_mvd_video_decoder_raw_image_mutex[session]);
+		av_frame_free(&output_frame);
+		goto queue_state_failed;
+	}
+	util_mvd_video_decoder_raw_image[session][buffer_num] = output_frame;
+	LightLock_Unlock(&util_mvd_video_decoder_raw_image_mutex[session]);
 
-	util_mvd_video_decoder_raw_image[session][buffer_num]->data[0] = (uint8_t*)linearAlloc(width * height * 2);
-	if(!util_mvd_video_decoder_raw_image[session][buffer_num]->data[0])
+	output_frame->data[0] = (uint8_t*)linearAlloc(width * height * 2);
+	if(!output_frame->data[0])
 		goto out_of_linear_memory;
 
 	if(util_mvd_video_decoder_first)
 		mvdstdGenerateDefaultConfig(&util_decoder_mvd_config, width, height, width, height, NULL, NULL, NULL);
-	output_physical = osConvertVirtToPhys(util_mvd_video_decoder_raw_image[session][buffer_num]->data[0]);
+	output_physical = osConvertVirtToPhys(output_frame->data[0]);
 	if(output_physical == 0)
 		goto out_of_linear_memory;
 	util_decoder_mvd_config.physaddr_outdata0 = output_physical;
 
 	//Set 0x11 to top-left, top-right, bottom-left and bottom-right then check them later.
 	//For more information, see: https://gbatemp.net/threads/release-video-player-for-3ds.586094/page-20#post-9915780
-	*util_mvd_video_decoder_raw_image[session][buffer_num]->data[0] = 0x11;
-	*(util_mvd_video_decoder_raw_image[session][buffer_num]->data[0] + (width * 2 - 1)) = 0x11;
-	*(util_mvd_video_decoder_raw_image[session][buffer_num]->data[0] + ((width * height * 2) - (width * 2))) = 0x11;
-	*(util_mvd_video_decoder_raw_image[session][buffer_num]->data[0] + (width * height * 2 - 1)) = 0x11;
+	*output_frame->data[0] = 0x11;
+	*(output_frame->data[0] + (width * 2 - 1)) = 0x11;
+	*(output_frame->data[0] + ((width * height * 2) - (width * 2))) = 0x11;
+	*(output_frame->data[0] + (width * height * 2 - 1)) = 0x11;
 
 	/* The output target must be valid before any call enters Nintendo's MVD
 	 * service, including codec extradata on the first packet. */
@@ -2241,10 +2342,10 @@ uint32_t Util_decoder_mvd_decode(uint8_t session)
 		}
 
 		//If any of them got changed, it means MVD service wrote the frame data to the buffer.
-		if(*util_mvd_video_decoder_raw_image[session][buffer_num]->data[0] != 0x11
-		|| *(util_mvd_video_decoder_raw_image[session][buffer_num]->data[0] + (width * 2 - 1)) != 0x11
-		|| *(util_mvd_video_decoder_raw_image[session][buffer_num]->data[0] + ((width * height * 2) - (width * 2))) != 0x11
-		|| *(util_mvd_video_decoder_raw_image[session][buffer_num]->data[0] + (width * height * 2 - 1)) != 0x11)
+		if(*output_frame->data[0] != 0x11
+		|| *(output_frame->data[0] + (width * 2 - 1)) != 0x11
+		|| *(output_frame->data[0] + ((width * height * 2) - (width * 2))) != 0x11
+		|| *(output_frame->data[0] + (width * height * 2 - 1)) != 0x11)
 		{
 			// DEF_LOG_STRING("got a frame after mvdstdProcessVideoFrame()");
 			got_a_frame = true;
@@ -2267,10 +2368,10 @@ uint32_t Util_decoder_mvd_decode(uint8_t session)
 			result = mvdstdRenderVideoFrame(NULL, false);
 
 			//If any of them got changed, it means MVD service wrote the frame data to the buffer.
-			if(*util_mvd_video_decoder_raw_image[session][buffer_num]->data[0] != 0x11
-			|| *(util_mvd_video_decoder_raw_image[session][buffer_num]->data[0] + (width * 2 - 1)) != 0x11
-			|| *(util_mvd_video_decoder_raw_image[session][buffer_num]->data[0] + ((width * height * 2) - (width * 2))) != 0x11
-			|| *(util_mvd_video_decoder_raw_image[session][buffer_num]->data[0] + (width * height * 2 - 1)) != 0x11)
+			if(*output_frame->data[0] != 0x11
+			|| *(output_frame->data[0] + (width * 2 - 1)) != 0x11
+			|| *(output_frame->data[0] + ((width * height * 2) - (width * 2))) != 0x11
+			|| *(output_frame->data[0] + (width * height * 2 - 1)) != 0x11)
 			{
 				// DEF_LOG_STRING("got a frame after mvdstdRenderVideoFrame()");
 				result = MVD_STATUS_OK;
@@ -2314,19 +2415,25 @@ uint32_t Util_decoder_mvd_decode(uint8_t session)
 	}
 
 	//Restore cached pts.
-	util_mvd_video_decoder_raw_image[session][buffer_num]->pts = util_mvd_video_decoder_cached_pts[util_mvd_video_decoder_current_cached_pts_index];
-	util_mvd_video_decoder_raw_image[session][buffer_num]->duration = util_video_decoder_packet[session][0]->duration;
+	output_frame->pts = util_mvd_video_decoder_cached_pts[util_mvd_video_decoder_current_cached_pts_index];
+	output_frame->duration = util_video_decoder_packet[session][0]->duration;
 	if(util_mvd_video_decoder_current_cached_pts_index + 1 < 32)
 		util_mvd_video_decoder_current_cached_pts_index++;
 	else
 		util_mvd_video_decoder_current_cached_pts_index = 0;
 
+	LightLock_Lock(&util_mvd_video_decoder_raw_image_mutex[session]);
+	/* Publish pointer metadata, producer index and count as one operation. */
+	if(util_mvd_video_decoder_raw_image[session][buffer_num] != output_frame
+	|| !output_frame->data[0])
+	{
+		LightLock_Unlock(&util_mvd_video_decoder_raw_image_mutex[session]);
+		goto queue_state_failed;
+	}
 	if(buffer_num + 1 < util_mvd_video_decoder_max_raw_image[session])
 		util_mvd_video_decoder_raw_image_current_index[session]++;
 	else
 		util_mvd_video_decoder_raw_image_current_index[session] = 0;
-
-	LightLock_Lock(&util_mvd_video_decoder_raw_image_mutex[session]);
 	util_mvd_video_decoder_available_raw_image[session]++;
 	LightLock_Unlock(&util_mvd_video_decoder_raw_image_mutex[session]);
 
@@ -2349,15 +2456,26 @@ uint32_t Util_decoder_mvd_decode(uint8_t session)
 	return DEF_ERR_TRY_AGAIN;
 
 	try_again_no_output:
-	Util_decoder_mvd_free_unbound_output(session, buffer_num);
+	Util_decoder_mvd_free_unbound_output(session, buffer_num, output_frame);
 	return DEF_ERR_DECODER_TRY_AGAIN_NO_OUTPUT;
 
 	try_again_with_output:
 	return DEF_ERR_DECODER_TRY_AGAIN;
 
+	queue_state_failed:
+	DEF_LOG_STRING("Invalid MVD ready-frame queue state.");
+	util_mvd_video_decoder_poisoned = true;
+	util_mvd_video_decoder_poison_error = DEF_ERR_OTHER;
+	util_video_decoder_packet_ready[session][0] = false;
+	av_packet_free(&util_video_decoder_packet[session][0]);
+	/* Do not free an output already registered with MVD until service exit. */
+	if(!output_bound_to_mvd)
+		Util_decoder_mvd_free_unbound_output(session, buffer_num, output_frame);
+	return DEF_ERR_OTHER;
+
 	need_more_packet:
 	util_video_decoder_packet_ready[session][0] = false;
-	Util_decoder_mvd_free_unbound_output(session, buffer_num);
+	Util_decoder_mvd_free_unbound_output(session, buffer_num, output_frame);
 	av_packet_free(&util_video_decoder_packet[session][0]);
 	return DEF_ERR_NEED_MORE_INPUT;
 
@@ -2370,7 +2488,7 @@ uint32_t Util_decoder_mvd_decode(uint8_t session)
 		av_packet_free(&util_video_decoder_packet[session][0]);
 		return DEF_ERR_OUT_OF_LINEAR_MEMORY;
 	}
-	Util_decoder_mvd_free_unbound_output(session, buffer_num);
+	Util_decoder_mvd_free_unbound_output(session, buffer_num, output_frame);
 	return DEF_ERR_OUT_OF_LINEAR_MEMORY;
 
 	ffmpeg_api_failed:
@@ -2382,7 +2500,7 @@ uint32_t Util_decoder_mvd_decode(uint8_t session)
 		av_packet_free(&util_video_decoder_packet[session][0]);
 		return DEF_ERR_FFMPEG_RETURNED_NOT_SUCCESS;
 	}
-	Util_decoder_mvd_free_unbound_output(session, buffer_num);
+	Util_decoder_mvd_free_unbound_output(session, buffer_num, output_frame);
 	av_packet_free(&util_video_decoder_packet[session][0]);
 	return DEF_ERR_FFMPEG_RETURNED_NOT_SUCCESS;
 
@@ -2394,7 +2512,7 @@ uint32_t Util_decoder_mvd_decode(uint8_t session)
 	/* MVD may already own the configured output surface even though the unsafe
 	 * access unit was never submitted. Keep it alive until mvdstdExit(). */
 	if(!output_bound_to_mvd)
-		Util_decoder_mvd_free_unbound_output(session, buffer_num);
+		Util_decoder_mvd_free_unbound_output(session, buffer_num, output_frame);
 	return DEF_ERR_UNSAFE_VIDEO_STREAM;
 
 	nintendo_inflight_failed:
@@ -2630,6 +2748,9 @@ void Util_decoder_video_clear_raw_image(uint8_t packet_index, uint8_t session)
 
 void Util_decoder_mvd_clear_raw_image(uint8_t session)
 {
+	AVFrame* stale_frames[DEF_DECODER_MAX_RAW_IMAGE] = { 0, };
+	uint16_t max_raw_image = 0;
+
 	if(session >= DEF_DECODER_MAX_SESSIONS)
 		return;
 
@@ -2640,21 +2761,31 @@ void Util_decoder_mvd_clear_raw_image(uint8_t session)
 	if(util_mvd_video_decoder_poisoned)
 		return;
 
-	for(uint16_t i = 0; i < util_mvd_video_decoder_max_raw_image[session]; i++)
+	LightLock_Lock(&util_mvd_video_decoder_raw_image_mutex[session]);
+	max_raw_image = util_mvd_video_decoder_max_raw_image[session];
+	if(max_raw_image > DEF_DECODER_MAX_RAW_IMAGE)
+		max_raw_image = DEF_DECODER_MAX_RAW_IMAGE;
+	for(uint16_t i = 0; i < max_raw_image; i++)
 	{
-		if(util_mvd_video_decoder_raw_image[session][i])
-		{
-			if(util_mvd_video_decoder_raw_image[session][i]->data[0])
-				linearFree(util_mvd_video_decoder_raw_image[session][i]->data[0]);
-			for(uint8_t k = 0; k < AV_NUM_DATA_POINTERS; k++)
-				util_mvd_video_decoder_raw_image[session][i]->data[k] = NULL;
-		}
-		av_frame_free(&util_mvd_video_decoder_raw_image[session][i]);
+		stale_frames[i] = util_mvd_video_decoder_raw_image[session][i];
+		util_mvd_video_decoder_raw_image[session][i] = NULL;
 	}
-
 	util_mvd_video_decoder_available_raw_image[session] = 0;
 	util_mvd_video_decoder_raw_image_ready_index[session] = 0;
 	util_mvd_video_decoder_raw_image_current_index[session] = 0;
+	LightLock_Unlock(&util_mvd_video_decoder_raw_image_mutex[session]);
+
+	for(uint16_t i = 0; i < max_raw_image; i++)
+	{
+		if(stale_frames[i])
+		{
+			if(stale_frames[i]->data[0])
+				linearFree(stale_frames[i]->data[0]);
+			for(uint8_t k = 0; k < AV_NUM_DATA_POINTERS; k++)
+				stale_frames[i]->data[k] = NULL;
+		}
+		av_frame_free(&stale_frames[i]);
+	}
 }
 
 uint16_t Util_decoder_video_get_available_raw_image_num(uint8_t packet_index, uint8_t session)
@@ -2670,13 +2801,18 @@ uint16_t Util_decoder_video_get_available_raw_image_num(uint8_t packet_index, ui
 
 uint16_t Util_decoder_mvd_get_available_raw_image_num(uint8_t session)
 {
+	uint16_t available = 0;
+
 	if(session >= DEF_DECODER_MAX_SESSIONS)
 		return 0;
 
 	if(!util_decoder_opened_file[session] || !util_video_decoder_init[session][0] || !util_mvd_video_decoder_init)
 		return 0;
-	else
-		return util_mvd_video_decoder_available_raw_image[session];
+
+	LightLock_Lock(&util_mvd_video_decoder_raw_image_mutex[session]);
+	available = util_mvd_video_decoder_available_raw_image[session];
+	LightLock_Unlock(&util_mvd_video_decoder_raw_image_mutex[session]);
+	return available;
 }
 
 uint32_t Util_decoder_video_get_image(uint8_t** raw_data, double* current_pos, uint32_t width, uint32_t height, uint8_t packet_index, uint8_t session)
@@ -2820,7 +2956,9 @@ uint32_t Util_decoder_video_get_image(uint8_t** raw_data, double* current_pos, u
 
 uint32_t Util_decoder_mvd_get_image(uint8_t** raw_data, double* current_pos, uint32_t width, uint32_t height, uint8_t session)
 {
-	uint16_t buffer_num = 0;
+	AVFrame* ready_frame = NULL;
+	AVStream* stream = NULL;
+	uint32_t result = DEF_ERR_OTHER;
 	double framerate = 0;
 	double current_frame = 0;
 	double timebase = 0;
@@ -2831,53 +2969,41 @@ uint32_t Util_decoder_mvd_get_image(uint8_t** raw_data, double* current_pos, uin
 	if(!util_decoder_opened_file[session] || !util_video_decoder_init[session][0] || !util_mvd_video_decoder_init)
 		goto not_inited;
 
-	if(util_mvd_video_decoder_available_raw_image[session] == 0)
-	{
-		//DEF_LOG_STRING("No packets are available!!!!!");
-		goto try_again;
-	}
+	if(!util_decoder_format_context[session]
+	|| util_video_decoder_stream_num[session][0]
+		>= util_decoder_format_context[session]->nb_streams)
+		goto not_inited;
+	stream = util_decoder_format_context[session]->streams[
+		util_video_decoder_stream_num[session][0]];
+	if(!stream)
+		goto not_inited;
+
+	result = Util_decoder_mvd_take_ready_frame(session, &ready_frame);
+	if(result != DEF_SUCCESS)
+		return result;
 
 	if(*raw_data)
 		linearFree(*raw_data);
 	*raw_data = NULL;
 
 	*current_pos = 0;
-	buffer_num = util_mvd_video_decoder_raw_image_ready_index[session];
-	framerate = (double)util_decoder_format_context[session]->streams[util_video_decoder_stream_num[session][0]]->avg_frame_rate.num / util_decoder_format_context[session]->streams[util_video_decoder_stream_num[session][0]]->avg_frame_rate.den;
-	if(util_mvd_video_decoder_raw_image[session][buffer_num]->duration != 0)
-		current_frame = (double)util_mvd_video_decoder_raw_image[session][buffer_num]->pts / util_mvd_video_decoder_raw_image[session][buffer_num]->duration;
+	if(stream->avg_frame_rate.den != 0)
+		framerate = (double)stream->avg_frame_rate.num
+			/ stream->avg_frame_rate.den;
+	if(ready_frame->duration != 0)
+		current_frame = (double)ready_frame->pts / ready_frame->duration;
 
-	timebase = av_q2d(util_decoder_format_context[session]->streams[util_video_decoder_stream_num[session][0]]->time_base);
+	timebase = av_q2d(stream->time_base);
 	if(timebase != 0)
-		*current_pos = (double)util_mvd_video_decoder_raw_image[session][buffer_num]->pts * timebase * 1000;//Calc pos.
+		*current_pos = (double)ready_frame->pts * timebase * 1000;//Calc pos.
 	else if(framerate != 0.0)
 		*current_pos = current_frame * (1000 / framerate);//Calc frame pos.
 
-	if(util_mvd_video_decoder_raw_image[session][buffer_num])
-	{
-		/*
-		 * Transfer ownership of MVD's RGB565 output to the caller. The old
-		 * path allocated a second full-resolution linear buffer and copied
-		 * every frame into it. At 720p that temporary copy alone was about
-		 * 1.8 MiB and fragmented the small 3DS linear heap between clips.
-		 * Vid_convert_thread already frees raw_data after uploading it.
-		 */
-		*raw_data = util_mvd_video_decoder_raw_image[session][buffer_num]->data[0];
-		for(uint8_t i = 0; i < AV_NUM_DATA_POINTERS; i++)
-			util_mvd_video_decoder_raw_image[session][buffer_num]->data[i] = NULL;
-	}
-	if(!*raw_data)
-		goto out_of_memory;
-	av_frame_free(&util_mvd_video_decoder_raw_image[session][buffer_num]);
-
-	if(util_mvd_video_decoder_raw_image_ready_index[session] + 1 < util_mvd_video_decoder_max_raw_image[session])
-		util_mvd_video_decoder_raw_image_ready_index[session]++;
-	else
-		util_mvd_video_decoder_raw_image_ready_index[session] = 0;
-
-	LightLock_Lock(&util_mvd_video_decoder_raw_image_mutex[session]);
-	util_mvd_video_decoder_available_raw_image[session]--;
-	LightLock_Unlock(&util_mvd_video_decoder_raw_image_mutex[session]);
+	/* Transfer ownership of MVD's RGB565 output to the caller. */
+	*raw_data = ready_frame->data[0];
+	for(uint8_t i = 0; i < AV_NUM_DATA_POINTERS; i++)
+		ready_frame->data[i] = NULL;
+	av_frame_free(&ready_frame);
 	return DEF_SUCCESS;
 
 	invalid_arg:
@@ -2886,11 +3012,6 @@ uint32_t Util_decoder_mvd_get_image(uint8_t** raw_data, double* current_pos, uin
 	not_inited:
 	return DEF_ERR_NOT_INITIALIZED;
 
-	try_again:
-	return DEF_ERR_TRY_AGAIN;
-
-	out_of_memory:
-	return DEF_ERR_OUT_OF_MEMORY;
 }
 
 void Util_decoder_video_skip_image(double* current_pos, uint8_t packet_index, uint8_t session)
@@ -2940,7 +3061,8 @@ void Util_decoder_video_skip_image(double* current_pos, uint8_t packet_index, ui
 
 void Util_decoder_mvd_skip_image(double* current_pos, uint8_t session)
 {
-	uint16_t buffer_num = 0;
+	AVFrame* ready_frame = NULL;
+	AVStream* stream = NULL;
 	double framerate = 0;
 	double current_frame = 0;
 	double timebase = 0;
@@ -2951,38 +3073,33 @@ void Util_decoder_mvd_skip_image(double* current_pos, uint8_t session)
 	if(!util_decoder_opened_file[session] || !util_video_decoder_init[session][0] || !util_mvd_video_decoder_init)
 		return;
 
-	if(util_mvd_video_decoder_available_raw_image[session] == 0)
+	if(!util_decoder_format_context[session]
+	|| util_video_decoder_stream_num[session][0]
+		>= util_decoder_format_context[session]->nb_streams)
+		return;
+	stream = util_decoder_format_context[session]->streams[
+		util_video_decoder_stream_num[session][0]];
+	if(!stream || Util_decoder_mvd_take_ready_frame(session, &ready_frame)
+		!= DEF_SUCCESS)
 		return;
 
 	*current_pos = 0;
-	buffer_num = util_mvd_video_decoder_raw_image_ready_index[session];
-	framerate = (double)util_decoder_format_context[session]->streams[util_video_decoder_stream_num[session][0]]->avg_frame_rate.num / util_decoder_format_context[session]->streams[util_video_decoder_stream_num[session][0]]->avg_frame_rate.den;
-	if(util_mvd_video_decoder_raw_image[session][buffer_num]->duration != 0)
-		current_frame = (double)util_mvd_video_decoder_raw_image[session][buffer_num]->pts / util_mvd_video_decoder_raw_image[session][buffer_num]->duration;
+	if(stream->avg_frame_rate.den != 0)
+		framerate = (double)stream->avg_frame_rate.num
+			/ stream->avg_frame_rate.den;
+	if(ready_frame->duration != 0)
+		current_frame = (double)ready_frame->pts / ready_frame->duration;
 
-	timebase = av_q2d(util_decoder_format_context[session]->streams[util_video_decoder_stream_num[session][0]]->time_base);
+	timebase = av_q2d(stream->time_base);
 	if(timebase != 0)
-		*current_pos = (double)util_mvd_video_decoder_raw_image[session][buffer_num]->pts * timebase * 1000;//Calc pos.
+		*current_pos = (double)ready_frame->pts * timebase * 1000;//Calc pos.
 	else if(framerate != 0.0)
 		*current_pos = current_frame * (1000 / framerate);//Calc frame pos.
 
-	if(util_mvd_video_decoder_raw_image[session][buffer_num])
-	{
-		if(util_mvd_video_decoder_raw_image[session][buffer_num]->data[0])
-			linearFree(util_mvd_video_decoder_raw_image[session][buffer_num]->data[0]);
-		for(uint8_t i = 0; i < AV_NUM_DATA_POINTERS; i++)
-			util_mvd_video_decoder_raw_image[session][buffer_num]->data[i] = NULL;
-	}
-	av_frame_free(&util_mvd_video_decoder_raw_image[session][buffer_num]);
-
-	if(util_mvd_video_decoder_raw_image_ready_index[session] + 1 < util_mvd_video_decoder_max_raw_image[session])
-		util_mvd_video_decoder_raw_image_ready_index[session]++;
-	else
-		util_mvd_video_decoder_raw_image_ready_index[session] = 0;
-
-	LightLock_Lock(&util_mvd_video_decoder_raw_image_mutex[session]);
-	util_mvd_video_decoder_available_raw_image[session]--;
-	LightLock_Unlock(&util_mvd_video_decoder_raw_image_mutex[session]);
+	linearFree(ready_frame->data[0]);
+	for(uint8_t i = 0; i < AV_NUM_DATA_POINTERS; i++)
+		ready_frame->data[i] = NULL;
+	av_frame_free(&ready_frame);
 }
 
 uint32_t Util_decoder_seek(uint64_t seek_pos, Media_seek_flag flag, uint8_t session)
@@ -3088,6 +3205,9 @@ static void Util_decoder_video_exit(uint8_t session)
 
 static void Util_decoder_mvd_exit(uint8_t session)
 {
+	AVFrame* stale_frames[DEF_DECODER_MAX_RAW_IMAGE] = { 0, };
+	uint16_t max_raw_image = 0;
+
 	if(!util_mvd_video_decoder_init)
 		return;
 
@@ -3096,19 +3216,29 @@ static void Util_decoder_mvd_exit(uint8_t session)
 	util_mvd_video_decoder_poisoned = false;
 	util_mvd_video_decoder_poison_error = DEF_ERR_UNSAFE_VIDEO_STREAM;
 	miniiptv_h264_parameter_guard_reset(&util_mvd_video_parameter_guard);
+	LightLock_Lock(&util_mvd_video_decoder_raw_image_mutex[session]);
+	max_raw_image = util_mvd_video_decoder_max_raw_image[session];
+	if(max_raw_image > DEF_DECODER_MAX_RAW_IMAGE)
+		max_raw_image = DEF_DECODER_MAX_RAW_IMAGE;
+	for(uint16_t i = 0; i < max_raw_image; i++)
+	{
+		stale_frames[i] = util_mvd_video_decoder_raw_image[session][i];
+		util_mvd_video_decoder_raw_image[session][i] = NULL;
+	}
 	util_mvd_video_decoder_available_raw_image[session] = 0;
 	util_mvd_video_decoder_raw_image_ready_index[session] = 0;
 	util_mvd_video_decoder_raw_image_current_index[session] = 0;
-	for(uint16_t i = 0; i < util_mvd_video_decoder_max_raw_image[session]; i++)
+	LightLock_Unlock(&util_mvd_video_decoder_raw_image_mutex[session]);
+	for(uint16_t i = 0; i < max_raw_image; i++)
 	{
-		if(util_mvd_video_decoder_raw_image[session][i])
+		if(stale_frames[i])
 		{
-			if(util_mvd_video_decoder_raw_image[session][i]->data[0])
-				linearFree(util_mvd_video_decoder_raw_image[session][i]->data[0]);
+			if(stale_frames[i]->data[0])
+				linearFree(stale_frames[i]->data[0]);
 			for(uint8_t k = 0; k < AV_NUM_DATA_POINTERS; k++)
-				util_mvd_video_decoder_raw_image[session][i]->data[k] = NULL;
+				stale_frames[i]->data[k] = NULL;
 		}
-		av_frame_free(&util_mvd_video_decoder_raw_image[session][i]);
+		av_frame_free(&stale_frames[i]);
 	}
 }
 

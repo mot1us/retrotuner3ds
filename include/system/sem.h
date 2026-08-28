@@ -4,8 +4,6 @@
 #include <stdint.h>
 #include "system/util/hid_types.h"
 
-#define DEF_SEM_CHECK_UPDATE_URL		/*(const char*)(*/"https://script.google.com/macros/s/AKfycbwTd3jzV0npUE9MNKmZIv3isazVR5D9_7A8rexsG1vr9SE7iavDBxgtzlph8dZipwu9/exec"/*)*/
-
 #define DEF_SEM_ENABLE_ICON
 //#define DEF_SEM_ENABLE_NAME
 #define DEF_SEM_ICON_PATH				(const char*)"romfs:/gfx/draw/icon/sem_icon.t3x"
@@ -104,6 +102,10 @@ void Sem_get_config(Sem_config* config);
 void Sem_set_config(Sem_config* new_config);
 
 void Sem_get_state(Sem_state* state);
+
+/* Keep the inherited settings service available for device status while
+ * allowing standalone applications to own LCD brightness and sleep policy. */
+void Sem_set_display_power_management_enabled(bool enabled);
 
 void Sem_init(void);
 

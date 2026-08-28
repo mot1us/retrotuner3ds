@@ -12,6 +12,11 @@
 # Host-test outputs
 /tests/bin/
 
+# Hardware diagnostics copied from an SD card
+telemetry.csv
+telemetry-prev.csv
+crash_dump_*.dmp
+
 # User playlists and local media fixtures are not distributable source
 *.m3u
 *.m3u8

@@ -1,7 +1,6 @@
 //Includes.
 #include "system/menu.h"
 
-#include <inttypes.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -12,16 +11,13 @@
 #include "system/draw/draw.h"
 #include "system/draw/exfont.h"
 #include "system/util/cpu_usage.h"
-#include "system/util/curl.h"
 #include "system/util/err.h"
 #include "system/util/expl.h"
 #include "system/util/fake_pthread.h"
 #include "system/util/file.h"
 #include "system/util/gpu_usage.h"
 #include "system/util/hid.h"
-#include "system/util/httpc.h"
 #include "system/util/hw_config.h"
-#include "system/util/json_types.h"
 #include "system/util/log.h"
 #include "system/util/net_usage.h"
 #include "system/util/nvs_usage.h"
@@ -36,13 +32,7 @@
 #include "video_player.h"
 
 //Defines.
-#define APP_INFO					/*(const char*)(*/"Video_player_for_3ds/" DEF_MENU_CURRENT_APP_VER/*)*/
-#define SEND_APP_INFO_URL			/*(const char*)(*/"https://script.google.com/macros/s/AKfycbyn_blFyKWXCgJr6NIF8x6ETs7CHRN5FXKYEAAIrzV6jPYcCkI/exec"/*)*/
-
-#define SEND_INFO_FMT_VER			(uint32_t)(1)			//Version of system info.
-
 #define NUM_OF_CALLBACKS			(uint16_t)(32)			//Number of worker thread callbacks.
-#define HTTP_POST_BUFFER_SIZE		(uint32_t)(0x80000)		//Buffer size for httpc.
 
 //Exit check.
 #define HID_EXIT_CFM(k)				(bool)(DEF_HID_PR_EM(k.a, 1) || DEF_HID_HD(k.a))
@@ -67,14 +57,20 @@
 #define HID_SAPP_OPEN_DESEL(k)		(bool)(DEF_HID_PHY_NP(k.touch))
 
 #define FONT_SIZE_EXIT_CHECK		(float)(15.00)	//Font size for exit check messages.
-#define FONT_SIZE_NEW_VERSION		(float)(21.00)	//Font size for new version available messages.
-#define FONT_SIZE_HOW_TO_UPDATE		(float)(15.00)	//Font size for update instruction messages.
 #if (defined(DEF_VID_ENABLE) || defined(DEF_FTPD_ENABLE) || defined(DEF_SAPP2_ENABLE) || defined(DEF_SAPP3_ENABLE) || defined(DEF_SAPP4_ENABLE) || defined(DEF_SAPP5_ENABLE) || defined(DEF_SAPP6_ENABLE) || defined(DEF_SAPP7_ENABLE))
 #define FONT_SIZE_CLOSE_BUTTON		(float)(15.00)	//Font size for close buttons.
 #endif //(defined(DEF_VID_ENABLE) || defined(DEF_FTPD_ENABLE) || defined(DEF_SAPP2_ENABLE) || defined(DEF_SAPP3_ENABLE) || defined(DEF_SAPP4_ENABLE) || defined(DEF_SAPP5_ENABLE) || defined(DEF_SAPP6_ENABLE) || defined(DEF_SAPP7_ENABLE))
-#if (defined(DEF_VID_ENABLE_NAME) || defined(DEF_FTPD_ENABLE_NAME) || defined(DEF_SAPP2_ENABLE_NAME) || defined(DEF_SAPP3_ENABLE_NAME) || defined(DEF_SAPP4_ENABLE_NAME) || defined(DEF_SAPP5_ENABLE_NAME) || defined(DEF_SAPP6_ENABLE_NAME) || defined(DEF_SAPP7_ENABLE_NAME))
+#if ((defined(DEF_VID_ENABLE) && defined(DEF_VID_ENABLE_NAME)) || \
+	(defined(DEF_FTPD_ENABLE) && defined(DEF_FTPD_ENABLE_NAME)) || \
+	(defined(DEF_SAPP2_ENABLE) && defined(DEF_SAPP2_ENABLE_NAME)) || \
+	(defined(DEF_SAPP3_ENABLE) && defined(DEF_SAPP3_ENABLE_NAME)) || \
+	(defined(DEF_SAPP4_ENABLE) && defined(DEF_SAPP4_ENABLE_NAME)) || \
+	(defined(DEF_SAPP5_ENABLE) && defined(DEF_SAPP5_ENABLE_NAME)) || \
+	(defined(DEF_SAPP6_ENABLE) && defined(DEF_SAPP6_ENABLE_NAME)) || \
+	(defined(DEF_SAPP7_ENABLE) && defined(DEF_SAPP7_ENABLE_NAME)) || \
+	defined(DEF_SEM_ENABLE_NAME))
 #define FONT_SIZE_SUB_APP_NAME		(float)(12.00)	//Font size for sub application names.
-#endif //(defined(DEF_VID_ENABLE_NAME) || defined(DEF_FTPD_ENABLE_NAME) || defined(DEF_SAPP2_ENABLE_NAME) || defined(DEF_SAPP3_ENABLE_NAME) || defined(DEF_SAPP4_ENABLE_NAME) || defined(DEF_SAPP5_ENABLE_NAME) || defined(DEF_SAPP6_ENABLE_NAME) || defined(DEF_SAPP7_ENABLE_NAME))
+#endif
 
 //Typedefs.
 typedef enum
@@ -82,8 +78,6 @@ typedef enum
 	MSG_EXIST,
 	MSG_CONFIRM,
 	MSG_CANCEL,
-	MSG_NEW_VERSION,
-	MSG_HOW_TO_UPDATE,
 
 	MSG_MAX,
 } Menu_msg;
@@ -103,21 +97,14 @@ typedef enum
 } Menu_app;
 
 //Prototypes.
-static uint32_t Menu_update_main_directory(void);
 static void Menu_hid_callback(void);
 void Menu_worker_thread(void* arg);
-
-#if (DEF_CURL_API_ENABLE || DEF_HTTPC_API_ENABLE)
-void Menu_send_app_info_thread(void* arg);
-void Menu_update_thread(void* arg);
-#endif //(DEF_CURL_API_ENABLE || DEF_HTTPC_API_ENABLE)
 
 //Variables.
 static bool menu_thread_run = false;
 static bool menu_main_run = true;
 static bool menu_must_exit = false;
 static bool menu_check_exit_request = false;
-static bool menu_update_available = false;
 static bool menu_init_request[APP_MAX] = { 0, };
 static bool menu_exit_request[APP_MAX] = { 0, };
 static uint32_t menu_icon_texture_id[APP_MAX] = { 0, };
@@ -131,10 +118,6 @@ static Draw_image_data menu_sem_icon_image[2] = { 0, };
 static Draw_image_data menu_sapp_button[APP_MAX] = { 0, };
 static Draw_image_data menu_sapp_close_button[APP_MAX] = { 0, };
 static Draw_image_data menu_sem_button = { 0, };
-
-#if (DEF_CURL_API_ENABLE || DEF_HTTPC_API_ENABLE)
-static Thread menu_send_app_info_thread = NULL, menu_update_thread = NULL;
-#endif //(DEF_CURL_API_ENABLE || DEF_HTTPC_API_ENABLE)
 
 //Code.
 bool Menu_query_must_exit_flag(void)
@@ -176,7 +159,6 @@ void Menu_init(void)
 	uint32_t queue_init_result = DEF_ERR_OTHER;
 	uint32_t watch_init_result = DEF_ERR_OTHER;
 	uint32_t result = DEF_ERR_OTHER;
-	uint32_t update_main_dir_result = DEF_ERR_OTHER;
 	C2D_Image cache[2] = { 0, };
 	Sem_config config = { 0, };
 	Sem_state state = { 0, };
@@ -206,15 +188,10 @@ void Menu_init(void)
 
 	DEF_LOG_RESULT_SMART(result, Util_sync_create(&menu_callback_mutex, SYNC_TYPE_NON_RECURSIVE_MUTEX), (result == DEF_SUCCESS), result);
 
-	//Move data directory.
-	update_main_dir_result = Menu_update_main_directory();
-
 	//Create directories.
 	Util_file_create_directory(DEF_MENU_MAIN_DIR);
-	Util_file_create_directory((DEF_MENU_MAIN_DIR "screen_recording/"));
 	Util_file_create_directory((DEF_MENU_MAIN_DIR "error/"));
 	Util_file_create_directory((DEF_MENU_MAIN_DIR "logs/"));
-	Util_file_create_directory((DEF_MENU_MAIN_DIR "ver/"));
 
 	//Init our modules.
 	DEF_LOG_RESULT_SMART(result, Util_init(), (result == DEF_SUCCESS), result);
@@ -248,23 +225,12 @@ void Menu_init(void)
 	Sem_draw_init();
 
 	//Init rest of our modules.
-	DEF_LOG_RESULT_SMART(result, Util_httpc_init(HTTP_POST_BUFFER_SIZE), (result == DEF_SUCCESS), result);
-	DEF_LOG_RESULT_SMART(result, Util_curl_init(), (result == DEF_SUCCESS), result);
 	DEF_LOG_RESULT_SMART(result, Util_hid_init(), (result == DEF_SUCCESS), result);
 	DEF_LOG_RESULT_SMART(result, Util_hid_add_callback(Menu_hid_callback), result, result);
 	DEF_LOG_RESULT_SMART(result, Util_expl_init(), (result == DEF_SUCCESS), result);
 	DEF_LOG_RESULT_SMART(result, Exfont_init(), (result == DEF_SUCCESS), result);
 	DEF_LOG_RESULT_SMART(result, Util_err_init(), (result == DEF_SUCCESS), result);
 	DEF_LOG_RESULT_SMART(result, Util_fake_pthread_init(), (result == DEF_SUCCESS), result);
-
-	if(update_main_dir_result != DEF_SUCCESS)
-	{
-		const char* msg = ("/Video_player/ -> " DEF_MENU_MAIN_DIR "\nMaybe destination directory already exist?");
-
-		//We need to call error API after calling Util_err_init().
-		Util_err_set_error_message("Failed to move app data directory.", msg, DEF_LOG_GET_FUNCTION_NAME(), update_main_dir_result);
-		Util_err_set_show_flag(true);
-	}
 
 	/* RetroTuner's UI and channel deck are intentionally ASCII-only. Loading
 	 * the inherited project's full CJK/Hangul/Unicode atlas costs several
@@ -274,12 +240,6 @@ void Menu_init(void)
 
 	menu_thread_run = true;
 	menu_worker_thread = threadCreate(Menu_worker_thread, NULL, DEF_THREAD_STACKSIZE * 2, DEF_THREAD_PRIORITY_ABOVE_NORMAL, 0, false);
-
-#if (DEF_CURL_API_ENABLE || DEF_HTTPC_API_ENABLE)
-	menu_update_thread = threadCreate(Menu_update_thread, NULL, DEF_THREAD_STACKSIZE, DEF_THREAD_PRIORITY_NORMAL, 1, true);
-	if (config.is_send_info_allowed)
-		menu_send_app_info_thread = threadCreate(Menu_send_app_info_thread, NULL, DEF_THREAD_STACKSIZE, DEF_THREAD_PRIORITY_LOW, 1, true);
-#endif //(DEF_CURL_API_ENABLE || DEF_HTTPC_API_ENABLE)
 
 	//Load sub application icons.
 #ifdef DEF_VID_ENABLE_ICON
@@ -435,11 +395,6 @@ void Menu_exit(void)
 	DEF_LOG_RESULT_SMART(result, threadJoin(menu_worker_thread, DEF_THREAD_WAIT_TIME), (result == DEF_SUCCESS), result);
 	threadFree(menu_worker_thread);
 
-#if (DEF_CURL_API_ENABLE || DEF_HTTPC_API_ENABLE)
-	DEF_LOG_RESULT_SMART(result, threadJoin(menu_send_app_info_thread, DEF_THREAD_WAIT_TIME), (result == DEF_SUCCESS), result);
-	DEF_LOG_RESULT_SMART(result, threadJoin(menu_update_thread, DEF_THREAD_WAIT_TIME), (result == DEF_SUCCESS), result);
-#endif //(DEF_CURL_API_ENABLE || DEF_HTTPC_API_ENABLE)
-
 	Util_watch_remove(WATCH_HANDLE_MAIN_MENU, &menu_must_exit);
 	Util_watch_remove(WATCH_HANDLE_MAIN_MENU, &menu_check_exit_request);
 
@@ -455,8 +410,6 @@ void Menu_exit(void)
 
 	Util_watch_exit();
 	Util_log_exit();
-	Util_httpc_exit();
-	Util_curl_exit();
 	Draw_exit();
 
 	Util_sync_destroy(&menu_callback_mutex);
@@ -595,12 +548,6 @@ void Menu_main(void)
 				Draw_align(&menu_msg[MSG_CONFIRM], 10, 140, FONT_SIZE_EXIT_CHECK, DEF_DRAW_GREEN, DRAW_X_ALIGN_RIGHT, DRAW_Y_ALIGN_CENTER, 190, 20);
 				Draw_align(&menu_msg[MSG_CANCEL], 210, 140, FONT_SIZE_EXIT_CHECK, DEF_DRAW_RED, DRAW_X_ALIGN_LEFT, DRAW_Y_ALIGN_CENTER, 190, 20);
 			}
-			else if(menu_update_available)
-			{
-				Draw(&menu_msg[MSG_NEW_VERSION], 10, 30, FONT_SIZE_NEW_VERSION, DEF_DRAW_RED);
-				Draw(&menu_msg[MSG_HOW_TO_UPDATE], 10, 60, FONT_SIZE_HOW_TO_UPDATE, color);
-			}
-
 			if(Util_log_query_show_flag())
 				Util_log_draw();
 
@@ -930,39 +877,6 @@ void Menu_main(void)
 		Sem_main();
 	else
 		menu_main_run = true;
-}
-
-static uint32_t Menu_update_main_directory(void)
-{
-	const char* old_main_dir = "/Video_player";
-	char new_main_dir[] = DEF_MENU_MAIN_DIR;
-	Handle fs_handle = 0;
-	FS_Archive archive = 0;
-	uint32_t result = DEF_ERR_OTHER;
-
-	//Remove last slash ("/").
-	new_main_dir[sizeof(new_main_dir) - 1] = 0x00;
-
-	result = FSUSER_OpenArchive(&archive, ARCHIVE_SDMC, fsMakePath(PATH_EMPTY, ""));
-	if(result != DEF_SUCCESS)
-	{
-		result = FSUSER_OpenDirectory(&fs_handle, archive, fsMakePath(PATH_ASCII, old_main_dir));
-		if(result != DEF_SUCCESS)
-		{
-			FSDIR_Close(fs_handle);
-			result = FSUSER_RenameDirectory(archive, fsMakePath(PATH_ASCII, old_main_dir), archive, fsMakePath(PATH_ASCII, new_main_dir));
-			if(result != DEF_SUCCESS)
-				DEF_LOG_RESULT(FSUSER_RenameDirectory, false, result);
-		}
-		else//No old directory was found.
-			result = DEF_SUCCESS;
-	}
-	else
-		DEF_LOG_RESULT(FSUSER_OpenArchive, false, result);
-
-	FSUSER_CloseArchive(archive);
-
-	return result;
 }
 
 static void Menu_hid_callback(void)
@@ -1311,137 +1225,3 @@ void Menu_worker_thread(void* arg)
 	DEF_LOG_STRING("Thread exit.");
 	threadExit(0);
 }
-
-#if (DEF_CURL_API_ENABLE || DEF_HTTPC_API_ENABLE)
-void Menu_send_app_info_thread(void* arg)
-{
-	(void)arg;
-	DEF_LOG_STRING("Thread started.");
-	uint8_t model = 0;
-	uint32_t result = DEF_ERR_OTHER;
-	char system_ver_char[0x20] = { 0, };
-	char user_agent[128] = { 0, };
-	const char* sem_model_name[DEF_SEM_MODEL_MAX] = { "O3DS", "O3DSXL", "O2DS", "N3DS", "N3DSXL", "N2DSXL", };
-	const char* screen_mode_name[DEF_SEM_SCREEN_MODE_MAX] = { "AUTO", "400PX", "800PX", "3D", };
-	Net_post_dl_parameters post_parameters = { 0, };
-	Str_data send_data = { 0, };
-	Sem_config config = { 0, };
-	Sem_state state = { 0, };
-
-#if DEF_CURL_API_ENABLE
-	snprintf(user_agent, sizeof(user_agent), "%s %s", Util_curl_get_default_user_agent(), APP_INFO);
-#else
-	snprintf(user_agent, sizeof(user_agent), "%s %s", Util_httpc_get_default_user_agent(), APP_INFO);
-#endif //DEF_CURL_API_ENABLE
-
-	Util_str_init(&send_data);
-
-	//Gather information.
-	Sem_get_config(&config);
-	Sem_get_state(&state);
-	osGetSystemVersionDataString(NULL, NULL, system_ver_char, sizeof(system_ver_char));
-	//We need real model here (in case fake model is enabled).
-	if(CFGU_GetSystemModel(&model) == DEF_SUCCESS)
-	{
-		if(model == CFG_MODEL_3DS)
-			state.console_model = DEF_SEM_MODEL_OLD3DS;
-		else if(model == CFG_MODEL_3DSXL)
-			state.console_model = DEF_SEM_MODEL_OLD3DSXL;
-		else if(model == CFG_MODEL_2DS)
-			state.console_model = DEF_SEM_MODEL_OLD2DS;
-		else if(model == CFG_MODEL_N3DS)
-			state.console_model = DEF_SEM_MODEL_NEW3DS;
-		else if(model == CFG_MODEL_N3DSXL)
-			state.console_model = DEF_SEM_MODEL_NEW3DSXL;
-		else if(model == CFG_MODEL_N2DSXL)
-			state.console_model = DEF_SEM_MODEL_NEW2DSXL;
-	}
-
-	//Make a json data, then send it.
-	Util_str_format(&send_data, DEF_JSON_START_OBJECT);
-	Util_str_format_append(&send_data, DEF_JSON_NON_STR_DATA_WITH_KEY("fmt_ver", "%" PRIu32, SEND_INFO_FMT_VER));
-	Util_str_format_append(&send_data, DEF_JSON_STR_DATA_WITH_KEY("app_ver", "v%s", DEF_MENU_CURRENT_APP_VER));
-	Util_str_format_append(&send_data, DEF_JSON_STR_DATA_WITH_KEY("system_ver", "%s", system_ver_char));
-	Util_str_format_append(&send_data, DEF_JSON_STR_DATA_WITH_KEY("model", "%s", sem_model_name[state.console_model]));
-	Util_str_format_append(&send_data, DEF_JSON_NON_STR_DATA_WITH_KEY("num_of_launch", "%" PRIu32, state.num_of_launch));
-	Util_str_format_append(&send_data, DEF_JSON_STR_DATA_WITH_KEY("lang", "%s", config.lang));
-	Util_str_format_append(&send_data, DEF_JSON_NON_STR_DATA_WITH_KEY("turn_off_lcd", "%" PRIu16, config.time_to_turn_off_lcd));
-	Util_str_format_append(&send_data, DEF_JSON_NON_STR_DATA_WITH_KEY("enter_sleep", "%" PRIu16, config.time_to_enter_sleep));
-	Util_str_format_append(&send_data, DEF_JSON_NON_STR_DATA_WITH_KEY("top_brightness", "%" PRIu8, config.top_lcd_brightness));
-	Util_str_format_append(&send_data, DEF_JSON_NON_STR_DATA_WITH_KEY("bottom_brightness", "%" PRIu8, config.bottom_lcd_brightness));
-	Util_str_format_append(&send_data, DEF_JSON_STR_DATA_WITH_KEY("screen_mode", "%s", screen_mode_name[config.screen_mode]));
-	Util_str_format_append(&send_data, DEF_JSON_NON_STR_DATA_WITH_KEY("scroll_speed", "%f", config.scroll_speed));
-	Util_str_format_append(&send_data, DEF_JSON_NON_STR_DATA_WITH_KEY("is_eco", "%s", (config.is_eco ? "true" : "false")));
-	Util_str_format_append(&send_data, DEF_JSON_NON_STR_DATA_WITH_KEY("is_night", "%s", (config.is_night ? "true" : "false")));
-	Util_str_format_append(&send_data, DEF_JSON_NON_STR_DATA_WITH_KEY_WITHOUT_COMMA("is_wifi_on", "%s", (config.is_wifi_on ? "true" : "false")));
-	Util_str_format_append(&send_data, DEF_JSON_END_OBJECT);
-
-	post_parameters.dl.url = SEND_APP_INFO_URL;
-	post_parameters.dl.max_redirect = 5;
-	post_parameters.dl.max_size = 0x10000;
-	post_parameters.u.data.data = (uint8_t*)send_data.buffer;
-	post_parameters.u.data.size = send_data.length;
-	post_parameters.dl.user_agent = user_agent;
-
-#if DEF_CURL_API_ENABLE
-	DEF_LOG_RESULT_SMART(result, Util_curl_post_and_dl_data(&post_parameters), (result == DEF_SUCCESS), result);
-#else
-	DEF_LOG_RESULT_SMART(result, Util_httpc_post_and_dl_data(&post_parameters), (result == DEF_SUCCESS), result);
-#endif //DEF_CURL_API_ENABLE
-
-	Util_str_free(&send_data);
-	free(post_parameters.dl.data);
-	post_parameters.dl.data = NULL;
-
-	DEF_LOG_STRING("Thread exit.");
-	threadExit(0);
-}
-
-void Menu_update_thread(void* arg)
-{
-	(void)arg;
-	DEF_LOG_STRING("Thread started.");
-	uint32_t result = DEF_ERR_OTHER;
-	Net_dl_parameters parameters = { 0, };
-
-	parameters.url = DEF_SEM_CHECK_UPDATE_URL;
-	parameters.max_redirect = 3;
-	parameters.max_size = 0x1000;
-
-#if DEF_CURL_API_ENABLE
-	DEF_LOG_RESULT_SMART(result, Util_curl_dl_data(&parameters), (result == DEF_SUCCESS), result);
-#else
-	DEF_LOG_RESULT_SMART(result, Util_httpc_dl_data(&parameters), (result == DEF_SUCCESS), result);
-#endif //DEF_CURL_API_ENABLE
-
-	if(result == DEF_SUCCESS)
-	{
-		char* pos[2] = { 0, };
-
-		pos[0] = strstr((char*)parameters.data, "<newest>");
-		pos[1] = strstr((char*)parameters.data, "</newest>");
-		if(pos[0] && pos[1])
-		{
-			uint32_t size = 0;
-			char ver[32] = { 0, };
-
-			pos[0] += strlen("<newest>");
-			size = (pos[1] - pos[0]);
-			if((pos[1] > pos[0]) && (size < sizeof(ver)))
-			{
-				memcpy(ver, pos[0], size);
-				ver[size] = 0x00;
-
-				if(DEF_MENU_CURRENT_APP_VER_INT < (uint32_t)strtoul(ver, NULL, 10))
-					menu_update_available = true;
-			}
-		}
-	}
-
-	free(parameters.data);
-	parameters.data = NULL;
-
-	DEF_LOG_STRING("Thread exit.");
-	threadExit(0);
-}
-#endif //(DEF_CURL_API_ENABLE || DEF_HTTPC_API_ENABLE)

@@ -21,14 +21,6 @@ typedef struct {
 } CurlBuffer;
 
 typedef struct {
-    FILE *file;
-    size_t size;
-    size_t maximum_size;
-    MiniIptvCancelFunction should_cancel;
-    void *cancel_userdata;
-} CurlFile;
-
-typedef struct {
     MiniIptvStreamWriteFunction write_data;
     void *write_userdata;
     MiniIptvStreamProgressFunction report_progress;
@@ -68,31 +60,6 @@ static int buffer_progress_callback(void *userdata, curl_off_t download_total,
         return 1;
     }
     return 0;
-}
-
-static size_t file_write_callback(char *incoming, size_t size, size_t count,
-                                  void *userdata) {
-    CurlFile *output = userdata;
-    size_t bytes;
-    if (size && count > SIZE_MAX / size) return 0;
-    bytes = size * count;
-    if (!output || !output->file || bytes > output->maximum_size - output->size)
-        return 0;
-    if (fwrite(incoming, 1, bytes, output->file) != bytes) return 0;
-    output->size += bytes;
-    return bytes;
-}
-
-static int progress_callback(void *userdata, curl_off_t download_total,
-                             curl_off_t download_now, curl_off_t upload_total,
-                             curl_off_t upload_now) {
-    CurlFile *output = userdata;
-    (void)download_total;
-    (void)download_now;
-    (void)upload_total;
-    (void)upload_now;
-    return output && output->should_cancel &&
-           output->should_cancel(output->cancel_userdata);
 }
 
 static size_t stream_write_callback(char *incoming, size_t size, size_t count,
@@ -262,80 +229,6 @@ int network_get_data_cancelable_with_options(
 int network_get_text(const char *url, const char *user_agent, const char *referrer,
                      NetworkTextResponse *response) {
     return network_get_data(url, user_agent, referrer, MINIIPTV_MANIFEST_LIMIT, response);
-}
-
-int network_download_file(const char *url, const char *user_agent,
-                          const char *referrer, size_t maximum_size,
-                          const char *output_path,
-                          MiniIptvCancelFunction should_cancel,
-                          void *cancel_userdata, size_t *downloaded_size) {
-    CURL *curl = NULL;
-    CURLcode result;
-    CurlFile output;
-    long status = 0;
-    int return_value = -1;
-
-    if (downloaded_size) *downloaded_size = 0;
-    if (!initialized || !url || !output_path || maximum_size == 0) return -1;
-    memset(&output, 0, sizeof(output));
-    output.maximum_size = maximum_size;
-    output.should_cancel = should_cancel;
-    output.cancel_userdata = cancel_userdata;
-    output.file = fopen(output_path, "wb");
-    if (!output.file) return -2;
-
-    curl = persistent_curl;
-    if (!curl) {
-        return_value = -3;
-        goto cleanup;
-    }
-    curl_easy_reset(curl);
-    curl_easy_setopt(curl, CURLOPT_URL, url);
-    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-    curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 5L);
-    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 15L);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 60L);
-    curl_easy_setopt(curl, CURLOPT_USERAGENT,
-        user_agent && *user_agent ? user_agent : "RetroTuner3DS/" RETROTUNER_VERSION);
-    if (referrer && *referrer) curl_easy_setopt(curl, CURLOPT_REFERER, referrer);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, file_write_callback);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &output);
-    curl_easy_setopt(curl, CURLOPT_BUFFERSIZE, 128L * 1024L);
-    curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);
-    curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, progress_callback);
-    curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &output);
-    curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
-    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
-    curl_easy_setopt(curl, CURLOPT_CAINFO, "romfs:/gfx/cert/cacert.pem");
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
-
-    result = curl_easy_perform(curl);
-    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
-    if (result == CURLE_ABORTED_BY_CALLBACK && should_cancel &&
-        should_cancel(cancel_userdata)) {
-        return_value = -5;
-        goto cleanup;
-    }
-    if (result != CURLE_OK) {
-        return_value = -(1000 + (int)result);
-        goto cleanup;
-    }
-    if (status != 200) {
-        return_value = -4;
-        goto cleanup;
-    }
-    if (fflush(output.file) != 0) {
-        return_value = -2;
-        goto cleanup;
-    }
-    if (downloaded_size) *downloaded_size = output.size;
-    return_value = 0;
-
-cleanup:
-    if (output.file) fclose(output.file);
-    if (return_value != 0) remove(output_path);
-    return return_value;
 }
 
 int network_stream_data(const char *url, const char *user_agent,

@@ -1,7 +1,7 @@
 # RetroTuner3DS
 
-RetroTuner3DS is a low-bitrate M3U/HLS stream player for the New Nintendo 3DS.
-Add an M3U playlist and it scans for compatible channels.
+RetroTuner3DS plays low-bitrate HLS streams from an extended M3U playlist on the
+New Nintendo 3DS. It scans the playlist and shows channels worth trying.
 
 This is still an experiment. It has only been tested on a New Nintendo 3DS,
 and some streams will fail even after they pass the first scan. Live channels
@@ -31,6 +31,9 @@ RetroTuner3DS currently supports:
 
 No channels or stream URLs are included. Bring your own M3U and make sure you
 have permission to use the streams in it.
+
+The playlist must be 128 KiB or smaller and use `#EXTINF` before each HTTP(S)
+channel URL.
 
 ## Controls
 

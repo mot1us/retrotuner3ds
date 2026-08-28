@@ -1750,6 +1750,11 @@ void MiniIptv_live_app_exit(void) {
      * therefore will not invoke Vid_exit() a second time. */
     miniiptv_live_stream_request_stop();
     if (Vid_query_init_flag()) Vid_exit(!aptShouldClose());
+    /* A timed-out decoder may still own the AVIO stream, curl handle, queues,
+     * or draw state. Leave all of those objects intact; main will ask the
+     * kernel to terminate the process as one unit instead of freeing beneath
+     * the surviving thread. */
+    if (!Vid_query_cleanup_safe()) return;
     miniiptv_live_stream_stop();
     LightLock_Lock(&app.lock);
     network_ready = app.network_ready;

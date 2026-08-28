@@ -34,10 +34,6 @@
 #include "video_player.h"
 
 //Defines.
-#define CHECK_INTERNET_URL					/*(const char*)(*/"http://network-test.debian.org/nm"/*)*/
-#define CHECK_INTERNET_SUCCESS_TEXT			(const char*)("NetworkManager is online")
-#define CHECK_INTERNET_INTERVAL_MS			(uint64_t)(10000)
-
 #if ((DEF_CURL_API_ENABLE || DEF_HTTPC_API_ENABLE) && DEF_SEM_ENABLE_UPDATER)
 #define UPDATE_FILE_PREFIX					/*(const char*)(*/"Vid_"/*)*/
 #endif //((DEF_CURL_API_ENABLE || DEF_HTTPC_API_ENABLE) && DEF_SEM_ENABLE_UPDATER)
@@ -597,7 +593,6 @@ typedef enum
 
 typedef struct
 {
-	bool is_connect_test_succes;
 	uint8_t wifi_state;
 	Sem_model fake_model;
 } Sem_internal_state;
@@ -685,9 +680,6 @@ void Sem_encode_thread(void* arg);
 void Sem_record_thread(void* arg);
 #endif //(DEF_ENCODER_VIDEO_AUDIO_API_ENABLE && DEF_CONVERTER_SW_API_ENABLE && DEF_SEM_ENABLE_SCREEN_RECORDER)
 
-#if (DEF_CURL_API_ENABLE || DEF_HTTPC_API_ENABLE)
-void Sem_check_connectivity_thread(void* arg);
-#endif //(DEF_CURL_API_ENABLE || DEF_HTTPC_API_ENABLE)
 
 #if ((DEF_CURL_API_ENABLE || DEF_HTTPC_API_ENABLE) && DEF_SEM_ENABLE_UPDATER)
 void Sem_update_thread(void* arg);
@@ -702,6 +694,7 @@ static bool sem_reload_msg_request = false;
 static bool sem_scroll_mode = false;
 static bool sem_dump_log_request = false;
 static bool sem_should_wifi_enabled = false;
+static bool sem_display_power_management_enabled = true;
 static double sem_y_offset = 0;
 static double sem_y_min = 0;
 static double sem_touch_x_move_left = 0;
@@ -752,9 +745,6 @@ static bool sem_is_ram_usage_monitor_running = false;
 static bool sem_should_ram_usage_monitor_running = false;
 #endif //DEF_RAM_USAGE_API_ENABLE
 
-#if (DEF_CURL_API_ENABLE || DEF_HTTPC_API_ENABLE)
-static Thread sem_check_connectivity_thread = NULL;
-#endif //(DEF_CURL_API_ENABLE || DEF_HTTPC_API_ENABLE)
 
 #if ((DEF_CURL_API_ENABLE || DEF_HTTPC_API_ENABLE) && DEF_SEM_ENABLE_UPDATER)
 static bool sem_check_update_request = false;
@@ -1116,6 +1106,14 @@ void Sem_get_state(Sem_state* state)
 	Util_sync_unlock(&sem_config_state_mutex);
 }
 
+void Sem_set_display_power_management_enabled(bool enabled)
+{
+	/* This setter is intentionally valid before Sem_init(). RetroTuner uses it
+	 * to prevent the inherited settings worker from overriding the app's
+	 * always-awake playback policy while retaining battery/Wi-Fi telemetry. */
+	sem_display_power_management_enabled = enabled;
+}
+
 void Sem_init(void)
 {
 	DEF_LOG_STRING("Initializing...");
@@ -1314,10 +1312,6 @@ void Sem_init(void)
 
 	sem_thread_run = true;
 	sem_hw_config_thread = threadCreate(Sem_hw_config_thread, NULL, DEF_THREAD_STACKSIZE, DEF_THREAD_PRIORITY_REALTIME, 1, false);
-#if (DEF_CURL_API_ENABLE || DEF_HTTPC_API_ENABLE)
-	sem_check_connectivity_thread = threadCreate(Sem_check_connectivity_thread, NULL, DEF_THREAD_STACKSIZE, DEF_THREAD_PRIORITY_NORMAL, 1, false);
-#endif //(DEF_CURL_API_ENABLE || DEF_HTTPC_API_ENABLE)
-
 #if ((DEF_CURL_API_ENABLE || DEF_HTTPC_API_ENABLE) && DEF_SEM_ENABLE_UPDATER)
 	sem_update_thread = threadCreate(Sem_update_thread, NULL, DEF_THREAD_STACKSIZE, DEF_THREAD_PRIORITY_NORMAL, 0, false);
 #endif //((DEF_CURL_API_ENABLE || DEF_HTTPC_API_ENABLE) && DEF_SEM_ENABLE_UPDATER)
@@ -1633,11 +1627,6 @@ void Sem_exit(void)
 
 	DEF_LOG_RESULT_SMART(result, threadJoin(sem_hw_config_thread, DEF_THREAD_WAIT_TIME), (result == DEF_SUCCESS), result);
 	threadFree(sem_hw_config_thread);
-
-#if (DEF_CURL_API_ENABLE || DEF_HTTPC_API_ENABLE)
-	DEF_LOG_RESULT_SMART(result, threadJoin(sem_check_connectivity_thread, DEF_THREAD_WAIT_TIME), (result == DEF_SUCCESS), result);
-	threadFree(sem_check_connectivity_thread);
-#endif //(DEF_CURL_API_ENABLE || DEF_HTTPC_API_ENABLE)
 
 	for(uint32_t i = 0; i < UPDATE_DATA_MAX; i++)
 		Util_str_free(&sem_newest_ver_data[i]);
@@ -3471,18 +3460,8 @@ static void Sem_get_system_info(void)
 	state.wifi_signal = osGetWifiStrength();
 	//Get Wi-Fi state from shared memory #0x1FF81067.
 	sem_internal_state.wifi_state = *(uint8_t*)0x1FF81067;
-	if(sem_internal_state.wifi_state == 2)
-	{
-#if (DEF_CURL_API_ENABLE || DEF_HTTPC_API_ENABLE)
-		if (!sem_internal_state.is_connect_test_succes)
-			state.wifi_signal += 4;//Without Internet access.
-#endif //(DEF_CURL_API_ENABLE || DEF_HTTPC_API_ENABLE)
-	}
-	else
-	{
+	if(sem_internal_state.wifi_state != 2)
 		state.wifi_signal = DEF_SEM_WIFI_SIGNAL_DISABLED;
-		sem_internal_state.is_connect_test_succes = false;
-	}
 
 	//Get time.
 	state.time.years = time->tm_year + 1900;
@@ -3832,61 +3811,62 @@ void Sem_hw_config_thread(void* arg)
 				sem_should_wifi_enabled = !sem_should_wifi_enabled;
 		}
 
-		//If config.time_to_turn_off_lcd == 0, it means automatic turn off LCD feature has been disabled.
-		if(config.time_to_turn_off_lcd > 0 && DEF_UTIL_MS_TO_S(hid_info.afk_time_ms) > config.time_to_turn_off_lcd)
+		if(sem_display_power_management_enabled)
 		{
-			result = Util_hw_config_set_screen_state(true, true, false);
-			if(result != DEF_SUCCESS)
-				DEF_LOG_RESULT(Util_hw_config_set_screen_state, false, result);
-		}
-		else if(config.time_to_turn_off_lcd > 0 && DEF_UTIL_MS_TO_S(hid_info.afk_time_ms) > (uint16_t)(config.time_to_turn_off_lcd - 10))
-		{
-			result = Util_hw_config_set_screen_brightness(true, true, 10);
-			if(result != DEF_SUCCESS)
-				DEF_LOG_RESULT(Util_hw_config_set_screen_brightness, false, result);
-		}
-		else
-		{
-			result = Util_hw_config_set_screen_state(true, false, config.is_top_lcd_on);
-			if(result != DEF_SUCCESS)
-				DEF_LOG_RESULT(Util_hw_config_set_screen_state, false, result);
-
-			result = Util_hw_config_set_screen_state(false, true, config.is_bottom_lcd_on);
-			if(result != DEF_SUCCESS)
-				DEF_LOG_RESULT(Util_hw_config_set_screen_state, false, result);
-
-			if(config.top_lcd_brightness == config.bottom_lcd_brightness)
+			//If time_to_turn_off_lcd is zero, automatic LCD power-off is disabled.
+			if(config.time_to_turn_off_lcd > 0 && DEF_UTIL_MS_TO_S(hid_info.afk_time_ms) > config.time_to_turn_off_lcd)
 			{
-				result = Util_hw_config_set_screen_brightness(true, true, config.top_lcd_brightness);
+				result = Util_hw_config_set_screen_state(true, true, false);
+				if(result != DEF_SUCCESS)
+					DEF_LOG_RESULT(Util_hw_config_set_screen_state, false, result);
+			}
+			else if(config.time_to_turn_off_lcd > 0 && DEF_UTIL_MS_TO_S(hid_info.afk_time_ms) > (uint16_t)(config.time_to_turn_off_lcd - 10))
+			{
+				result = Util_hw_config_set_screen_brightness(true, true, 10);
 				if(result != DEF_SUCCESS)
 					DEF_LOG_RESULT(Util_hw_config_set_screen_brightness, false, result);
 			}
 			else
 			{
-				result = Util_hw_config_set_screen_brightness(true, false, config.top_lcd_brightness);
+				result = Util_hw_config_set_screen_state(true, false, config.is_top_lcd_on);
 				if(result != DEF_SUCCESS)
-					DEF_LOG_RESULT(Util_hw_config_set_screen_brightness, false, result);
+					DEF_LOG_RESULT(Util_hw_config_set_screen_state, false, result);
 
-				result = Util_hw_config_set_screen_brightness(false, true, config.bottom_lcd_brightness);
+				result = Util_hw_config_set_screen_state(false, true, config.is_bottom_lcd_on);
 				if(result != DEF_SUCCESS)
-					DEF_LOG_RESULT(Util_hw_config_set_screen_brightness, false, result);
+					DEF_LOG_RESULT(Util_hw_config_set_screen_state, false, result);
+
+				if(config.top_lcd_brightness == config.bottom_lcd_brightness)
+				{
+					result = Util_hw_config_set_screen_brightness(true, true, config.top_lcd_brightness);
+					if(result != DEF_SUCCESS)
+						DEF_LOG_RESULT(Util_hw_config_set_screen_brightness, false, result);
+				}
+				else
+				{
+					result = Util_hw_config_set_screen_brightness(true, false, config.top_lcd_brightness);
+					if(result != DEF_SUCCESS)
+						DEF_LOG_RESULT(Util_hw_config_set_screen_brightness, false, result);
+
+					result = Util_hw_config_set_screen_brightness(false, true, config.bottom_lcd_brightness);
+					if(result != DEF_SUCCESS)
+						DEF_LOG_RESULT(Util_hw_config_set_screen_brightness, false, result);
+				}
 			}
-		}
 
-		//If config.time_to_enter_sleep == 0, it means automatic sleep feature has been disabled.
-		if(config.time_to_enter_sleep > 0 && DEF_UTIL_MS_TO_S(hid_info.afk_time_ms) > config.time_to_enter_sleep)
-		{
-			result = Util_hw_config_sleep_system((HW_CONFIG_WAKEUP_BIT_OPEN_SHELL | HW_CONFIG_WAKEUP_BIT_PRESS_HOME_BUTTON));
-			if(result == DEF_SUCCESS)
+			//If time_to_enter_sleep is zero, automatic sleep is disabled.
+			if(config.time_to_enter_sleep > 0 && DEF_UTIL_MS_TO_S(hid_info.afk_time_ms) > config.time_to_enter_sleep)
 			{
-				//We woke up from sleep.
-				Util_hid_reset_afk_time();
+				result = Util_hw_config_sleep_system((HW_CONFIG_WAKEUP_BIT_OPEN_SHELL | HW_CONFIG_WAKEUP_BIT_PRESS_HOME_BUTTON));
+				if(result == DEF_SUCCESS)
+					Util_hid_reset_afk_time();
+				else
+					DEF_LOG_RESULT(Util_hw_config_sleep_system, false, result);
 			}
-			else
-				DEF_LOG_RESULT(Util_hw_config_sleep_system, false, result);
 		}
 
-		Util_sleep(DEF_THREAD_ACTIVE_SLEEP_TIME);
+		/* Standalone mode only needs status refreshes, not 20 Hz LCD control. */
+		Util_sleep(sem_display_power_management_enabled ? DEF_THREAD_ACTIVE_SLEEP_TIME : 250000u);
 	}
 
 	DEF_LOG_STRING("Thread exit.");
@@ -4156,62 +4136,6 @@ void Sem_record_thread(void* arg)
 	threadExit(0);
 }
 #endif //(DEF_ENCODER_VIDEO_AUDIO_API_ENABLE && DEF_CONVERTER_SW_API_ENABLE && DEF_SEM_ENABLE_SCREEN_RECORDER)
-
-#if (DEF_CURL_API_ENABLE || DEF_HTTPC_API_ENABLE)
-void Sem_check_connectivity_thread(void* arg)
-{
-	(void)arg;
-	DEF_LOG_STRING("Thread started.");
-	uint32_t count = (CHECK_INTERNET_INTERVAL_MS / DEF_UTIL_US_TO_MS(DEF_THREAD_ACTIVE_SLEEP_TIME));
-
-	while (sem_thread_run)
-	{
-		if (count >= (CHECK_INTERNET_INTERVAL_MS / DEF_UTIL_US_TO_MS(DEF_THREAD_ACTIVE_SLEEP_TIME)))
-		{
-			Sem_state state = { 0, };
-
-			Sem_get_state(&state);
-			count = 0;
-
-			if(state.wifi_signal != DEF_SEM_WIFI_SIGNAL_DISABLED)
-			{
-				uint32_t dl_size = 0;
-				uint32_t result = DEF_ERR_OTHER;
-				Net_dl_parameters dl_parameters = { 0, };
-
-				dl_parameters.url = CHECK_INTERNET_URL;
-				dl_parameters.max_redirect = 0;
-				dl_parameters.max_size = 0x1000;
-				dl_parameters.downloaded_size = &dl_size;
-
-#if DEF_HTTPC_API_ENABLE//Curl uses more CPU so prefer to use httpc module here.
-				result = Util_httpc_dl_data(&dl_parameters);
-#else
-				result = Util_curl_dl_data(&dl_parameters);
-#endif //DEF_HTTPC_API_ENABLE
-
-				if(result == DEF_SUCCESS && (dl_size - 1) == strlen(CHECK_INTERNET_SUCCESS_TEXT)
-				&& strncmp((char*)dl_parameters.data, CHECK_INTERNET_SUCCESS_TEXT, (dl_size - 1)) == 0)
-					sem_internal_state.is_connect_test_succes = true;
-				else
-					sem_internal_state.is_connect_test_succes = false;
-
-				free(dl_parameters.data);
-				dl_parameters.data = NULL;
-			}
-			else
-				sem_internal_state.is_connect_test_succes = false;//Wi-Fi is disabled.
-		}
-		else
-			Util_sleep(DEF_THREAD_ACTIVE_SLEEP_TIME);
-
-		count++;
-	}
-
-	DEF_LOG_STRING("Thread exit.");
-	threadExit(0);
-}
-#endif //(DEF_CURL_API_ENABLE || DEF_HTTPC_API_ENABLE)
 
 #if ((DEF_CURL_API_ENABLE || DEF_HTTPC_API_ENABLE) && DEF_SEM_ENABLE_UPDATER)
 void Sem_update_thread(void* arg)

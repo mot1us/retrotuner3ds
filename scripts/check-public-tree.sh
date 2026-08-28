@@ -4,7 +4,10 @@ set -eu
 project_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$project_root"
 
-for forbidden_pattern in '*.m3u' '*.m3u8' '*.3dsx' '*.cia' '*.elf' '*.map' '*.smdh' '*.zip'; do
+for forbidden_pattern in \
+    '*.m3u' '*.m3u8' '*.3dsx' '*.cia' '*.elf' '*.map' '*.smdh' '*.zip' \
+    ':(glob)**/telemetry.csv' ':(glob)**/telemetry-prev.csv' \
+    ':(glob)**/crash_dump_*.dmp'; do
     tracked_files=$(git ls-files -- "$forbidden_pattern")
     if [ -n "$tracked_files" ]; then
         printf '%s\n' "Refusing public build: generated/private files are tracked:" >&2

@@ -7,8 +7,9 @@ Citro3D, audio timing, Wi-Fi behavior, and final teardown still need a real New
 
 ## Open it in VS Code
 
-Open `RetroTuner3DS.code-workspace`. Its terminal starts in the project root
-with the devkitPro environment used by this Mac.
+Open `RetroTuner3DS.code-workspace`. Its terminal starts in the project root.
+The checked-in tasks expect devkitPro at `/opt/devkitpro`; adjust the workspace
+settings if your installation lives somewhere else.
 
 Useful commands:
 
@@ -89,43 +90,45 @@ A useful test report includes:
 Testing the same URL in VLC is also helpful. It proves the source is currently
 alive, but not that its codec, segment layout, or resolution is safe for MVD.
 
-## Working with Codex
-
-The easiest requests name the result, the latest hardware observation, and the
-Git boundary. For example:
-
-> Fix B so one press returns from buffering. Run the host tests and build a
-> hardware package, but let me test it before anything reaches main.
-
-You can review every edit in VS Code before it is committed. Useful checkpoints
-are “show me the diff,” “commit but do not push,” and “this passed hardware;
-merge it to main.”
-
 ## Remotes
 
-- `origin` is `mot1us/retrotuner3ds`.
-- `upstream` is the original Video player for 3DS repository and is fetch-only.
-
-To inspect upstream without merging it:
+Your fork is normally `origin`. If you want to compare inherited code, add the
+original Video player for 3DS repository as a fetch-only `upstream` remote once:
 
 ```sh
-git fetch upstream
+git remote add upstream https://github.com/Core-2-Extreme/Video_player_for_3DS.git
+git remote set-url --push upstream DISABLED
+git fetch upstream --no-tags
 git log --oneline --left-right main...upstream/main
 ```
 
 ## Public release packages
 
-Only package a commit after its candidate has passed real hardware testing.
-The script exports a clean committed tree, runs tests, builds the `.3dsx`, and
-refuses to include playlists:
+The packaging script exports a clean committed tree, runs the host tests, builds
+the `.3dsx`, and refuses to include playlists. Replace `VERSION` with the value
+in `include/miniiptv/version.h`:
 
 ```sh
-./scripts/package-release.sh 0.5.1-rc9.28
+./scripts/package-release.sh VERSION
 ```
 
-The argument must match `RETROTUNER_VERSION` in
-`include/miniiptv/version.h`. Output goes to the ignored `dist/` directory with
-a SHA-256 file and an unpacked drop-in folder.
+That creates an explicitly untagged local test package. Before publishing, test
+the exact commit on hardware, create an annotated `vVERSION` tag at that commit,
+and require the tag during packaging:
+
+```sh
+git tag -a vVERSION -m "RetroTuner3DS VERSION"
+git push origin HEAD vVERSION
+RETROTUNER_REQUIRE_TAG=1 \
+RETROTUNER_THIRD_PARTY_SOURCE_ARCHIVE=/path/to/audited-third-party-sources.zip \
+    ./scripts/package-release.sh VERSION
+```
+
+Output goes to the ignored `dist/` directory with SHA-256 files, an unpacked
+drop-in folder, and a project-source archive made from the exact release
+commit. Tagged public packaging also refuses to run without a separately
+audited source archive for the bundled third-party libraries. The pinned
+revisions that belong in that archive are listed in `LICENSES/README.md`.
 
 Public packages never contain `channels.m3u`. Keep private hardware playlists
 and test packages outside the repository.

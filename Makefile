@@ -39,6 +39,12 @@ INCLUDES	:=	include library/include
 GRAPHICS	:=	gfx
 ROMFS		:=	romfs
 GFXBUILD	:=	$(ROMFS)/gfx
+
+# The upstream framework ships optional camera, recorder, FTP, JSON and legacy
+# network wrappers. RetroTuner does not enable those features, so do not spend
+# build time compiling objects that the linker would discard in full.
+UNUSED_CFILES	:=	ftp_daemon.c cam.c curl.c encoder.c ftp.c httpc.c json.c mic.c muxer.c
+UNUSED_SFILES	:=	yuv420p_rgb565le.s yuv420p_rgb888le.s
 #---------------------------------------------------------------------------------
 APP_VER				:= 1
 APP_TITLE			:= Retro Tuner 3DS
@@ -68,7 +74,7 @@ CFLAGS		+= -Wunused-const-variable=2 -Wuse-after-free=3 -Wuninitialized -Wstrict
 CFLAGS		+= -Walloca -Warith-conversion -Warray-bounds=2 -Wbidi-chars=any -Wduplicated-cond -Wtrampolines -Wshadow -Wundef -Wunused-macros
 CFLAGS		+= -Wwrite-strings -Wdangling-else -Wdangling-pointer=2 -Wflex-array-member-not-at-end -Wlogical-op -Winvalid-utf8
 CFLAGS		+= -Wdouble-promotion -Wdisabled-optimization -Winline -Winvalid-pch -Wredundant-decls -Wcast-qual -Wduplicated-branches
-CFLAGS		+= -Walloc-zero -Wformat-truncation=1 -Wstack-usage=16384 -Wno-format-nonliteral
+CFLAGS		+= -Walloc-zero -Wformat-truncation=1 -Wstack-usage=20480 -Wno-format-nonliteral
 
 CXXFLAGS	:= $(CFLAGS) -fno-rtti -fno-exceptions -std=c++11
 
@@ -106,8 +112,8 @@ LDFLAGS		+= -Wl,--wrap,pthread_once,--wrap,pthread_cond_init,--wrap,pthread_cond
 LDFLAGS		+= -Wl,--wrap,pthread_cond_broadcast,--wrap,pthread_cond_destroy,--wrap,pthread_create,--wrap,pthread_join
 LDFLAGS		+= -Wl,--wrap,pthread_attr_init,--wrap,pthread_attr_destroy,--wrap,pthread_attr_setstacksize
 
-LIBS		:= -lswresample -lavformat -lswscale -lavcodec -lavutil -lcitro2d -lcitro3d -lx264 -lmp3lame
-LIBS		+= -ldav1d -lcurl -lnghttp2 -lmbedtls -lmbedx509 -lmbedcrypto -lctru -lz -lm
+LIBS		:= -lswresample -lavformat -lswscale -lavcodec -lavutil -lcitro2d -lcitro3d
+LIBS		+= -lcurl -lnghttp2 -lmbedtls -lmbedx509 -lmbedcrypto -lctru -lz -lm
 
 #---------------------------------------------------------------------------------
 # list of directories containing libraries, this must be the top level containing
@@ -131,9 +137,9 @@ export VPATH	:=	$(foreach dir,$(SOURCES),$(CURDIR)/$(dir)) \
 
 export DEPSDIR	:=	$(CURDIR)/$(BUILD)
 
-CFILES		:=	$(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.c)))
+CFILES		:=	$(filter-out $(UNUSED_CFILES),$(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.c))))
 CPPFILES	:=	$(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.cpp)))
-SFILES		:=	$(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.s)))
+SFILES		:=	$(filter-out $(UNUSED_SFILES),$(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.s))))
 PICAFILES	:=	$(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.v.pica)))
 SHLISTFILES	:=	$(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.shlist)))
 GFXFILES	:=	$(foreach dir,$(GRAPHICS),$(notdir $(wildcard $(dir)/*.t3s)))
@@ -244,7 +250,7 @@ all: 3dsx cia_all
 
 3dsx: $(BUILD) $(GFXBUILD) $(DEPSDIR) $(ROMFS_T3XFILES) $(T3XHFILES)
 	@echo Building 3dsx...
-	@$(MAKE) -j -s --no-print-directory -C $(BUILD) -f $(CURDIR)/Makefile
+	@$(MAKE) -s --no-print-directory -C $(BUILD) -f $(CURDIR)/Makefile
 	@echo
 
 cia_all: cia_normal_ram cia_high_ram

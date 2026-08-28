@@ -1,77 +1,56 @@
 #!/bin/sh
 set -eu
 
-mkdir -p tests/bin
-cc -std=c11 -Wall -Wextra -Werror -pedantic \
-  -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer \
-  -Iinclude \
-  source/miniiptv/playlist.c \
-  tests/test_playlist.c \
-  -o tests/bin/test_playlist_san
+host_cc=${CC:-cc}
+host_c_standard=${RETROTUNER_HOST_C_STANDARD:-c99}
+test_bin_dir=$(mktemp -d "${TMPDIR:-/tmp}/retrotuner-host-tests.XXXXXX")
 
-ASAN_OPTIONS=detect_leaks=0 tests/bin/test_playlist_san
+cleanup() {
+  rm -rf -- "$test_bin_dir"
+}
+trap cleanup EXIT HUP INT TERM
 
-cc -std=c11 -Wall -Wextra -Werror -pedantic \
-  -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer \
-  -Iinclude \
-  source/miniiptv/hls.c \
-  tests/test_hls_parser.c \
-  -o tests/bin/test_hls_parser_san
+# LeakSanitizer is reliable on the Linux CI runner. Apple's sanitizer runtime
+# does not consistently support it, so macOS keeps the previous behavior unless
+# the caller supplies ASAN_OPTIONS explicitly.
+if [ -z "${ASAN_OPTIONS+x}" ]; then
+  case "$(uname -s)" in
+    Linux) ASAN_OPTIONS=detect_leaks=1 ;;
+    *) ASAN_OPTIONS=detect_leaks=0 ;;
+  esac
+fi
+export ASAN_OPTIONS
 
-ASAN_OPTIONS=detect_leaks=0 tests/bin/test_hls_parser_san
+compile_and_run() {
+  test_name=$1
+  shift
+  "$host_cc" -std="$host_c_standard" -Wall -Wextra -Werror -pedantic \
+    -fsanitize=address,undefined -fno-sanitize-recover=all \
+    -fno-omit-frame-pointer -Iinclude "$@" -o "$test_bin_dir/$test_name"
+  "$test_bin_dir/$test_name"
+}
 
-cc -std=c11 -Wall -Wextra -Werror -pedantic \
-  -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer \
-  -Iinclude \
-  source/miniiptv/hls.c \
-  source/miniiptv/channel_scan.c \
-  tests/test_channel_scan.c \
-  -o tests/bin/test_channel_scan_san
+compile_and_run test_playlist \
+  source/miniiptv/playlist.c tests/test_playlist.c
 
-ASAN_OPTIONS=detect_leaks=0 tests/bin/test_channel_scan_san
+compile_and_run test_hls_parser \
+  source/miniiptv/hls.c tests/test_hls_parser.c
 
-cc -std=c11 -Wall -Wextra -Werror -pedantic \
-  -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer \
-  -Iinclude \
-  source/miniiptv/ts_mux.c \
-  tests/test_ts_mux.c \
-  -o tests/bin/test_ts_mux_san
+compile_and_run test_channel_scan \
+  source/miniiptv/hls.c source/miniiptv/channel_scan.c \
+  tests/test_channel_scan.c
 
-ASAN_OPTIONS=detect_leaks=0 tests/bin/test_ts_mux_san
+compile_and_run test_ts_mux \
+  source/miniiptv/ts_mux.c tests/test_ts_mux.c
 
-cc -std=c11 -Wall -Wextra -Werror -pedantic \
-  -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer \
-  -Iinclude \
-  source/miniiptv/h264_annexb.c \
-  tests/test_h264_annexb.c \
-  -o tests/bin/test_h264_annexb_san
+compile_and_run test_h264_annexb \
+  source/miniiptv/h264_annexb.c tests/test_h264_annexb.c
 
-ASAN_OPTIONS=detect_leaks=0 tests/bin/test_h264_annexb_san
+compile_and_run test_network \
+  source/miniiptv/network.c tests/test_network.c -lcurl
 
-cc -std=c11 -Wall -Wextra -Werror -pedantic \
-  -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer \
-  -Iinclude \
-  source/miniiptv/network.c \
-  tests/test_network.c \
-  -lcurl \
-  -o tests/bin/test_network_san
+compile_and_run test_buffer_shadow \
+  source/miniiptv/buffer_shadow.c tests/test_buffer_shadow.c
 
-ASAN_OPTIONS=detect_leaks=0 tests/bin/test_network_san
-
-cc -std=c11 -Wall -Wextra -Werror -pedantic \
-  -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer \
-  -Iinclude \
-  source/miniiptv/buffer_shadow.c \
-  tests/test_buffer_shadow.c \
-  -o tests/bin/test_buffer_shadow_san
-
-ASAN_OPTIONS=detect_leaks=0 tests/bin/test_buffer_shadow_san
-
-cc -std=c11 -Wall -Wextra -Werror -pedantic \
-  -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer \
-  -Iinclude \
-  source/miniiptv/telemetry_log.c \
-  tests/test_telemetry_log.c \
-  -o tests/bin/test_telemetry_log_san
-
-ASAN_OPTIONS=detect_leaks=0 tests/bin/test_telemetry_log_san
+compile_and_run test_telemetry_log \
+  source/miniiptv/telemetry_log.c tests/test_telemetry_log.c

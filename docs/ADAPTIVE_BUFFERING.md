@@ -71,10 +71,11 @@ zero. It does not pause a working stream just because the meter looks low.
 
 An isolated underrun waits for one complete segment. If another happens within
 90 seconds, the player asks for a deeper target based on two recent segments or
-the controller's recommendation. That target is capped at 3 MiB, and the wait
-is bounded between 2.5 and 8 seconds. If the broadcaster has not published
-enough data by then, playback resumes with whatever complete data is safely
-available.
+the controller's recommendation. That target is capped at 3 MiB. Once at least
+one complete segment is available, the extra wait for that deeper target is
+bounded between 2.5 and 8 seconds. A total outage still waits until the producer
+gets a complete segment or reports a failure; there is no safe data to resume
+with before then.
 
 After a discontinuity or other clean decoder relock, the player always rebuilds
 a conservative two-segment reserve. It does not trust the warm profile from the

@@ -47,7 +47,8 @@ path.
 - The version and changelog are current.
 - Bundled dependency notices still match the shipped libraries.
 - The `.3dsx` and release ZIP have SHA-256 checksums.
-- No playlist, stream URL, private media, or generated build file is tracked.
+- No playlist, private media, credential-bearing URL, or generated build file is
+  tracked.
 
 ## License
 

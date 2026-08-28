@@ -23,15 +23,20 @@ retrieved from the exact source revisions used by the repository.
 | jsmn | Header | [25647e692c7906b96ffd2b05ca54c097948e879c](https://github.com/Core-2-Extreme/jsmn_for_3DS/commit/25647e692c7906b96ffd2b05ca54c097948e879c) | MIT; [jsmn.txt](jsmn.txt) |
 | Mozilla CA certificate store | romfs/gfx/cert/cacert.pem, extracted July 2, 2024 | [curl CA Extract](https://curl.se/docs/caextract.html) | MPL-2.0; [Mozilla-Public-License-2.0.txt](Mozilla-Public-License-2.0.txt) |
 
-The build notes under [library/](../library/) record how each pinned source
-revision was configured for Nintendo 3DS. Copyright notices embedded in
-individual source and header files remain in effect.
+The repository's `library/` directory records how each pinned source revision
+was configured for Nintendo 3DS. The project source snapshot made by
+`scripts/package-release.sh` contains this repository only; it is not complete
+corresponding source for the prebuilt third-party libraries. Tagged public
+packages therefore require a separately prepared and audited third-party source
+archive containing the revisions listed above. The packaging script checks that
+an archive was supplied, but cannot verify its contents. Copyright notices
+embedded in individual source and header files remain in effect.
 
 This inventory documents the repository as audited on August 22, 2026. When a
 vendored component is upgraded, update its pinned revision and corresponding
 license material in the same change.
 
-For online binary releases, keep this repository and the exact corresponding
-source links above available alongside the download. Anyone redistributing a
-binary through another channel is responsible for also satisfying the
-applicable source-code and notice requirements.
+The pinned links above identify the audited revisions; they are not themselves
+a source bundle or a substitute for any license-required source distribution.
+Anyone distributing a binary is responsible for satisfying the applicable
+source-code and notice requirements.

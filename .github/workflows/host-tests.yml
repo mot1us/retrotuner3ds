@@ -1,18 +1,38 @@
-name: Host tests
+name: Build and test
 
 on:
   push:
+    branches:
+      - main
   pull_request:
+    branches:
+      - main
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  sanitizers:
+  host-tests:
     runs-on: ubuntu-latest
+    env:
+      ASAN_OPTIONS: detect_leaks=1
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
+      - name: Install host dependencies
+        run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev
       - name: Check public-tree hygiene
         run: ./scripts/check-public-tree.sh
-      - name: Run playlist, HLS, and H.264 tests
+      - name: Run host sanitizer tests
         run: ./tests/run_live_host_tests.sh
+
+  build-3dsx:
+    runs-on: ubuntu-latest
+    container:
+      image: devkitpro/devkitarm:latest
+      options: --user 1001
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build the 3DSX target
+        run: make 3dsx -j2
