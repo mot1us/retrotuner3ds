@@ -4,6 +4,9 @@ set -eu
 host_cc=${CC:-cc}
 host_c_standard=${RETROTUNER_HOST_C_STANDARD:-c99}
 test_bin_dir=$(mktemp -d "${TMPDIR:-/tmp}/retrotuner-host-tests.XXXXXX")
+# Test executables stay isolated in the temporary directory. The telemetry
+# fixture still writes short-lived CSV files beneath this ignored path.
+mkdir -p tests/bin
 
 cleanup() {
   rm -rf -- "$test_bin_dir"
