@@ -1,27 +1,20 @@
 # RetroTuner3DS
 
 RetroTuner3DS plays low-bitrate HLS streams from an extended M3U playlist on the
-New Nintendo 3DS. It scans the playlist and shows channels worth trying.
-
-This is still an experiment. It has only been tested on a New Nintendo 3DS,
-and some streams will fail even after they pass the first scan. Live channels
-change formats, disappear, and occasionally publish segments that are too much
-for the console.
+New Nintendo 3DS. It has only been tested on a New Nintendo 3DS and is still
+experimental: some streams will fail even after passing the opening scan.
 
 ## What works best
 
-The sweet spot is H.264 video with AAC audio at 360p and roughly 1 Mbps or
-less. Some 480p streams work too. The app prefers the lowest-bitrate rendition
-whose advertised format fits the limits below. Missing details still need
-checking when you tune. It does not transcode HD streams.
+Use H.264 video with AAC audio in MPEG-TS HLS segments, ideally 360p at roughly
+1 Mbps or less. The app prefers the lowest-bitrate compatible rendition and
+does not transcode. The upper limit is 640x480 at a known 30.5 fps or lower;
+encrypted streams, byte ranges, and fMP4 init maps are unsupported.
 
-RetroTuner3DS currently supports:
-
-- live HLS using MPEG-TS segments;
-- H.264/AVC video and AAC audio;
-- up to 640x480 at a known 30.5 fps or lower;
-- unencrypted streams without byte ranges or fMP4 init maps;
-- playlists with up to 64 channels.
+The opening scan checks manifests, so its results are advisory. A `*` means a
+channel advertises compatible video details; `?` means it needs a playback
+check. After tuning, `+` means it played and `!` means it failed to start in
+this session. You can always retry.
 
 ## Install
 
@@ -30,11 +23,10 @@ RetroTuner3DS currently supports:
 2. Put your playlist at `sd:/3ds/retrotuner3ds/channels.m3u`.
 3. Open RetroTuner3DS from the Homebrew Launcher.
 
-No channels or stream URLs are included. Bring your own M3U and make sure you
-have permission to use the streams in it.
-
-The playlist must be 128 KiB or smaller and use `#EXTINF` before each HTTP(S)
-channel URL.
+No channels or stream URLs are included. Supply your own playlist with up to
+64 channels and a maximum size of 128 KiB. Each HTTP(S) URL needs a preceding
+`#EXTINF` entry. Extended-M3U `user-agent` and `referrer` attributes are supported.
+Use streams you have permission to access.
 
 ## Controls
 
@@ -42,65 +34,25 @@ channel URL.
 | --- | --- |
 | Up / Down | Pick a channel |
 | Left / Right | Change channel-list page |
-| A | Tune or retry |
-| B | Cancel, go back, or open the channel drawer during playback |
+| A | Tune or retry; play/pause while watching |
+| B | Cancel or go back; open/close the channel drawer while video keeps playing |
 | L / R | Previous or next channel |
 | Select | Cycle the diagnostic screens |
+| X | Open the theme picker |
 | Start | Exit |
 
-Channels appear as the opening scan finds them. A `*` means the stream openly
-advertised compatible video details. A `?` means the app needs to tune it
-before it can know for sure. During that session, `+` means a channel played
-and `!` means it failed to start. Nothing is permanently blocked; you can
-always try again.
+## Themes
 
-## Playlist example
+Press X to choose Classic, Cyberpunk, Wasteland, or Old-Time Radio. Use the
+D-pad to preview, A to apply and save for the next launch, or B to cancel.
+Video keeps playing while you choose, and its colors stay the same.
 
-```m3u
-#EXTM3U
-#EXTINF:-1,Example Channel
-https://example.test/live/index.m3u8
-```
+## Troubleshooting
 
-Extended-M3U `user-agent` and `referrer` attributes are supported when a
-legitimate stream requires them.
-
-## What the app is doing
-
-```text
-M3U playlist -> quick manifest scan -> channel list
-                                      |
-HLS playlist -> lowest safe rendition -> network buffer
-                                      |
-                         FFmpeg + AAC + MVD H.264 -> Citro3D
-```
-
-The network thread downloads complete HLS segments into a fixed 6 MiB ring
-while the player reads from the other side. A new channel normally starts with
-two complete segments in reserve. If the same channel is tuned again, the app
-can use what it learned earlier in that session to choose a faster or safer
-starting point.
-
-The opening scan is deliberately shallow. It reads manifests, not video, so it
-can find stations quickly. The real codec, resolution, segment-size, and MVD
-checks happen when you tune. That is why a channel can appear in the list and
-still fail safely afterward.
-
-The full technical versions live in [Architecture](docs/ARCHITECTURE.md) and
-[Buffering](docs/ADAPTIVE_BUFFERING.md).
-
-## Telemetry
-
-The app writes diagnostic data to:
-
-```text
-sd:/3ds/retrotuner3ds/telemetry.csv
-```
-
-The previous run is kept as `telemetry-prev.csv`. The logs contain timing,
-buffer, decoder, audio, relock, underrun, and error data. They do not contain
-stream URLs, video, or audio. Logging stops at 512 KiB and is never required
-for playback.
+Diagnostic logs live in `sd:/3ds/retrotuner3ds/`: `telemetry.csv` for
+the current run, `telemetry-prev.csv` for the previous run, and `theme.cfg.log`
+for the last theme-save attempt. Playback logs stop at 512 KiB and contain no
+stream URLs, video, or audio. Logs are not required for playback.
 
 ## Building it
 
@@ -111,9 +63,10 @@ Install the devkitPro 3DS toolchain, then run:
 make 3dsx -j4
 ```
 
-More setup and release notes are in the [development guide](docs/DEVELOPMENT.md).
-You can also read [Contributing](CONTRIBUTING.md), the
-[Changelog](CHANGELOG.md), and the [Roadmap](ROADMAP.md).
+See the [development guide](docs/DEVELOPMENT.md) for setup and release steps,
+[Architecture](docs/ARCHITECTURE.md) and [Buffering](docs/ADAPTIVE_BUFFERING.md)
+for technical details, and [Contributing](CONTRIBUTING.md),
+[Changelog](CHANGELOG.md), and [Roadmap](ROADMAP.md) for project information.
 
 ## Safety, credits, and license
 

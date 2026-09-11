@@ -17,6 +17,12 @@ telemetry.csv
 telemetry-prev.csv
 crash_dump_*.dmp
 
+# On-device appearance preference
+theme.cfg
+theme.cfg.tmp
+theme.cfg.bak
+theme.cfg.log
+
 # User playlists and local media fixtures are not distributable source
 *.m3u
 *.m3u8

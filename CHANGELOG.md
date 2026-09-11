@@ -3,6 +3,35 @@
 This is the useful summary of what changed. The individual release-candidate
 experiments and hardware-test fixes are still available in the Git history.
 
+## 0.5.1-rc9.31 - theme saving
+
+- Replace temporary-file renames with checked writes and read-back verification.
+  Keep the previous valid theme in `theme.cfg.bak` and use it if the main
+  preference cannot be read. Saving an unchanged theme skips the rewrite.
+- Show the failing save step and error code. `theme.cfg.log` keeps the last
+  attempt, without adding settings writes to the playback loop.
+- Add failure-injection tests for settings writes and recovery.
+- Shorten the README and correct the playback controls.
+
+The theme visuals were tested in rc9.30. This persistence fix still needs
+an on-device save/restart check. Streaming and playback are unchanged.
+
+## 0.5.1-rc9.30 - themes
+
+- Added Classic, Cyberpunk, Wasteland, and Old-Time Radio themes, shared by
+  startup, the channel deck, tuning, playback controls, and diagnostics.
+- X opens a bottom-screen picker without stopping video. D-pad previews,
+  A applies/saves, and B/X cancels the preview. START still exits.
+- Saved preferences are bounded and optional; malformed files fall back to
+  Classic. Hardware testing found a save warning, addressed in rc9.31.
+- Added static neon/terminal/radio accents and themed tuning noise, using
+  existing draw primitives. No images, extra workers, or video tinting.
+- Added palette contrast/preference tests and mocked theme-picker tests.
+
+Playback, buffering, decoder/audio handoff, and channel selection behavior
+remain the tested rc9.29 baseline. Theme visuals worked on hardware;
+the save path needed the follow-up above.
+
 ## 0.5.1-rc9.29 - 2026-09-11 (hardware test build)
 
 - Reviewed Video player for 3DS v1.8.0. Its relevant decoder fixes were already

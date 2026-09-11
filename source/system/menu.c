@@ -1,5 +1,6 @@
 //Includes.
 #include "system/menu.h"
+#include "miniiptv/theme.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -219,8 +220,8 @@ void Menu_init(void)
 	Draw_frame_ready();
 	/* RetroTuner is standalone. Keep the first drawable frame dark and free of
 	 * the inherited clock/battery/Wi-Fi chrome while the player initializes. */
-	Draw_screen_ready(DRAW_SCREEN_TOP_LEFT, 0xFF21160F);
-	Draw_screen_ready(DRAW_SCREEN_BOTTOM, 0xFF21160F);
+	Draw_screen_ready(DRAW_SCREEN_TOP_LEFT, miniiptv_theme_active()->background);
+	Draw_screen_ready(DRAW_SCREEN_BOTTOM, miniiptv_theme_active()->background);
 	Draw_apply_draw();
 	Sem_draw_init();
 

@@ -8,6 +8,7 @@
 #include "system/sem.h"
 #include "video_player.h"
 #include "miniiptv/live_app.h"
+#include "miniiptv/theme_ui.h"
 
 //Defines.
 //N/A.
@@ -26,6 +27,8 @@ int main(void)
 {
 	uint64_t boot_animation_ends_ms;
 	bool previous_sleep_allowed;
+
+	MiniIptv_theme_ui_init("sdmc:/3ds/retrotuner3ds/theme.cfg");
 
 	/* RetroTuner owns its always-awake playback policy. The inherited settings
 	 * service remains available for battery/Wi-Fi status only. */

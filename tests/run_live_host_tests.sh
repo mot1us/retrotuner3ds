@@ -60,3 +60,14 @@ compile_and_run test_telemetry_log \
 
 compile_and_run test_speaker -Itests/speaker_stubs \
   source/system/util/speaker.c tests/test_speaker.c
+
+compile_and_run test_theme \
+  source/miniiptv/theme.c tests/test_theme.c -lm
+
+compile_and_run test_theme_ui -Itests/theme_stubs \
+  source/miniiptv/theme.c source/miniiptv/theme_store.c \
+  source/miniiptv/theme_ui.c tests/test_theme_ui.c
+
+# Includes the real storage source under deterministic stdio fault wrappers.
+compile_and_run test_theme_store \
+  source/miniiptv/theme.c tests/test_theme_store.c

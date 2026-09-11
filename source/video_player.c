@@ -10,6 +10,8 @@
 #include "miniiptv/live_stream.h"
 #include "miniiptv/stream_limits.h"
 #include "miniiptv/telemetry_log.h"
+#include "miniiptv/theme.h"
+#include "miniiptv/theme_ui.h"
 #include "system/menu.h"
 #include "system/sem.h"
 #include "system/draw/draw.h"
@@ -96,13 +98,13 @@
 #define NON_FULL_SCREEN_HEIGHT						(uint16_t)(225)							//Video height in non-full-screen in px.
 #define ENTER_FULL_SCREEN_TRANSITION_PERIOD			(uint16_t)(180)							//Transition period from non-full-screen to full-screen in frames.
 
-/* RetroTuner3DS's code-drawn palette (ABGR8888). */
-#define MINIIPTV_COLOR_INK						(uint32_t)(0xFF241A14)
-#define MINIIPTV_COLOR_CREAM					(uint32_t)(0xFFE8EBED)
-#define MINIIPTV_COLOR_ORANGE					(uint32_t)(0xFF4AA6E3)
-#define MINIIPTV_COLOR_MINT					(uint32_t)(0xFFB6B9B9)
-#define MINIIPTV_COLOR_CYAN					(uint32_t)(0xFFD2B56C)
-#define MINIIPTV_COLOR_SHADOW					(uint32_t)(0xFF1B1917)
+/* Shared presentation-only palette; never tint the decoded video texture. */
+#define MINIIPTV_COLOR_INK						(miniiptv_theme_active()->background)
+#define MINIIPTV_COLOR_CREAM					(miniiptv_theme_active()->text)
+#define MINIIPTV_COLOR_ORANGE					(miniiptv_theme_active()->accent)
+#define MINIIPTV_COLOR_MINT					(miniiptv_theme_active()->muted)
+#define MINIIPTV_COLOR_CYAN					(miniiptv_theme_active()->highlight)
+#define MINIIPTV_COLOR_SHADOW					(miniiptv_theme_active()->shadow)
 #define MINIIPTV_BUFFER_METER_MS			(uint32_t)(24000)
 #define MINIIPTV_BUFFER_METER_SEGMENTS		(uint32_t)(24)
 #define MINIIPTV_MEMORY_SAMPLE_INTERVAL_MS	(uint64_t)(5000)
@@ -894,7 +896,7 @@ static void Vid_draw_miniiptv_top_bar(void)
 		212, 13);
 	Draw_align_c(on_air ? "ON AIR" : (active ? "TUNING" : "STANDBY"),
 		320, 0, 9.0f,
-		on_air ? MINIIPTV_COLOR_MINT : MINIIPTV_COLOR_ORANGE,
+		on_air ? miniiptv_theme_active()->success : miniiptv_theme_active()->warning,
 		DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 74, 13);
 }
 
@@ -980,7 +982,7 @@ static void Vid_draw_miniiptv_live_overlay(const Sem_state* system_state)
 	unsigned long effective_bandwidth = 0;
 	const char* state_text = "TUNING";
 	const char* rating_text = "CHECKING BAND";
-	uint32_t state_color = MINIIPTV_COLOR_ORANGE;
+	uint32_t state_color = miniiptv_theme_active()->warning;
 	char line[128] = { 0, };
 	char battery_text[24] = { 0, };
 	uint64_t now_ms = osGetTime();
@@ -1088,7 +1090,7 @@ static void Vid_draw_miniiptv_live_overlay(const Sem_state* system_state)
 	|| vid_player.state == PLAYER_STATE_BUFFERING) && has_presented_frame)
 	{
 		state_text = "ON AIR";
-		state_color = MINIIPTV_COLOR_MINT;
+		state_color = miniiptv_theme_active()->success;
 	}
 	else if(vid_player.state == PLAYER_STATE_PAUSE)
 		state_text = "PAUSED";
@@ -1108,18 +1110,18 @@ static void Vid_draw_miniiptv_live_overlay(const Sem_state* system_state)
 		 * for a clean decoder rebuild. This is a controlled station relock, not
 		 * a terminal playback failure. */
 		state_text = "RELOCK";
-		state_color = MINIIPTV_COLOR_ORANGE;
+		state_color = miniiptv_theme_active()->warning;
 	}
 	else if(live_error != 0)
 	{
 		state_text = "SIGNAL ERROR";
-		state_color = DEF_DRAW_RED;
+		state_color = miniiptv_theme_active()->danger;
 	}
 	if(__atomic_load_n(&vid_miniptv_return_requested, __ATOMIC_ACQUIRE))
 	{
 		state_text = __atomic_load_n(&vid_miniptv_switch_requested,
 			__ATOMIC_ACQUIRE) ? "HANDOFF" : "RETURNING";
-		state_color = MINIIPTV_COLOR_ORANGE;
+		state_color = miniiptv_theme_active()->warning;
 	}
 
 	effective_bandwidth = live_info.measured_bandwidth > 0
@@ -1167,7 +1169,7 @@ static void Vid_draw_miniiptv_live_overlay(const Sem_state* system_state)
 	snprintf(battery_text, sizeof(battery_text), "BAT %u%%%s",
 		battery_level, charging ? "+" : "");
 	Draw_align_c(battery_text, 198, 20, 11.5f,
-		charging ? MINIIPTV_COLOR_ORANGE : MINIIPTV_COLOR_CREAM,
+		charging ? miniiptv_theme_active()->warning : MINIIPTV_COLOR_CREAM,
 		DRAW_X_ALIGN_RIGHT, DRAW_Y_ALIGN_CENTER, 108, 14);
 
 	Draw_c("NOW RECEIVING", 14, 51, 8.5f, MINIIPTV_COLOR_MINT);
@@ -1176,7 +1178,7 @@ static void Vid_draw_miniiptv_live_overlay(const Sem_state* system_state)
 	Draw_c(state_text, 14, 90, 8.0f, state_color);
 	Draw_align_c(rating_text, 204, 90, 8.0f,
 		strcmp(rating_text, "LOW-BAND SIGNAL") == 0
-			? MINIIPTV_COLOR_MINT : MINIIPTV_COLOR_ORANGE,
+			? miniiptv_theme_active()->success : miniiptv_theme_active()->warning,
 		DRAW_X_ALIGN_RIGHT, DRAW_Y_ALIGN_CENTER, 96, 12);
 
 	/* This is compressed HLS input waiting in the producer ring, not a
@@ -1188,12 +1190,12 @@ static void Vid_draw_miniiptv_live_overlay(const Sem_state* system_state)
 	for(uint32_t i = 0; i < MINIIPTV_BUFFER_METER_SEGMENTS; i++)
 	{
 		uint32_t segment_end_ms = (i + 1u) * 1000u;
-		uint32_t segment_color = MINIIPTV_COLOR_MINT;
+		uint32_t segment_color = miniiptv_theme_active()->success;
 		if(segment_end_ms <= reserve_goal_ms / 3u)
-			segment_color = DEF_DRAW_RED;
+			segment_color = miniiptv_theme_active()->danger;
 		else if((uint64_t)segment_end_ms <=
 			((uint64_t)reserve_goal_ms * 2u) / 3u)
-			segment_color = MINIIPTV_COLOR_ORANGE;
+			segment_color = miniiptv_theme_active()->warning;
 		if(i < reserve_segments)
 			Draw_texture(&pixel, segment_color,
 				16.0f + (float)i * 11.5f, 124, 9.5f, 6);
@@ -1227,7 +1229,7 @@ static void Vid_draw_miniiptv_live_overlay(const Sem_state* system_state)
 	if(vid_miniptv_detail_page != MINIIPTV_DETAILS_HIDDEN)
 	{
 		uint32_t detail_color = live_error == 0
-			? MINIIPTV_COLOR_MINT : DEF_DRAW_RED;
+			? miniiptv_theme_active()->success : miniiptv_theme_active()->danger;
 		Draw_texture(&pixel, MINIIPTV_COLOR_INK, 0, 0, 320, 240);
 		Draw_texture(&pixel, MINIIPTV_COLOR_CYAN, 10, 10, 300, 2);
 		Draw_c("STREAM DETAILS", 12, 18, 14.0f, MINIIPTV_COLOR_CREAM);
@@ -1267,12 +1269,12 @@ static void Vid_draw_miniiptv_live_overlay(const Sem_state* system_state)
 		}
 		else
 		{
-			uint32_t shadow_color = MINIIPTV_COLOR_ORANGE;
+			uint32_t shadow_color = miniiptv_theme_active()->warning;
 			if(live_info.shadow.state == MINIIPTV_BUFFER_SHADOW_HEALTHY)
-				shadow_color = MINIIPTV_COLOR_MINT;
+				shadow_color = miniiptv_theme_active()->success;
 			else if(live_info.shadow.state == MINIIPTV_BUFFER_SHADOW_AT_RISK
 			|| live_info.shadow.state == MINIIPTV_BUFFER_SHADOW_UNSUSTAINABLE)
-				shadow_color = DEF_DRAW_RED;
+				shadow_color = miniiptv_theme_active()->danger;
 			snprintf(line, sizeof(line), "BUFFER  %s",
 				miniiptv_buffer_shadow_state_label(live_info.shadow.state));
 			Draw_c(line, 14, 69, 12.0f, shadow_color);
@@ -1300,19 +1302,21 @@ static void Vid_draw_miniiptv_live_overlay(const Sem_state* system_state)
 			Draw_c(line, 14, 184, 9.5f, shadow_color);
 		}
 		Draw_texture(&pixel, MINIIPTV_COLOR_ORANGE, 10, 207, 300, 1);
-		Draw_align_c("SELECT NEXT PAGE     B CHANNELS", 8, 214, 9.5f,
+		Draw_align_c("SELECT PAGE   B CHANNELS   X THEME", 8, 211, 9.0f,
 			MINIIPTV_COLOR_CREAM, DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER,
-			304, 14);
+			304, 12);
+		MiniIptv_theme_ui_draw_trim(320, 226);
 		return;
 	}
 
 	Draw_texture(&pixel, MINIIPTV_COLOR_ORANGE, 12, 190, 296, 1);
-	Draw_align_c("A PLAY/PAUSE     B CHANNELS", 8, 198, 9.0f,
+	Draw_align_c("A PLAY/PAUSE   B CHANNELS   X THEME", 8, 198, 9.0f,
 		MINIIPTV_COLOR_CREAM, DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER,
 		304, 12);
-	Draw_align_c("L/R SWITCH     SELECT DETAILS", 8, 211, 8.5f,
+	Draw_align_c("L/R SWITCH     SELECT DETAILS", 8, 211, 9.0f,
 		MINIIPTV_COLOR_MINT, DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER,
 		304, 12);
+	MiniIptv_theme_ui_draw_trim(320, 226);
 }
 
 //Code.
@@ -1346,6 +1350,12 @@ void Vid_hid(const Hid_info* key)
 		__atomic_store_n(&vid_embedded_exit_requested, true, __ATOMIC_RELEASE);
 		return;
 	}
+
+	/* A theme is a bottom-screen modal only. Consume its input before channel
+	 * navigation or the inherited X file browser, but keep error X-save intact. */
+	if(vid_embedded_test_mode && !Util_err_query_show_flag()
+	&& MiniIptv_theme_ui_hid(key))
+		return;
 
 	/* Opening the station drawer is presentation-only: the producer, FFmpeg,
 	 * MVD, audio, and the active ring keep running. A confirmed selection is
@@ -2758,6 +2768,12 @@ void Vid_main(void)
 		disabled_color = DEF_DRAW_WEAK_WHITE;
 		back_color = DEF_DRAW_BLACK;
 	}
+	if(vid_embedded_test_mode)
+	{
+		color = MINIIPTV_COLOR_CREAM;
+		disabled_color = MINIIPTV_COLOR_MINT;
+		back_color = MINIIPTV_COLOR_INK;
+	}
 
 	//Assign previous frame index first.
 	for(uint32_t i = 0; i < EYE_MAX; i++)
@@ -3454,6 +3470,9 @@ void Vid_main(void)
 						else
 							Vid_draw_miniiptv_live_overlay(&state);
 					}
+					/* Keep the normal overlay's telemetry sampling alive while the
+					 * presentation-only picker covers the bottom screen. */
+					MiniIptv_theme_ui_draw();
 
 					if(Util_err_query_show_flag())
 						Util_err_draw();
@@ -4412,6 +4431,11 @@ static void Vid_draw_init_exit_message(void)
 	{
 		color = DEF_DRAW_WHITE;
 		back_color = DEF_DRAW_BLACK;
+	}
+	if(vid_embedded_test_mode)
+	{
+		color = MINIIPTV_COLOR_CREAM;
+		back_color = MINIIPTV_COLOR_INK;
 	}
 
 	//Check if we should update the screen.

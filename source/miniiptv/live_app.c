@@ -11,6 +11,8 @@
 #include "miniiptv/network.h"
 #include "miniiptv/playlist.h"
 #include "miniiptv/telemetry_log.h"
+#include "miniiptv/theme.h"
+#include "miniiptv/theme_ui.h"
 #include "miniiptv/version.h"
 #include "system/draw/draw.h"
 #include "system/sem.h"
@@ -29,14 +31,15 @@
 #define AUTO_RELOCK_MAX_ATTEMPTS 2u
 #define AUTO_RELOCK_WINDOW_MS 30000ULL
 
-/* Minimal 1990s portable-TV palette (ABGR8888). */
-#define UI_INK 0xFF241A14u
-#define UI_PANEL 0xFF3B2B24u
-#define UI_CREAM 0xFFE8EBEDu
-#define UI_ORANGE 0xFF4AA6E3u
-#define UI_MINT 0xFFB6B9B9u
-#define UI_PINK 0xFF4F4FD5u
-#define UI_CYAN 0xFFD2B56Cu
+/* One immutable palette for the deck, loading screen and player. */
+#define UI_INK (miniiptv_theme_active()->background)
+#define UI_PANEL (miniiptv_theme_active()->panel)
+#define UI_CREAM (miniiptv_theme_active()->text)
+#define UI_ORANGE (miniiptv_theme_active()->accent)
+#define UI_MINT (miniiptv_theme_active()->muted)
+#define UI_PINK (miniiptv_theme_active()->danger)
+#define UI_CYAN (miniiptv_theme_active()->highlight)
+#define UI_OVERLAY ((miniiptv_theme_active()->shadow & 0x00FFFFFFu) | 0xE8000000u)
 
 typedef enum {
     LIVE_APP_NO_PLAYLIST = 0,
@@ -138,7 +141,7 @@ void MiniIptv_live_app_draw_boot_screen(void) {
     Draw_screen_ready(DRAW_SCREEN_TOP_LEFT, UI_INK);
     draw_static_aperture(&pixel, now, aperture_top, aperture_height);
     if (elapsed > 100u) {
-        Draw_texture(&pixel, 0xD0121110u, 84, 87, 232, 65);
+        Draw_texture(&pixel, UI_OVERLAY, 84, 87, 232, 65);
         Draw_texture(&pixel, UI_CYAN, 96, 83, 72, 2);
         Draw_texture(&pixel, UI_ORANGE, 232, 154, 72, 2);
         Draw_align_c("RETRO TUNER", 0, 96, 20.0f, UI_CREAM,
@@ -173,19 +176,37 @@ static uint32_t tuning_static_next(uint32_t *seed) {
     return *seed;
 }
 
+static uint32_t tint_static(uint32_t dark, uint32_t light, unsigned int mix) {
+    uint32_t result = 0xFF000000u;
+    for (unsigned int shift = 0; shift < 24u; shift += 8u) {
+        unsigned int a = (dark >> shift) & 255u;
+        unsigned int b = (light >> shift) & 255u;
+        result |= ((a * (255u - mix) + b * mix) / 255u) << shift;
+    }
+    return result;
+}
+
 static void draw_static_aperture(Draw_image_data *pixel, uint64_t now,
                                  float top, float height) {
-    static const uint32_t snow[] = {
+    uint32_t snow[] = {
         0xFF202020u, 0xFF303030u, 0xFF484848u, 0xFF606060u,
         0xFF787878u
     };
+    const MiniIptvTheme *theme = miniiptv_theme_active();
+    bool classic = miniiptv_theme_current() == MINIIPTV_THEME_CLASSIC;
     uint32_t seed = (uint32_t)(now / 170u) ^ 0x52543344u;
     size_t i;
 
+    if (!classic) {
+        for (i = 0; i < sizeof(snow) / sizeof(snow[0]); i++)
+            snow[i] = tint_static(theme->shadow, theme->muted,
+                                  25u + (unsigned int)i * 24u);
+    }
     if (height < 1.0f) height = 1.0f;
     if (top < 0.0f) top = 0.0f;
     if (top + height > 240.0f) height = 240.0f - top;
-    Draw_texture(pixel, 0xFF181818u, 0, top, 400, height);
+    Draw_texture(pixel, classic ? 0xFF181818u : theme->shadow,
+                 0, top, 400, height);
     for (i = 0; i < 64; i++) {
         uint32_t value = tuning_static_next(&seed);
         float x = (float)(value % 400u);
@@ -201,7 +222,8 @@ static void draw_static_aperture(Draw_image_data *pixel, uint64_t now,
                      x, y, width, noise_height);
     }
     for (i = (size_t)top; i < (size_t)(top + height); i += 10u)
-        Draw_texture(pixel, (i & 1u) ? 0xFF262626u : 0xFF141414u,
+        Draw_texture(pixel, classic ? ((i & 1u) ? 0xFF262626u : 0xFF141414u)
+                                   : theme->background,
                      0, (float)i, 400, 1);
 }
 
@@ -697,14 +719,18 @@ static void live_drawer_draw(uint32_t color, uint32_t back_color) {
         snprintf(line, sizeof(line), "%c %02lu  %.34s",
                  marker, (unsigned long)(i + 1u), names[i]);
         Draw_c(line, 17, y + 2, 11.5f,
-               i == selected ? UI_INK :
+               i == selected ? miniiptv_theme_active()->selection_text :
                    (i == active ? UI_CYAN : UI_CREAM));
     }
 
     Draw_texture(&pixel, UI_ORANGE, 10, 196, 300, 1);
-    Draw_align_c("A TUNE   B CLOSE   LEFT/RIGHT PAGE", 8, 204, 9.5f,
+    Draw_align_c("A TUNE   B CLOSE   X THEME", 8, 200, 9.5f,
                  UI_CREAM, DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER,
-                 304, 15);
+                 304, 12);
+    Draw_align_c("LEFT / RIGHT: PAGE", 8, 213, 9.0f,
+                 UI_MINT, DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER,
+                 304, 12);
+    MiniIptv_theme_ui_draw_trim(320, 226);
 }
 
 static bool begin_player_handoff(void) {
@@ -1505,7 +1531,7 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
         else
             Draw_texture(&pixel, UI_INK, 0, 15, 400, 225);
 
-        Draw_texture(&pixel, 0xE0241A14u, 0, 15, 400, 31);
+        Draw_texture(&pixel, UI_OVERLAY, 0, 15, 400, 31);
         Draw_texture(&pixel, UI_CYAN, 12, 43, 376, 2);
         Draw_c("RETRO TUNER", 12, 23, 11.0f, UI_CREAM);
         Draw_align_c(scan_running ? "SCANNING" :
@@ -1521,7 +1547,7 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
                 ? 288.0f * (float)(scan_current_index + 1u) /
                     (float)source_count : 0.0f;
             if (scan_width > 288.0f) scan_width = 288.0f;
-            Draw_texture(&pixel, 0xD0121110u, 34, 72, 332, 113);
+            Draw_texture(&pixel, UI_OVERLAY, 34, 72, 332, 113);
             Draw_align_c("AUTO TUNING", 0, 80, 13.0f, UI_CREAM,
                          DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 400, 18);
             snprintf(line, sizeof(line), "%02lu / %02lu   %.28s",
@@ -1544,7 +1570,7 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
             unsigned int progress_permille =
                 miniiptv_live_tune_progress_permille(&tune);
             float progress_width = 288.0f * (float)progress_permille / 1000.0f;
-            Draw_texture(&pixel, 0xD0121110u, 34, 70, 332, 118);
+            Draw_texture(&pixel, UI_OVERLAY, 34, 70, 332, 118);
             snprintf(line, sizeof(line), "TUNING  CH %02lu",
                      (unsigned long)(selected + 1u));
             Draw_align_c(line, 0, 78, 14.0f, UI_CREAM,
@@ -1568,7 +1594,7 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
             Draw_set_refresh_needed(true);
         } else if (state == LIVE_APP_ERROR) {
             draw_tuning_static(&pixel, osGetTime());
-            Draw_texture(&pixel, 0xE0121110u, 45, 78, 310, 91);
+            Draw_texture(&pixel, UI_OVERLAY, 45, 78, 310, 91);
             Draw_align_c("NO SIGNAL", 0, 92, 18.0f,
                          UI_PINK, DRAW_X_ALIGN_CENTER,
                          DRAW_Y_ALIGN_CENTER, 400, 20);
@@ -1636,6 +1662,8 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
              (unsigned long)page_number, (unsigned long)page_count);
     Draw_align_c(line, 216, 20, 9.5f, UI_MINT,
                  DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 92, 15);
+    Draw_align_c("X THEME", 216, 34, 9.5f, UI_CYAN,
+                 DRAW_X_ALIGN_RIGHT, DRAW_Y_ALIGN_CENTER, 92, 12);
     if (count) {
         snprintf(line, sizeof(line), "%lu FOUND", (unsigned long)count);
         Draw_c(line, 14, 35, 8.5f, UI_MINT);
@@ -1684,6 +1712,7 @@ static void live_draw(bool top_screen, uint32_t color, uint32_t back_color) {
         snprintf(line, sizeof(line), "START EXIT");
     Draw_align_c(line, 8, 211, 9.5f, UI_CREAM,
                  DRAW_X_ALIGN_CENTER, DRAW_Y_ALIGN_CENTER, 304, 12);
+    MiniIptv_theme_ui_draw_trim(320, 226);
 }
 
 void MiniIptv_live_app_init(void) {
