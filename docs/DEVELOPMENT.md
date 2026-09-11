@@ -20,6 +20,13 @@ Useful commands:
 The recommended C/C++ extension is optional. It helps with navigation, but the
 devkitARM compiler is still the source of truth.
 
+Normal builds link the checked-in libraries. The local toolchain is devkitARM
+`r68-1` (GCC 16.1.0); changing it or a library is a separate dependency update,
+not routine cleanup. The [FFmpeg rebuild notes](../library/ffmpeg_build.md)
+describe the smaller configuration used here and its reproducibility limits.
+CI currently uses `devkitpro/devkitarm:latest`, so its toolchain can drift from
+the local one; record the actual compiler version when comparing build results.
+
 ## A normal change
 
 Start from the latest tested `main`:

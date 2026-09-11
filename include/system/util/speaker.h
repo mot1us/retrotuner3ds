@@ -28,8 +28,8 @@ uint32_t Util_speaker_set_audio_info(uint8_t play_ch, uint8_t music_ch, uint32_t
  * @brief Add audio buffer.
  * @param play_ch (in) Internal speaker ch (0 ~ 23).
  * @param buffer (in) Pointer for raw audio data (PCM_S16LE).
- * @param size (in) Audio data size in bytes.
- * @return On success DEF_SUCCESS, on failure DEF_ERR_*.
+ * @param size (in) Audio data size in bytes, a multiple of 2 * music_ch.
+ * @return On success DEF_SUCCESS, on failure DEF_ERR_* or Nintendo API's error.
  * @warning Thread dangerous (untested).
 */
 uint32_t Util_speaker_add_buffer(uint8_t play_ch, const uint8_t* buffer, uint32_t size);

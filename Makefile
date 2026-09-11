@@ -246,7 +246,8 @@ endif
 
 #---------------------------------------------------------------------------------
 
-all: 3dsx cia_all
+# The supported application is a 3DSX. Keep inherited CIA packaging opt-in.
+all: 3dsx
 
 3dsx: $(BUILD) $(GFXBUILD) $(DEPSDIR) $(ROMFS_T3XFILES) $(T3XHFILES)
 	@echo Building 3dsx...
@@ -261,12 +262,12 @@ cia_banner: $(BANNER_IMAGE) $(BANNER_AUDIO) | $(BUILD)
 cia_icon: $(APP_ICON) | $(BUILD)
 	@$(BANNERTOOL) makesmdh -s "$(APP_TITLE)" -l "$(APP_DESCRIPTION)" -p $(APP_AUTHOR) -i $(APP_ICON) -o $(BUILD)/icon.icn
 
-cia_normal_ram: cia_banner cia_icon
+cia_normal_ram: 3dsx cia_banner cia_icon
 	@echo Building cia...
 	@$(MAKEROM) -f cia -o $(OUTPUT).cia -target t -exefslogo $(MAKEROM_ARGS) -ver $(APP_VER)
 	@echo
 
-cia_high_ram: cia_banner cia_icon
+cia_high_ram: 3dsx cia_banner cia_icon
 	@echo Building high ram cia...
 	@$(MAKEROM) -f cia -o $(OUTPUT)_high_ram.cia -target t -exefslogo $(MAKEROM_HIGH_RAM_ARGS) -ver $(APP_VER)
 	@echo

@@ -11,7 +11,6 @@
 
 #include "system/util/err_types.h"
 #include "system/util/log.h"
-#include "system/util/util.h"
 
 //Defines.
 #define NUM_OF_CH		(uint8_t)(24)
@@ -85,7 +84,8 @@ uint32_t Util_speaker_set_audio_info(uint8_t play_ch, uint8_t music_ch, uint32_t
 	ndspChnSetRate(play_ch, sample_rate);
 	for(uint32_t i = 0; i < DEF_SPEAKER_MAX_BUFFERS; i++)
 	{
-		free(util_ndsp_buffer[play_ch][i].data_vaddr);
+		if(util_ndsp_buffer[play_ch][i].data_vaddr)
+			free(util_ndsp_buffer[play_ch][i].data_vaddr);
 		util_ndsp_buffer[play_ch][i].data_vaddr = NULL;
 	}
 	memset(util_ndsp_buffer[play_ch], 0, sizeof(util_ndsp_buffer[play_ch]));
@@ -102,6 +102,7 @@ uint32_t Util_speaker_set_audio_info(uint8_t play_ch, uint8_t music_ch, uint32_t
 uint32_t Util_speaker_add_buffer(uint8_t play_ch, const uint8_t* buffer, uint32_t size)
 {
 	uint32_t free_queue = UINT32_MAX;
+	uint32_t result = DEF_SUCCESS;
 
 	if(!util_speaker_init)
 		goto not_inited;
@@ -112,13 +113,19 @@ uint32_t Util_speaker_add_buffer(uint8_t play_ch, const uint8_t* buffer, uint32_
 	if(util_speaker_music_ch[play_ch] != 1 && util_speaker_music_ch[play_ch] != 2)
 		goto not_inited;
 
+	//Each sample frame must contain one complete PCM16 sample per channel.
+	if(size % (2 * util_speaker_music_ch[play_ch]) != 0)
+		goto invalid_arg;
+
 	//Search for free queue.
 	for(uint32_t i = 0; i < DEF_SPEAKER_MAX_BUFFERS; i++)
 	{
 		if(util_ndsp_buffer[play_ch][i].status == NDSP_WBUF_FREE || util_ndsp_buffer[play_ch][i].status == NDSP_WBUF_DONE)
 		{
-			//Free unused data if exist.
-			free(util_ndsp_buffer[play_ch][i].data_vaddr);
+			//The wrapped allocator takes a lock even for free(NULL). Most
+			//of the 512 slots are empty, so only release actual allocations.
+			if(util_ndsp_buffer[play_ch][i].data_vaddr)
+				free(util_ndsp_buffer[play_ch][i].data_vaddr);
 			util_ndsp_buffer[play_ch][i].data_vaddr = NULL;
 
 			if(free_queue == UINT32_MAX)
@@ -137,6 +144,17 @@ uint32_t Util_speaker_add_buffer(uint8_t play_ch, const uint8_t* buffer, uint32_
 		goto out_of_linear_memory;
 
 	memcpy(util_ndsp_buffer[play_ch][free_queue].data_vaddr, buffer, size);
+
+	//NDSP reads physical memory, not the CPU's cached copy. Publish the PCM
+	//before giving the DSP ownership, and never queue it if publication fails.
+	result = (uint32_t)DSP_FlushDataCache(util_ndsp_buffer[play_ch][free_queue].data_vaddr, size);
+	if(result != DEF_SUCCESS)
+	{
+		free(util_ndsp_buffer[play_ch][free_queue].data_vaddr);
+		memset(&util_ndsp_buffer[play_ch][free_queue], 0, sizeof(util_ndsp_buffer[play_ch][free_queue]));
+		DEF_LOG_RESULT(DSP_FlushDataCache, false, result);
+		return result;
+	}
 
 	util_ndsp_buffer[play_ch][free_queue].nsamples = size / (2 * util_speaker_music_ch[play_ch]);
 	ndspChnWaveBufAdd(play_ch, &util_ndsp_buffer[play_ch][free_queue]);
@@ -192,7 +210,14 @@ uint32_t Util_speaker_get_available_buffer_size(uint8_t play_ch)
 		if(util_ndsp_buffer[play_ch][i].status == NDSP_WBUF_QUEUED)
 			buffer_size += util_ndsp_buffer[play_ch][i].nsamples * 2 * util_speaker_music_ch[play_ch];
 		else if(util_ndsp_buffer[play_ch][i].status == NDSP_WBUF_PLAYING)
-			buffer_size += (util_ndsp_buffer[play_ch][i].nsamples - ndspChnGetSamplePos(play_ch)) * 2 * util_speaker_music_ch[play_ch];
+		{
+			//The DSP can advance to the next buffer between the status and
+			//position reads. Do not let that race wrap the unsigned reserve.
+			uint32_t sample_pos = ndspChnGetSamplePos(play_ch);
+			uint32_t samples = util_ndsp_buffer[play_ch][i].nsamples;
+			if(sample_pos < samples)
+				buffer_size += (samples - sample_pos) * 2 * util_speaker_music_ch[play_ch];
+		}
 	}
 
 	return buffer_size;
@@ -208,7 +233,8 @@ void Util_speaker_clear_buffer(uint8_t play_ch)
 	ndspChnWaveBufClear(play_ch);
 	for(uint32_t i = 0; i < DEF_SPEAKER_MAX_BUFFERS; i++)
 	{
-		free(util_ndsp_buffer[play_ch][i].data_vaddr);
+		if(util_ndsp_buffer[play_ch][i].data_vaddr)
+			free(util_ndsp_buffer[play_ch][i].data_vaddr);
 		util_ndsp_buffer[play_ch][i].data_vaddr = NULL;
 	}
 }

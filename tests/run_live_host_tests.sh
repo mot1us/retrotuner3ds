@@ -29,7 +29,7 @@ compile_and_run() {
   shift
   "$host_cc" -std="$host_c_standard" -Wall -Wextra -Werror -pedantic \
     -fsanitize=address,undefined -fno-sanitize-recover=all \
-    -fno-omit-frame-pointer -Iinclude "$@" -o "$test_bin_dir/$test_name"
+    -fno-omit-frame-pointer "$@" -Iinclude -o "$test_bin_dir/$test_name"
   "$test_bin_dir/$test_name"
 }
 
@@ -57,3 +57,6 @@ compile_and_run test_buffer_shadow \
 
 compile_and_run test_telemetry_log \
   source/miniiptv/telemetry_log.c tests/test_telemetry_log.c
+
+compile_and_run test_speaker -Itests/speaker_stubs \
+  source/system/util/speaker.c tests/test_speaker.c

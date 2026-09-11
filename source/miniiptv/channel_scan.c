@@ -3,20 +3,9 @@
 #include <stdio.h>
 #include <string.h>
 
-#define SCAN_MAX_WIDTH 640u
-#define SCAN_MAX_HEIGHT 480u
-#define SCAN_MAX_FRAME_RATE_MILLIHZ 30500u
-
 static void copy_text(char *output, size_t output_size, const char *input) {
     if (!output || output_size == 0) return;
     snprintf(output, output_size, "%s", input ? input : "");
-}
-
-static int metadata_is_heavy(const MiniIptvScanResult *result) {
-    return (result->width && result->width > SCAN_MAX_WIDTH) ||
-           (result->height && result->height > SCAN_MAX_HEIGHT) ||
-           (result->frame_rate_millihz &&
-            result->frame_rate_millihz > SCAN_MAX_FRAME_RATE_MILLIHZ);
 }
 
 int miniiptv_channel_scan_classify_root(const char *manifest,
@@ -39,7 +28,8 @@ int miniiptv_channel_scan_classify_root(const char *manifest,
     result->has_separate_audio = selection.has_separate_audio;
     copy_text(result->codecs, sizeof(result->codecs), selection.codecs);
     copy_text(result->media_url, sizeof(result->media_url), selection.url);
-    if (metadata_is_heavy(result)) {
+    if (hls_video_metadata_is_heavy(result->width, result->height,
+                                   result->frame_rate_millihz)) {
         result->status = MINIIPTV_SCAN_HEAVY;
         return 0;
     }

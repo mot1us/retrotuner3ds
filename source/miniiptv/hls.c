@@ -268,6 +268,11 @@ static int codecs_are_compatible(const char *codecs) {
     return has_video;
 }
 
+int hls_video_metadata_is_heavy(unsigned int width, unsigned int height,
+                                 unsigned int frame_rate_millihz) {
+    return width > 640u || height > 480u || frame_rate_millihz > 30500u;
+}
+
 static int key_method_is_none(const char *line) {
     const char *method = find_attribute(line, "METHOD=");
     if (!method || strncmp(method, "NONE", 4) != 0) return 0;
@@ -298,6 +303,7 @@ int hls_select_stream(const char *manifest, const char *manifest_url, HlsSelecti
     } audio_renditions[8];
     size_t audio_rendition_count = 0;
     int selected_variant = 0;
+    int selected_heavy = 0;
     int expecting_uri = 0;
     int saw_hls_header = 0;
     int saw_media_segment = 0;
@@ -356,8 +362,12 @@ int hls_select_stream(const char *manifest, const char *manifest_url, HlsSelecti
         } else if (strncmp(line, "#EXTINF:", 8) == 0) {
             saw_media_segment = 1;
         } else if (*line && *line != '#' && expecting_uri) {
+            int pending_heavy = hls_video_metadata_is_heavy(
+                pending_width, pending_height, pending_frame_rate_millihz);
             if (codecs_are_compatible(pending_codecs) &&
-                (!selected_variant || pending_bandwidth < lowest_bandwidth)) {
+                (!selected_variant || pending_heavy < selected_heavy ||
+                 (pending_heavy == selected_heavy &&
+                  pending_bandwidth < lowest_bandwidth))) {
                 if (hls_resolve_url(manifest_url, line, selection->url, sizeof(selection->url)) == 0) {
                     lowest_bandwidth = pending_bandwidth;
                     selection->width = pending_width;
@@ -369,6 +379,7 @@ int hls_select_stream(const char *manifest, const char *manifest_url, HlsSelecti
                         sizeof(selection->audio_group), pending_audio_group,
                         strlen(pending_audio_group));
                     selected_variant = 1;
+                    selected_heavy = pending_heavy;
                 }
             }
             expecting_uri = 0;

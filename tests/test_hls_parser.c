@@ -54,6 +54,100 @@ static void test_incompatible_low_variant_is_skipped(void) {
     assert(strcmp(selection.url, "https://example.test/safe/h264.m3u8") == 0);
 }
 
+static void test_heavy_variant_never_displaces_compatible_variant(void) {
+    static const char *heavy_metadata[] = {
+        "RESOLUTION=1280x720,FRAME-RATE=30",
+        "RESOLUTION=641x360,FRAME-RATE=30",
+        "RESOLUTION=480x481,FRAME-RATE=30",
+        "RESOLUTION=640x480,FRAME-RATE=30.501"
+    };
+    char heavy_variant[256];
+    char manifest[768];
+    static const char safe_variant[] =
+        "#EXT-X-STREAM-INF:BANDWIDTH=500000,RESOLUTION=640x480,"
+        "FRAME-RATE=30.500,CODECS=\"avc1.4d401e,mp4a.40.2\"\n"
+        "safe.m3u8\n";
+    HlsSelection selection;
+
+    for (size_t i = 0; i < sizeof(heavy_metadata) / sizeof(heavy_metadata[0]); i++) {
+        snprintf(heavy_variant, sizeof(heavy_variant),
+            "#EXT-X-STREAM-INF:BANDWIDTH=400000,%s,"
+            "CODECS=\"avc1.4d401e,mp4a.40.2\"\nheavy.m3u8\n",
+            heavy_metadata[i]);
+        /* Both orders matter: a later low-bitrate HD entry must not undo a
+         * compatible selection, and a later SD entry must replace HD. */
+        for (int heavy_first = 0; heavy_first < 2; heavy_first++) {
+            snprintf(manifest, sizeof(manifest), "#EXTM3U\n%s%s",
+                heavy_first ? heavy_variant : safe_variant,
+                heavy_first ? safe_variant : heavy_variant);
+            assert(hls_select_stream(manifest,
+                "https://example.test/master.m3u8", &selection) == 0);
+            assert(selection.bandwidth == 500000u);
+            assert(selection.width == 640u && selection.height == 480u);
+            assert(selection.frame_rate_millihz == 30500u);
+            assert(strcmp(selection.url, "https://example.test/safe.m3u8") == 0);
+        }
+    }
+}
+
+static void test_all_heavy_variants_keep_lowest_for_caller_rejection(void) {
+    static const char manifest[] =
+        "#EXTM3U\n"
+        "#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=1920x1080,"
+        "CODECS=\"avc1.4d4028,mp4a.40.2\"\nhigh.m3u8\n"
+        "#EXT-X-STREAM-INF:BANDWIDTH=400000,RESOLUTION=1280x720,"
+        "CODECS=\"avc1.4d401f,mp4a.40.2\"\nheavy.m3u8\n";
+    HlsSelection selection;
+
+    assert(hls_select_stream(manifest, "https://example.test/master.m3u8",
+                             &selection) == 0);
+    assert(selection.width == 1280u && selection.height == 720u);
+    assert(selection.bandwidth == 400000u);
+}
+
+static void test_missing_metadata_remains_an_unverified_candidate(void) {
+    static const char *unknown_metadata[] = {
+        "BANDWIDTH=500000",
+        "BANDWIDTH=500000,CODECS=\"avc1.4d401e,mp4a.40.2\"",
+        "BANDWIDTH=500000,RESOLUTION=640x360",
+        ("BANDWIDTH=500000,RESOLUTION=640x360,"
+         "CODECS=\"avc1.4d401e,mp4a.40.2\""),
+        "RESOLUTION=640x360,CODECS=\"avc1.4d401e,mp4a.40.2\""
+    };
+    char manifest[768];
+    HlsSelection selection;
+
+    for (size_t i = 0; i < sizeof(unknown_metadata) / sizeof(unknown_metadata[0]); i++) {
+        snprintf(manifest, sizeof(manifest),
+            "#EXTM3U\n"
+            "#EXT-X-STREAM-INF:BANDWIDTH=400000,RESOLUTION=1280x720,"
+            "CODECS=\"avc1.4d401f,mp4a.40.2\"\nheavy.m3u8\n"
+            "#EXT-X-STREAM-INF:%s\nunknown.m3u8\n", unknown_metadata[i]);
+        assert(hls_select_stream(manifest, "https://example.test/master.m3u8",
+                                 &selection) == 0);
+        assert(strcmp(selection.url, "https://example.test/unknown.m3u8") == 0);
+        assert(selection.frame_rate_millihz == 0u);
+        if (i == 0u) {
+            assert(selection.width == 0u && selection.height == 0u);
+            assert(selection.codecs[0] == '\0');
+        }
+        if (i == 4u) assert(selection.bandwidth == 0u);
+    }
+}
+
+static void test_metadata_filter_does_not_admit_unsupported_codecs(void) {
+    static const char manifest[] =
+        "#EXTM3U\n"
+        "#EXT-X-STREAM-INF:BANDWIDTH=100000,RESOLUTION=480x270,"
+        "CODECS=\"hvc1.1.6.L90,mp4a.40.2\"\nhevc.m3u8\n"
+        "#EXT-X-STREAM-INF:BANDWIDTH=200000,RESOLUTION=480x270,"
+        "CODECS=\"avc1.4d401e,ec-3\"\ndolby.m3u8\n";
+    HlsSelection selection;
+
+    assert(hls_select_stream(manifest, "https://example.test/master.m3u8",
+                             &selection) == -5);
+}
+
 static void test_separate_audio_rendition_is_resolved(void) {
     static const char manifest[] =
         "#EXTM3U\n"
@@ -193,6 +287,10 @@ static void test_url_resolution(void) {
 int main(void) {
     test_peak_bandwidth_is_not_average_bandwidth();
     test_incompatible_low_variant_is_skipped();
+    test_heavy_variant_never_displaces_compatible_variant();
+    test_all_heavy_variants_keep_lowest_for_caller_rejection();
+    test_missing_metadata_remains_an_unverified_candidate();
+    test_metadata_filter_does_not_admit_unsupported_codecs();
     test_frame_rate_is_parsed();
     test_separate_audio_rendition_is_resolved();
     test_media_playlist_flags_and_window();

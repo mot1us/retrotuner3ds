@@ -11,8 +11,9 @@ for the console.
 ## What works best
 
 The sweet spot is H.264 video with AAC audio at 360p and roughly 1 Mbps or
-less. Some 480p streams work too. The app selects the lowest rendition a
-channel offers, but it does not transcode HD streams.
+less. Some 480p streams work too. The app prefers the lowest-bitrate rendition
+whose advertised format fits the limits below. Missing details still need
+checking when you tune. It does not transcode HD streams.
 
 RetroTuner3DS currently supports:
 
@@ -106,8 +107,8 @@ for playback.
 Install the devkitPro 3DS toolchain, then run:
 
 ```sh
-make 3dsx -j4
 ./tests/run_live_host_tests.sh
+make 3dsx -j4
 ```
 
 More setup and release notes are in the [development guide](docs/DEVELOPMENT.md).

@@ -45,6 +45,12 @@ typedef struct {
     int uses_init_map;
 } HlsMediaPlaylist;
 
+/* Advisory only: missing metadata is not known-heavy and must still be
+ * validated from the media before decoder initialization. */
+int hls_video_metadata_is_heavy(unsigned int width, unsigned int height,
+                                 unsigned int frame_rate_millihz);
+/* Prefer the lowest-bandwidth codec-compatible variant not known-heavy.
+ * If all compatible variants are heavy, retain the lowest for caller diagnostics. */
 int hls_select_stream(const char *manifest, const char *manifest_url, HlsSelection *selection);
 int hls_resolve_url(const char *base_url, const char *reference, char *output, size_t output_size);
 int hls_parse_media_playlist(const char *manifest, const char *manifest_url, HlsMediaPlaylist *playlist);

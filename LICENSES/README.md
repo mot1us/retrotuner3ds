@@ -13,7 +13,7 @@ retrieved from the exact source revisions used by the repository.
 | x264 | libx264.a and headers | [c24e06c2e184345ceb33eb20a15d1024d9fd3497](https://github.com/Core-2-Extreme/x264_for_3DS/commit/c24e06c2e184345ceb33eb20a15d1024d9fd3497) | GPL-2.0; [x264.txt](x264.txt) |
 | LAME | libmp3lame.a and headers | [f416c19b3140a8610507ebb60ac7cd06e94472b8](https://github.com/Core-2-Extreme/libmp3lame_for_3DS/commit/f416c19b3140a8610507ebb60ac7cd06e94472b8) | LGPL-2.0; [libmp3lame.txt](libmp3lame.txt) |
 | dav1d | libdav1d.a and headers | [c40d9602629d39ae63bedd50c31fd926fa5eb51e](https://github.com/Core-2-Extreme/dav1d_for_3DS/commit/c40d9602629d39ae63bedd50c31fd926fa5eb51e) | BSD-2-Clause; [dav1d.txt](dav1d.txt) |
-| FFmpeg | libavcodec, libavformat, libavutil, libswresample, and libswscale archives and headers | [dab24a843203b2b191f40e39907fb146f688ec5c](https://github.com/Core-2-Extreme/FFmpeg_for_3DS/commit/dab24a843203b2b191f40e39907fb146f688ec5c) | GPLv3 build; [FFmpeg-GPLv3.txt](FFmpeg-GPLv3.txt) |
+| FFmpeg | libavcodec, libavformat, libavutil, libswresample, and libswscale archives and headers | [dab24a843203b2b191f40e39907fb146f688ec5c](https://github.com/Core-2-Extreme/FFmpeg_for_3DS/commit/dab24a843203b2b191f40e39907fb146f688ec5c), consistent with bundled version metadata | Archives report LGPL-2.1-or-later; retained source-tree GPLv3 text: [FFmpeg-GPLv3.txt](FFmpeg-GPLv3.txt); see [build notes](../library/ffmpeg_build.md) |
 | zlib | libz.a and headers | [da607da739fa6047df13e66a2af6b8bec7c2a498](https://github.com/Core-2-Extreme/zlib_for_3DS/commit/da607da739fa6047df13e66a2af6b8bec7c2a498) | zlib; [zlib.txt](zlib.txt) |
 | Mbed TLS | Mbed TLS archives and headers | [ecf77d19bfc2b2630cccabb033ab7227ff6b0beb](https://github.com/Core-2-Extreme/mbedtls_for_3DS/commit/ecf77d19bfc2b2630cccabb033ab7227ff6b0beb) | Apache-2.0 OR GPL-2.0-or-later; [Mbed-TLS.txt](Mbed-TLS.txt), [Apache-2.0.txt](Apache-2.0.txt), and [x264.txt](x264.txt) for the GPLv2 text |
 | TF-PSA-Crypto | libtfpsacrypto.a and headers | [961565a777395a8098342ab1e92ced8fb3ab5681](https://github.com/Core-2-Extreme/TF-PSA-Crypto_for_3ds/commit/961565a777395a8098342ab1e92ced8fb3ab5681) | Apache-2.0 OR GPL-2.0-or-later; [TF-PSA-Crypto.txt](TF-PSA-Crypto.txt) and [Apache-2.0.txt](Apache-2.0.txt) |
@@ -35,6 +35,12 @@ embedded in individual source and header files remain in effect.
 This inventory documents the repository as audited on August 22, 2026. When a
 vendored component is upgraded, update its pinned revision and corresponding
 license material in the same change.
+
+The FFmpeg row was corrected on September 11, 2026 after checking its embedded
+configuration and license strings. That metadata supports the recorded source
+revision and minimal configuration, but does not establish byte-identical
+source provenance or rule out unrecorded patches. No dependency binaries or
+license texts were replaced, and the application's GPL license is unchanged.
 
 The pinned links above identify the audited revisions; they are not themselves
 a source bundle or a substitute for any license-required source distribution.

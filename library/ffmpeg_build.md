@@ -1,41 +1,92 @@
-# Build a ffmpeg library for 3DS
+# Rebuilding FFmpeg for RetroTuner3DS
 
-It works on PureOS 11, it should also work on other GNU/Linux based machines. \
-As of this writing, we are using `devkitARM r68-1`.
+Normal app builds use the archives and headers already in `library/`. Rebuild
+FFmpeg only when changing the dependency, not for each app release.
 
-* **⚠️Install [devkitpro](_devkitpro_install.md) first.⚠️**
-* Note : This step is optional.
-	* You may need to do this when :
-		* You want to make a change to the library or
-		* You want to change build config such as optimization and debug flag or
-		* You want to use different revision of `devkitARM` as stated above
+RetroTuner3DS uses [Core-2-Extreme's FFmpeg for 3DS](https://github.com/Core-2-Extreme/FFmpeg_for_3DS),
+with a smaller configuration than the upstream video player:
 
-## All-in-one command
-If you've done it before or experienced user, then just use this all-in-one command (and make an adjustment if needed such as -j value). \
-If you want to know in detail, continue to the next section for step-by-step instructions.
-```
-git clone -b 3ds https://github.com/Core-2-Extreme/FFmpeg_for_3DS && cd FFmpeg_for_3DS && git reset --hard dab24a843203b2b191f40e39907fb146f688ec5c && ./configure --enable-cross-compile --cross-prefix=/opt/devkitpro/devkitARM/bin/arm-none-eabi- --prefix=/opt/devkitpro/extra_lib --cpu=armv6k --arch=arm --target-os=linux --extra-cflags="-mfloat-abi=hard -mtune=mpcore -mtp=cp15 -Wno-error=incompatible-pointer-types -I/opt/devkitpro/extra_lib/include" --extra-ldflags="-mfloat-abi=hard -L/opt/devkitpro/extra_lib/lib -specs=3dsx.specs" --extra-libs="-lctru" --enable-optimizations --disable-filters --disable-devices --disable-bsfs --disable-parsers --disable-hwaccels --disable-debug --disable-stripping --disable-programs --disable-avdevice --disable-avfilter --disable-decoders --disable-demuxers --disable-encoders --disable-muxers --disable-asm --disable-protocols --disable-txtpages --disable-podpages --disable-manpages --disable-htmlpages --disable-doc --enable-inline-asm --enable-vfp --enable-armv5te --enable-armv6 --enable-decoder="aac,ac3,flac,h261,h262,h263,h264,hevc,jpeg,jpeg2000,libdav1d,theora,mjpeg,mp1,mp2,mp3,mpeg1video,mpeg2video,mpeg4,msmpeg4*,opus,*pcm*,pgssub,vorbis,vp9,vvc,webp,dvdsub,subrip,subviewer*,movtext,webvtt" --enable-demuxer="aac,ac3,avi,h261,h262,h263,h264,hevc,matroska,m4v,mjpeg,mjpeg_2000,mpegvideo,mpjpeg,mp3,mov,*pcm*,ogg,vp8,vp9,wav,srt,subviewer*,sup,vvc,webvtt" --enable-encoder="aac,ac3,libmp3lame,mp2,mpeg4,mjpeg,mpeg2video,libx264" --enable-muxer="mp4,mp3,mp2,ac3" --enable-protocol="file" --enable-libx264 --enable-libmp3lame --enable-libdav1d --enable-gpl --enable-pthreads && make -j 8 && sudo make install && cd ../ && echo Success.
+- AAC and H.264 decoders;
+- Matroska, MOV/MP4, and MPEG-TS demuxers;
+- the file protocol and pthread support;
+- no encoders, muxers, or x264/LAME/dav1d integration.
+
+HLS downloads are handled by our network code. FFmpeg consumes MPEG-TS through
+the app's custom input callback, so neither FFmpeg's HLS demuxer nor its HTTP
+protocol is required. MPEG-TS support must remain enabled.
+
+## Recorded build
+
+The pinned source is
+[`dab24a843203b2b191f40e39907fb146f688ec5c`](https://github.com/Core-2-Extreme/FFmpeg_for_3DS/commit/dab24a843203b2b191f40e39907fb146f688ec5c).
+The bundled `libavutil/ffversion.h` identifies `git-2026-07-10-dab24a8432`, and
+the archive configuration strings record the options below. Object compiler
+metadata reports devkitARM GCC 16.1.0. The locally installed devkitARM package
+is `r68-1`.
+
+This reconstructs the recorded source/configuration; it is not a verified
+byte-for-byte recipe. The original build environment and any unrecorded source
+patches are not captured by an archive's version string. A future dependency
+update should retain the source tree, patches, tool/package versions,
+`config.h`, and `ffbuild/config.log` with its corresponding-source archive.
+
+## Configure and build
+
+These commands expect devkitPro at `/opt/devkitpro`, including libctru headers
+and libraries. Use a new working directory; do not overwrite an existing
+FFmpeg checkout or the bundled libraries while experimenting.
+
+```sh
+git clone --branch 3ds --no-checkout \
+    https://github.com/Core-2-Extreme/FFmpeg_for_3DS.git FFmpeg_for_3DS-rebuild
+cd FFmpeg_for_3DS-rebuild
+git switch --detach dab24a843203b2b191f40e39907fb146f688ec5c
+
+ffmpeg_stage="$PWD/../ffmpeg-3ds-stage"
+./configure \
+    --enable-cross-compile \
+    --cross-prefix=/opt/devkitpro/devkitARM/bin/arm-none-eabi- \
+    --prefix="$ffmpeg_stage" \
+    --cpu=armv6k --arch=arm --target-os=linux \
+    --extra-cflags="-mfloat-abi=hard -mtune=mpcore -mtp=cp15 -Wno-error=incompatible-pointer-types -I/opt/devkitpro/libctru/include" \
+    --extra-ldflags="-mfloat-abi=hard -L/opt/devkitpro/libctru/lib -specs=3dsx.specs" \
+    --extra-libs=-lctru \
+    --enable-optimizations \
+    --disable-filters --disable-devices --disable-bsfs --disable-parsers \
+    --disable-hwaccels --disable-debug --disable-stripping --disable-programs \
+    --disable-avdevice --disable-avfilter --disable-decoders --disable-demuxers \
+    --disable-encoders --disable-muxers --disable-asm --disable-protocols \
+    --disable-txtpages --disable-podpages --disable-manpages --disable-htmlpages \
+    --disable-doc --enable-inline-asm --enable-vfp --enable-armv5te --enable-armv6 \
+    --enable-decoder=aac,h264 \
+    --enable-demuxer=matroska,mov,mpegts \
+    --enable-protocol=file --enable-pthreads
+make -j4
+make install
 ```
 
-## Clone and setup source code to specific version (commit)
-Used commit : `Fixed decoding time` (`dab24a843203b2b191f40e39907fb146f688ec5c`).
-```
-git clone -b 3ds https://github.com/Core-2-Extreme/FFmpeg_for_3DS && cd FFmpeg_for_3DS && git reset --hard dab24a843203b2b191f40e39907fb146f688ec5c
+The staging prefix replaces the original machine-specific output path; the
+other options match the configuration embedded in the checked-in archives.
+No system-wide install or `sudo` is needed.
+
+## Before replacing the bundled files
+
+Review the staged `libavcodec`, `libavformat`, `libavutil`, `libswresample`, and
+`libswscale` archives together with their matching header directories. Keep
+unrelated libraries untouched. Useful checks from the project root:
+
+```sh
+strings library/lib/libavcodec.a | rg -- '--enable-cross-compile|libavcodec license'
+strings library/lib/libavformat.a | rg -- '--enable-cross-compile|libavformat license'
+cat library/include/libavutil/ffversion.h
 ```
 
-## Configure
-```
-./configure --enable-cross-compile --cross-prefix=/opt/devkitpro/devkitARM/bin/arm-none-eabi- --prefix=/opt/devkitpro/extra_lib --cpu=armv6k --arch=arm --target-os=linux --extra-cflags="-mfloat-abi=hard -mtune=mpcore -mtp=cp15 -Wno-error=incompatible-pointer-types -I/opt/devkitpro/extra_lib/include" --extra-ldflags="-mfloat-abi=hard -L/opt/devkitpro/extra_lib/lib -specs=3dsx.specs" --extra-libs="-lctru" --enable-optimizations --disable-filters --disable-devices --disable-bsfs --disable-parsers --disable-hwaccels --disable-debug --disable-stripping --disable-programs --disable-avdevice --disable-avfilter --disable-decoders --disable-demuxers --disable-encoders --disable-muxers --disable-asm --disable-protocols --disable-txtpages --disable-podpages --disable-manpages --disable-htmlpages --disable-doc --enable-inline-asm --enable-vfp --enable-armv5te --enable-armv6 --enable-decoder="aac,ac3,flac,h261,h262,h263,h264,hevc,jpeg,jpeg2000,libdav1d,theora,mjpeg,mp1,mp2,mp3,mpeg1video,mpeg2video,mpeg4,msmpeg4*,opus,*pcm*,pgssub,vorbis,vp9,vvc,webp,dvdsub,subrip,subviewer*,movtext,webvtt" --enable-demuxer="aac,ac3,avi,h261,h262,h263,h264,hevc,matroska,m4v,mjpeg,mjpeg_2000,mpegvideo,mpjpeg,mp3,mov,*pcm*,ogg,vp8,vp9,wav,srt,subviewer*,sup,vvc,webvtt" --enable-encoder="aac,ac3,libmp3lame,mp2,mpeg4,mjpeg,mpeg2video,libx264" --enable-muxer="mp4,mp3,mp2,ac3" --enable-protocol="file" --enable-libx264 --enable-libmp3lame --enable-libdav1d --enable-gpl --enable-pthreads
-```
+After an intentional replacement, run the host tests, make a clean `.3dsx`
+build, and test the exact artifact on a New 3DS. A successful rebuild alone
+does not verify AAC timing, MVD playback, or channel switching. Record the
+dependency change and update [the source/license inventory](../LICENSES/README.md).
 
-## Build and install
-```
-make -j 8 && sudo make install
-```
-
-## Go to parent directory
-```
-cd ../
-```
-
-Then, continue to : [mbedtls](mbedtls_build.md)
+The bundled FFmpeg archives report `LGPL version 2.1 or later` and were built
+without `--enable-gpl`. This differs from the broader upstream build recipe
+previously stored here. The app remains GPL-3.0-or-later; retain the existing
+upstream notices and source license files when preparing a release.

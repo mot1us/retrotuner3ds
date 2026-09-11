@@ -3,7 +3,25 @@
 This is the useful summary of what changed. The individual release-candidate
 experiments and hardware-test fixes are still available in the Git history.
 
-## Unreleased
+## 0.5.1-rc9.29 - 2026-09-11 (hardware test build)
+
+- Reviewed Video player for 3DS v1.8.0. Its relevant decoder fixes were already
+  in our starting snapshot; no upstream merge or dependency upgrade was needed.
+- Flush copied PCM data before queuing it for the audio hardware. A failed
+  flush is returned as an error instead of submitting unflushed data.
+- Avoid allocator locks for empty audio slots and prevent audio-reserve
+  arithmetic from wrapping when the DSP advances between reads.
+- Prefer an HLS rendition within the existing resolution/frame-rate limits
+  before comparing bitrate. A cheap HD rendition no longer hides an SD option.
+- Add mocked audio-handoff tests and more rendition-selection regression tests.
+- Make plain `make` build the supported `.3dsx` only. Explicit CIA targets now
+  wait for their executable instead of racing it in parallel builds.
+- Correct the FFmpeg rebuild recipe to match our slim bundled configuration.
+
+Buffer sizes, startup policy, MVD safety checks, and UI are unchanged.
+See the [maintenance audit](docs/MAINTENANCE-rc9.29.md) for scope and testing.
+
+## Earlier 0.5.1 development
 
 ### Live TV
 
